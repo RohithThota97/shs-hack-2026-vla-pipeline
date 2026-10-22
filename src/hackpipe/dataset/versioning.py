@@ -16,6 +16,7 @@ from typing import Any
 from hackpipe.common.config import dataset_config, project_config, resolve
 from hackpipe.common.ids import fingerprint, next_version, now_iso
 from hackpipe.common.registry import Registry
+from hackpipe.ingest.importer import build_demo_records
 from hackpipe.quality.checks import VALID
 
 
@@ -78,9 +79,48 @@ def create_dataset_version(registry: Registry | None = None, cfg: dict[str, Any]
     if not demos:
         raise RuntimeError("No VALID demos. Run `hackpipe ingest` and `hackpipe qc` first.")
     sources = sorted({d["source"] for d in demos})
+    blocked_sources = sorted({d["source"] for d in reg.demos()
+                               if d.get("meta", {}).get("qc", {}).get("dataset_readiness", {}).get("status") == "BLOCKED"})
+    blocked_candidates = sorted(set(sources) & set(blocked_sources))
+    if blocked_candidates:
+        raise RuntimeError(f"Cannot create a dataset version from source(s) with blocking QC errors: {blocked_candidates}")
     if len(sources) > 1:
         raise RuntimeError(f"Demos from several sources {sources}; merge them into one dataset first "
                            "(lerobot-edit-dataset) or filter by source.")
+    source = sources[0]
+    candidates = [demo for demo in demos if demo["source"] == source]
+    accepted_qc_statuses = {VALID}
+    if cfg["quality"].get("accept_review_as_valid", False):
+        accepted_qc_statuses.add("REVIEW")
+    incomplete = []
+    for demo in candidates:
+        qc = demo.get("meta", {}).get("qc", {})
+        readiness = qc.get("dataset_readiness")
+        if (not qc.get("checked_at") or not qc.get("content_sha256") or
+                not isinstance(readiness, dict) or readiness.get("status") not in {"READY", "REVIEW"} or
+                not isinstance(qc.get("video_check_inconclusive"), bool) or
+                qc.get("video_check_inconclusive")):
+            incomplete.append(demo["episode_index"])
+    if incomplete:
+        raise RuntimeError(f"Cannot create a dataset version: missing or inconclusive QC evidence for episodes {incomplete[:10]}")
+    try:
+        current_records = build_demo_records(source)
+    except Exception as exc:
+        raise RuntimeError(f"Cannot verify QC freshness against source {source}: {type(exc).__name__}: {exc}") from exc
+    current = {record["episode_index"]: record for record in current_records}
+    stale = []
+    for demo in candidates:
+        qc = demo["meta"]["qc"]
+        record = current.get(demo["episode_index"])
+        current_hash = (record or {}).get("meta", {}).get("content_sha256")
+        if (qc.get("dataset_readiness", {}).get("status") == "BLOCKED" or
+                qc.get("status") not in accepted_qc_statuses or
+                record is None or record.get("status") == "FAILED" or
+                qc["content_sha256"] != demo["meta"].get("content_sha256") or
+                qc["content_sha256"] != current_hash):
+            stale.append(demo["episode_index"])
+    if stale:
+        raise RuntimeError(f"Cannot create a dataset version: QC is blocked, stale, or inconclusive for episodes {stale[:10]}")
     splits = split_demos(demos, cfg)
     leakage_guard(splits, cfg["splits"].get("group_key"))
 
