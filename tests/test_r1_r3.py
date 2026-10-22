@@ -212,7 +212,9 @@ def test_fingerprint_changes_with_video_files(workspace, test_configs):
     fp1 = create_dataset_version(reg)["fingerprint"]
     video = train_root / "videos" / "observation.images.front" / "chunk-000" / "file-000.mp4"
     video.write_bytes(video.read_bytes() + b"\0")             # images changed, state/action identical
-    ingest(train_root, reg)
+    ingest(train_root, reg)                                    # changed demos go back to "imported" …
+    assert {d["status"] for d in reg.demos()} == {"imported"}
+    run_qc(train_root, reg)                                    # … and must pass QC again
     assert create_dataset_version(reg)["fingerprint"] != fp1
 
 

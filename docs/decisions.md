@@ -4,6 +4,10 @@ Newest first. One line for the decision, one for the reason.
 
 | Date | Decision | Reason |
 |---|---|---|
+| 23 Oct | `hackpipe auto`: import → QC of new/changed demos only → next draft based on the latest approved version; a human approves | New demonstrations flow through without manual steps; nothing is checked twice; approval stays human |
+| 23 Oct | Duplicate = same episode index + content hash + file checksums as a demo from another folder | In LeRobot v3 episodes share files, and here all trajectories are identical, so content alone can't tell episodes apart |
+| 23 Oct | ds-vN+1 inherits the base's train/val assignment; only added demos are split; test stays frozen | Versions stay comparable and v1 demos are not re-validated or reshuffled |
+| 23 Oct | Multi-source versions are merged with `lerobot-edit-dataset` and the mapping is verified by content hash before training | The merge's episode ordering is a LeRobot internal; verifying beats assuming |
 | 23 Oct | Web console in Streamlit (`hackpipe console`), one spec per page in `docs/ui/`, built page by page (Data first) | Python only, already a dependency, fastest to build; specs reviewed before code |
 | 23 Oct | Look: Siemens Healthineers-like orange/grey palette, Inter font, no logo or Siemens wording | No official template files; avoid posing as an official product |
 | 23 Oct | Pipeline steps from the console run as background jobs (registry `jobs` table); expected time only from measured earlier runs | Survive page reloads; show CPU/GPU, machine and time without guessing |

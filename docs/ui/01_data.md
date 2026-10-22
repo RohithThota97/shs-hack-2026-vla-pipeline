@@ -69,3 +69,21 @@ Adding a new synthetic folder imports and QCs only its demos. Re-running the sam
 existing folder is flagged DUPLICATE. ds-v2 shows inherited vs added with the test set unchanged. Approve records
 the name. Expected times appear after the first run. The real data reproduces ds-v1 fingerprint
 `01a77eac94728a96`.
+
+## Running the Data page on the laptop against the shared registry
+The Colab notebook keeps the registry and outputs on Google Drive. To use the same ones from the laptop, install
+Google Drive for desktop, then start the console with the Drive paths:
+
+```bash
+export HACKPIPE_REGISTRY="$HOME/Google Drive/My Drive/shs-hack-2026/state/registry/registry.db"
+export HACKPIPE_OUTPUTS_DIR="$HOME/Google Drive/My Drive/shs-hack-2026/state/outputs"
+hackpipe console
+```
+
+Datasets must be at the same `data/raw/<name>` paths on both machines (demo IDs depend on them). Only one machine
+writes at a time (registry writer, shown top right).
+
+## Measured on the real data (laptop, 23 Oct)
+- First run on night84: 76 s (566,244 frames decoded). ds-v1 fingerprint `01a77eac94728a96`, 76 / 8 / 10.
+- Re-run on the same folder: 0.7 s, all 84 unchanged, no file rehashed, no new version.
+- A copy of lighting10 added as "new": 10 × DUPLICATE in 0.4 s, nothing checked, no new version.

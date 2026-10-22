@@ -9,7 +9,7 @@ from hackpipe.common.registry import Registry
 from hackpipe.console import theme
 from hackpipe.console.components.shell import header, jobs_rail
 
-PAGES = Path(__file__).parent / "pages"
+PAGES = Path(__file__).parent / "views"   # not "pages/": Streamlit would auto-discover that folder
 
 st.set_page_config(page_title="FR3 Duo · Demo-to-Deployment", layout="wide")
 theme.apply()

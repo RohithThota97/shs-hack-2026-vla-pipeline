@@ -135,48 +135,99 @@ def preprocessing_record(source: str, cfg: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+class NothingNewError(RuntimeError):
+    pass
+
+
+def _excluded_by_hand(d: dict[str, Any]) -> bool:
+    return bool(d["meta"].get("excluded"))
+
+
 def create_dataset_version(registry: Registry | None = None, cfg: dict[str, Any] | None = None,
-                           notes: str = "") -> dict[str, Any]:
+                           notes: str = "", base: str | None = None) -> dict[str, Any]:
+    """Create the next ds-vN (draft).
+
+    Without base: split all VALID demos (fixed seed). With base (an approved version): keep the base's train/val
+    assignment for demos that are still VALID, split only the added demos, keep the frozen test split, and
+    record inherited / added / removed. Demos excluded by hand (meta.excluded) and DUPLICATEs never enter."""
     reg = registry or Registry()
     cfg = cfg or dataset_config()
-    demos = reg.demos(status=VALID)
-    if not demos:
+    valid = [d for d in reg.demos(status=VALID) if not _excluded_by_hand(d)]
+    if not valid:
         raise RuntimeError("No VALID demos. Run `hackpipe ingest` and `hackpipe qc` first.")
     test_sources = sorted({source_key(resolve(p)) for p in (cfg["splits"].get("test_sources") or [])})
-    held_out = [d for d in demos if d["source"] in test_sources]
-    demos = [d for d in demos if d["source"] not in test_sources]
+    held_out = [d for d in valid if d["source"] in test_sources]
+    pool = [d for d in valid if d["source"] not in test_sources]
     missing = [t for t in test_sources if t not in {d["source"] for d in held_out}]
     if missing:
         raise RuntimeError(f"Held-out test sources have no VALID demos: {missing}. Ingest + QC them first.")
-    sources = sorted({d["source"] for d in demos})
-    if len(sources) != 1:
-        raise RuntimeError(f"Train/val must come from one source, found {sources or 'none'}; merge them first "
-                           "(lerobot-edit-dataset --operation.type merge) or list extra ones in splits.test_sources.")
-    splits = split_demos(demos, cfg, held_out)
+
+    lineage: dict[str, Any] = {"base": base}
+    if base:
+        bm = load_manifest(base, reg)
+        if bm["status"] != "approved":
+            raise RuntimeError(f"Base {base} is '{bm['status']}'; a new version builds on an approved one.")
+        by_id = {d["demo_id"]: d for d in valid}
+        base_ids = {k: set(bm["demo_ids"][k]) for k in ("train", "val", "test")}
+        in_base = base_ids["train"] | base_ids["val"] | base_ids["test"]
+        added = [d for d in pool if d["demo_id"] not in in_base]
+        removed = sorted(i for i in base_ids["train"] | base_ids["val"] if i not in by_id)
+        if not added and not removed:
+            raise NothingNewError(f"Nothing new since {base}: no added or removed demos, so no new version.")
+        new_cfg = {**cfg, "splits": {**cfg["splits"], "test": 0.0, "test_episodes": []}}
+        new = split_demos(added, new_cfg) if added else {"train": [], "val": [], "test": []}
+        splits = {
+            "train": [by_id[i] for i in sorted(base_ids["train"]) if i in by_id] + new["train"],
+            "val": [by_id[i] for i in sorted(base_ids["val"]) if i in by_id] + new["val"],
+            "test": held_out if test_sources else [by_id[i] for i in sorted(base_ids["test"]) if i in by_id],
+        }
+        lineage.update({"inherited": sorted((base_ids["train"] | base_ids["val"]) - set(removed)),
+                        "added": sorted(d["demo_id"] for d in added), "removed": removed,
+                        "added_split": {k: sorted(d["demo_id"] for d in new[k]) for k in ("train", "val")}})
+    else:
+        splits = split_demos(pool, cfg, held_out)
     leakage_guard(splits, cfg["splits"].get("group_key"), cfg["splits"].get("leakage_keys"))
     frozen = frozen_test_ids(reg)
     if cfg["splits"].get("freeze_test", True) and frozen and frozen[1] != sorted(d["demo_id"] for d in splits["test"]):
         raise LeakageError(f"The test split is frozen since {frozen[0]}; this version's test demos differ. "
                            "Keep the split config, or start a new test suite on purpose.")
 
-    preprocessing = preprocessing_record(sources[0], cfg)
-    fp = fingerprint([demo_fingerprint_item(d) for d in demos + held_out], preprocessing)
+    sources = sorted({d["source"] for d in splits["train"] + splits["val"]})
+    records = {s: preprocessing_record(s, cfg) for s in sources}
+    schemas = {s: {k: v for k, v in r["schema"].items() if k != "codebase_version"} for s, r in records.items()}
+    if len({json.dumps(v, sort_keys=True) for v in schemas.values()}) > 1:
+        raise RuntimeError(f"Sources have different schemas (fps / cameras / state / action): {sorted(schemas)}")
+    preprocessing = records[sources[0]]
+    if len(sources) > 1:            # single-source records stay as before, so fingerprints stay comparable
+        preprocessing["normalisation_stats"]["per_source"] = {s: r["normalisation_stats"]["sha256"]
+                                                              for s, r in records.items()}
+    used = splits["train"] + splits["val"] + splits["test"]
+    fp = fingerprint([demo_fingerprint_item(d) for d in used], preprocessing)
     version = next_version([d["version"] for d in reg.datasets()], "ds")
-    in_scope = {sources[0], *test_sources}
+    in_scope = {*sources, *test_sources}
     excluded = [{"demo_id": d["demo_id"], "source": d["source"], "episode_index": d["episode_index"],
-                 "status": d["status"],
-                 "reasons": d["meta"].get("qc", {}).get("hard", []) + d["meta"].get("qc", {}).get("soft", [])}
-                for d in reg.demos() if d["status"] != VALID and d["source"] in in_scope]
+                 "status": "EXCLUDED" if _excluded_by_hand(d) else d["status"],
+                 "reasons": ([f"excluded by {d['meta']['excluded'].get('by')}: {d['meta']['excluded'].get('reason')}"]
+                             if _excluded_by_hand(d) else
+                             [f"duplicate of {d['meta'].get('duplicate_of')}"] if d["status"] == "DUPLICATE" else
+                             d["meta"].get("qc", {}).get("hard", []) + d["meta"].get("qc", {}).get("soft", []))}
+                for d in reg.demos() if (d["status"] != VALID or _excluded_by_hand(d)) and d["source"] in in_scope]
     manifest = {
         "version": version,
         "fingerprint": fp,
         "created_at": now_iso(),
-        "source": sources[0],
+        "source": sources[0] if len(sources) == 1 else None,
+        "sources": sources,
         "test_sources": test_sources,
+        "needs_materialize": len(sources) > 1,
         "repo_id": project_config()["dataset"]["repo_id"],
         "revision": project_config()["dataset"].get("revision"),
+        # Episode indices per split: valid on `source` (train/val) and the test source; multi-source versions
+        # are trained from a merged folder (`hackpipe dataset materialize`).
         "splits": {k: sorted(d["episode_index"] for d in v) for k, v in splits.items()},
+        "episodes": {k: sorted([d["source"], d["episode_index"]] for d in v) for k, v in splits.items()},
         "demo_ids": {k: sorted(d["demo_id"] for d in v) for k, v in splits.items()},
+        "lineage": lineage,
         "excluded": excluded,
         "preprocessing": preprocessing,
         "notes": notes,
@@ -190,8 +241,26 @@ def create_dataset_version(registry: Registry | None = None, cfg: dict[str, Any]
     manifest_path.write_text(json.dumps(manifest, indent=2))
     (out_dir / "dataset_card.md").write_text(dataset_card(manifest, splits))
     reg.add_dataset(version, fp, str(manifest_path), {"counts": {k: len(v) for k, v in splits.items()},
-                                                      "card": str(out_dir / "dataset_card.md")})
+                                                      "card": str(out_dir / "dataset_card.md"), "base": base})
     return manifest
+
+
+def latest_approved(registry: Registry) -> str | None:
+    approved = [d["version"] for d in registry.datasets() if d["status"] == "approved"]
+    return max(approved, key=lambda v: int(v.split("-v", 1)[1])) if approved else None
+
+
+def set_excluded(demo_id: str, excluded: bool, reason: str = "", by: str = "",
+                 registry: Registry | None = None) -> None:
+    """Exclude a demo from future versions by hand (reason + name required), or include it again."""
+    reg = registry or Registry()
+    d = reg.get_demo(demo_id)
+    if d is None:
+        raise KeyError(demo_id)
+    if excluded and not (reason.strip() and by.strip()):
+        raise ValueError("Excluding a demo needs a reason and a name.")
+    reg.set_demo_status(demo_id, d["status"], {"excluded": {"reason": reason, "by": by, "at": now_iso()}
+                                               if excluded else None})
 
 
 def _range(values: list[Any]) -> str:
@@ -230,7 +299,10 @@ def dataset_card(manifest: dict[str, Any], splits: dict[str, list[dict[str, Any]
         f"# Dataset card · {manifest['version']}", "",
         f"- Fingerprint: `{manifest['fingerprint']}`",
         f"- Created: {manifest['created_at']}",
-        f"- Train/val source: `{manifest['source']}`",
+        f"- Train/val source(s): {', '.join(f'`{x}`' for x in manifest.get('sources') or [manifest['source']])}"
+        + (" — several sources: train from the merged folder (`hackpipe dataset materialize`)"
+           if manifest.get("needs_materialize") else ""),
+        f"- Based on: {(manifest.get('lineage') or {}).get('base') or 'nothing (first version)'}",
         f"- Held-out test sources: {', '.join(f'`{t}`' for t in manifest.get('test_sources', [])) or 'none (ratio split)'}",
         f"- Dataset revision: {manifest.get('revision') or 'local folder, not published'}",
         f"- Split seed: {pre['splits']['seed']} · split by episode, never by frame",
@@ -249,6 +321,17 @@ def dataset_card(manifest: dict[str, Any], splits: dict[str, list[dict[str, Any]
         for src, idx in by_src.items():
             lines.append(f"- **{k}** `{src}`: {idx}")
     lines += ["", "Demo IDs per split: `manifest.json` → `demo_ids`.", ""]
+    lin = manifest.get("lineage") or {}
+    if lin.get("base"):
+        added_split = lin.get("added_split") or {}
+        lines += [f"## Inherited vs new (base {lin['base']})", "",
+                  "| | Demos |", "|---|---|",
+                  f"| Inherited from {lin['base']} (kept their train/val split, not re-validated) | "
+                  f"{len(lin.get('inherited', []))} |",
+                  f"| Added (new VALID demos) | {len(lin.get('added', []))} — train "
+                  f"{len(added_split.get('train', []))}, val {len(added_split.get('val', []))} |",
+                  f"| Removed (excluded / no longer VALID) | {len(lin.get('removed', []))} |",
+                  "| Test split | unchanged (frozen) ✓ |", ""]
     tasks = Counter(str(d["meta"].get("task")) for v in splits.values() for d in v)
     lines += ["## Episodes per task", "", "| Task | Episodes |", "|---|---|"]
     lines += [f"| {t} | {n} |" for t, n in tasks.most_common()]
@@ -279,8 +362,10 @@ def dataset_card(manifest: dict[str, Any], splits: dict[str, list[dict[str, Any]
     return "\n".join(lines)
 
 
-def approve(version: str, registry: Registry | None = None) -> None:
-    (registry or Registry()).set_dataset_status(version, "approved")
+def approve(version: str, registry: Registry | None = None, by: str = "") -> None:
+    reg = registry or Registry()
+    reg.set_dataset_status(version, "approved")
+    reg.update_dataset_meta(version, {"approved_by": by or None, "approved_at": now_iso()})
 
 
 def load_manifest(version: str, registry: Registry | None = None) -> dict[str, Any]:

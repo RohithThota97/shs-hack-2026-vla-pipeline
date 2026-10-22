@@ -24,7 +24,7 @@ def _run(path):
 
 @pytest.mark.parametrize("page", PAGES)
 def test_pages_render_on_empty_registry(workspace, page):
-    _run(CONSOLE / "pages" / f"{page}.py")
+    _run(CONSOLE / "views" / f"{page}.py")
 
 
 def test_app_shell_renders(workspace):
@@ -43,5 +43,42 @@ def test_overview_reflects_registry(workspace, dataset):
     ov = overview(reg)
     assert ov["next"][0].startswith("Review and approve ds-v1")
     assert ov["stages"][1]["status"] == "waiting" and ov["versions"]["dataset"] == "ds-v1"
-    at = _run(CONSOLE / "pages" / "overview.py")
+    at = _run(CONSOLE / "views" / "overview.py")
     assert any("Review and approve ds-v1" in m.value for m in at.markdown)
+
+
+def test_data_page_on_filled_registry(workspace):
+    from conftest import add_fr3_extras, make_dataset
+    from hackpipe.pipeline.auto import run_auto
+    tmp, reg = workspace
+    root = add_fr3_extras(make_dataset(tmp / "ds", n_episodes=6, frames=30), 6, 30)
+    assert run_auto(str(root), reg)["version"] == "ds-v1"
+    at = _run(CONSOLE / "views" / "data.py")
+    assert [t.label for t in at.tabs] == ["Add demonstrations", "Demos", "Episode viewer", "Quality", "Versions"]
+    assert any("ds-v1" in e.label for e in at.expander)
+    assert any(b.label == "Approve ds-v1" for b in at.button)
+
+
+def test_preview_counts_and_estimate(workspace):
+    from conftest import add_fr3_extras, make_dataset
+    from hackpipe.ingest.importer import import_demos
+    from hackpipe.pipeline.preview import preview
+    tmp, reg = workspace
+    root = add_fr3_extras(make_dataset(tmp / "ds", n_episodes=6, frames=30), 6, 30)
+    p = preview(str(root), reg)
+    assert (p["episodes"], p["new"], p["registered"]) == (6, 6, 0)
+    assert p["work_units"] == 6 * 30 * 1 and p["estimate"]["basis"].startswith("no estimate yet")
+    import_demos(root, reg)
+    p = preview(str(root), reg)
+    assert (p["new"], p["registered"], p["pending_qc"]) == (0, 6, 6)
+
+
+def test_candidate_folders(tmp_path):
+    from conftest import make_dataset
+    from hackpipe.pipeline.preview import candidate_folders
+    make_dataset(tmp_path / "data" / "incoming" / "batch1", n_episodes=1)
+    make_dataset(tmp_path / "data" / "raw" / "zipdir" / "inner", n_episodes=1)
+    (tmp_path / "data" / "incoming" / "not_a_dataset").mkdir()
+    found = candidate_folders(tmp_path)
+    assert any(f.endswith("data/incoming/batch1") for f in found)
+    assert any(f.endswith("data/raw/zipdir/inner") for f in found) and len(found) == 2

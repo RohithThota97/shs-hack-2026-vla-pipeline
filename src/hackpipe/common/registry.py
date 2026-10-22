@@ -153,6 +153,14 @@ class Registry:
         self.conn.execute("UPDATE datasets SET status=? WHERE version=?", (status, version))
         self.conn.commit()
 
+    def update_dataset_meta(self, version: str, extra: dict[str, Any]) -> None:
+        d = self.get_dataset(version)
+        if d is None:
+            raise KeyError(version)
+        self.conn.execute("UPDATE datasets SET meta=? WHERE version=?",
+                          (json.dumps({**d["meta"], **extra}, default=str), version))
+        self.conn.commit()
+
     def get_dataset(self, version: str) -> dict[str, Any] | None:
         rows = self._rows("SELECT * FROM datasets WHERE version=?", (version,))
         return rows[0] if rows else None

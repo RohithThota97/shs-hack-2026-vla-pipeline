@@ -15,18 +15,24 @@ import numpy as np
 from hackpipe.common.config import dataset_config, project_config, resolve, source_key
 from hackpipe.common.ids import demo_id, now_iso
 from hackpipe.common.registry import Registry
-from hackpipe.quality.checks import INVALID, REVIEW, VALID, check_dataset
+from hackpipe.quality.checks import INVALID, REVIEW, VALID, EpisodeCheck, check_dataset
 
 
-def run_qc(root: str | Path, registry: Registry | None = None, out_dir: str | Path | None = None) -> dict[str, Any]:
+def run_qc(root: str | Path, registry: Registry | None = None, out_dir: str | Path | None = None,
+           full: bool = False) -> dict[str, Any]:
+    """Incremental by default: checks the source's demos that are new or changed (status "imported");
+    earlier results are reused. full=True re-checks every episode. DUPLICATE demos are never checked."""
     reg = registry or Registry()
-    result = check_dataset(root)
     source = source_key(root)
+    registered = {d["episode_index"]: d for d in reg.demos(source=source)}
+    todo = None if full or not registered else {i for i, d in registered.items() if d["status"] == "imported"}
+    result = check_dataset(root, only_episodes=todo)
     accept_review = dataset_config()["quality"].get("accept_review_as_valid", False)
+    checked = {e.episode_index for e in result["episodes"]}
     for e in result["episodes"]:
         did = demo_id(source, e.episode_index)
-        if reg.get_demo(did) is None:
-            continue  # run `hackpipe ingest` first
+        if reg.get_demo(did) is None or reg.get_demo(did)["status"] == "DUPLICATE":
+            continue  # not ingested yet / duplicate of a demo from another folder
         status = VALID if (e.status == REVIEW and accept_review) else e.status
         reg.set_demo_status(did, status, {"qc": {"status": e.status, "hard": e.hard, "soft": e.soft,
                                                  "stats": e.stats, "checked_at": now_iso()}})
@@ -34,13 +40,24 @@ def run_qc(root: str | Path, registry: Registry | None = None, out_dir: str | Pa
         if reg.get_demo(demo_id(source, e.episode_index)) is None:
             result["dataset_issues"].append("some episodes are not in the registry yet: run `hackpipe ingest` first")
             break
+    reused = [_stored_check(d) for i, d in sorted(registered.items())
+              if i not in checked and d["status"] != "DUPLICATE" and d["meta"].get("qc")]
+    result["episodes"] = sorted(result["episodes"] + reused, key=lambda e: e.episode_index)
     report = summarize(result)
+    report["checked_now"], report["reused"] = len(checked), len(reused)
+    report["source"] = source                     # the registry's name (data/raw/…), not the resolved path
+    report["duplicates"] = sorted(i for i, d in registered.items() if d["status"] == "DUPLICATE")
     out = resolve(out_dir or Path(project_config()["project"]["outputs_dir"]) / "qc" / report_name(source))
     out.mkdir(parents=True, exist_ok=True)
     (out / "qc_report.json").write_text(json.dumps(report, indent=2, default=str))
     (out / "qc_report.md").write_text(to_markdown(report))
     report["paths"] = {"json": str(out / "qc_report.json"), "md": str(out / "qc_report.md")}
     return report
+
+
+def _stored_check(demo: dict[str, Any]) -> EpisodeCheck:
+    qc = demo["meta"]["qc"]
+    return EpisodeCheck(demo["episode_index"], qc["status"], list(qc["hard"]), list(qc["soft"]), dict(qc["stats"]))
 
 
 def report_name(source: str) -> str:
@@ -80,6 +97,8 @@ def to_markdown(r: dict[str, Any]) -> str:
         f"- Generated: {r['generated_at']}",
         f"- Source: `{r.get('source', r['root'])}` (files: `{r['root']}`)",
         f"- Episodes: {r['n_episodes']} · Frames: {r['n_frames']} · FPS: {r['fps']}",
+        f"- Checked in this run: {r.get('checked_now', r['n_episodes'])} · reused earlier results: "
+        f"{r.get('reused', 0)} · duplicates (not checked): {len(r.get('duplicates') or [])}",
         f"- Episode length (frames): min {r['episode_frames']['min']}, median {r['episode_frames']['median']:.0f}, "
         f"max {r['episode_frames']['max']}", "",
         "| Status | Episodes |", "|---|---|",

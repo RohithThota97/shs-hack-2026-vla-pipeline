@@ -36,7 +36,8 @@ Typical flow (each step writes to the registry in `registry/registry.db`):
 hackpipe ingest  --root data/raw/<dataset>          # R1  import episodes as demo records
 hackpipe qc      --root data/raw/<dataset>          # R2  quality checks + report
 hackpipe dataset create                              # R3  versioned splits → ds-v1 (draft)
-hackpipe dataset approve ds-v1                       # R3  human approval
+hackpipe dataset approve ds-v1 --by <name>           # R3  human approval (recorded)
+hackpipe auto    --root <folder>                     # R1–R3 in one go: new demos only → next draft version
 hackpipe train   --config configs/train/smolvla_fr3_duo.yaml --dataset ds-v1 [--set steps=200]   # R4
 hackpipe publish --model <id> --repo <hf-user>/<name> [--dry-run]       # model + card → private HF repo
 hackpipe eval    --model m-v1 --suite configs/eval/test_suite_v1.yaml    # R5 (needs sim adapter)
