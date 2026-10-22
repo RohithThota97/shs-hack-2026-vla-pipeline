@@ -49,6 +49,22 @@ CREATE TABLE IF NOT EXISTS evals (
     metrics TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS jobs (
+    job_id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,
+    status TEXT NOT NULL,
+    needs TEXT NOT NULL,
+    machine TEXT NOT NULL,
+    pid INTEGER,
+    log_path TEXT,
+    work_units REAL,
+    estimate_s REAL,
+    exit_code INTEGER,
+    started_at TEXT,
+    ended_at TEXT,
+    meta TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS deployments (
     dep_id TEXT PRIMARY KEY,
     model_version TEXT NOT NULL,
@@ -59,13 +75,16 @@ CREATE TABLE IF NOT EXISTS deployments (
 """
 
 
+JOB_FIELDS = ("status", "pid", "log_path", "work_units", "estimate_s", "exit_code", "started_at", "ended_at")
+
+
 class Registry:
     def __init__(self, path: str | Path | None = None):
         if path is None:
             path = project_config()["project"]["registry_path"]
         self.path = resolve(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(self.path)
+        self.conn = sqlite3.connect(self.path, timeout=30)   # job workers write from other processes
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(SCHEMA)
 
@@ -197,3 +216,38 @@ class Registry:
     def current_deployed_model(self) -> str | None:
         rows = self._rows("SELECT * FROM deployments WHERE status='deployed' ORDER BY created_at DESC LIMIT 1")
         return rows[0]["model_version"] if rows else None
+
+    # ---------- jobs ----------
+    def add_job(self, job_id: str, kind: str, needs: str, machine: str, meta: dict[str, Any],
+                work_units: float | None = None, estimate_s: float | None = None) -> None:
+        self.conn.execute(
+            "INSERT INTO jobs (job_id, kind, status, needs, machine, work_units, estimate_s, meta, created_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            (job_id, kind, "queued", needs, machine, work_units, estimate_s, json.dumps(meta, default=str), now_iso()))
+        self.conn.commit()
+
+    def update_job(self, job_id: str, meta: dict[str, Any] | None = None, **fields: Any) -> None:
+        bad = set(fields) - set(JOB_FIELDS)
+        if bad:
+            raise ValueError(f"unknown job fields {bad}")
+        job = self.get_job(job_id)
+        if job is None:
+            raise KeyError(job_id)
+        sets = [f"{k}=?" for k in fields] + ["meta=?"]
+        args = list(fields.values()) + [json.dumps({**job["meta"], **(meta or {})}, default=str), job_id]
+        self.conn.execute(f"UPDATE jobs SET {', '.join(sets)} WHERE job_id=?", args)
+        self.conn.commit()
+
+    def get_job(self, job_id: str) -> dict[str, Any] | None:
+        rows = self._rows("SELECT * FROM jobs WHERE job_id=?", (job_id,))
+        return rows[0] if rows else None
+
+    def jobs(self, kind: str | None = None, status: str | None = None, limit: int = 200) -> list[dict[str, Any]]:
+        sql, args = "SELECT * FROM jobs WHERE 1=1", []
+        if kind:
+            sql += " AND kind=?"
+            args.append(kind)
+        if status:
+            sql += " AND status=?"
+            args.append(status)
+        return self._rows(sql + " ORDER BY created_at DESC, job_id DESC LIMIT ?", (*args, limit))

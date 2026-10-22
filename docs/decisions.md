@@ -4,6 +4,10 @@ Newest first. One line for the decision, one for the reason.
 
 | Date | Decision | Reason |
 |---|---|---|
+| 23 Oct | Web console in Streamlit (`hackpipe console`), one spec per page in `docs/ui/`, built page by page (Data first) | Python only, already a dependency, fastest to build; specs reviewed before code |
+| 23 Oct | Look: Siemens Healthineers-like orange/grey palette, Inter font, no logo or Siemens wording | No official template files; avoid posing as an official product |
+| 23 Oct | Pipeline steps from the console run as background jobs (registry `jobs` table); expected time only from measured earlier runs | Survive page reloads; show CPU/GPU, machine and time without guessing |
+| 23 Oct | One machine writes the registry at a time (writer lock next to registry.db, no timeout) | Laptop and Colab share the registry on Google Drive; concurrent SQLite writes over sync can corrupt it |
 | 22 Oct | Train on free Colab (T4); data comes from our Google Drive, registry + outputs on Drive | No GPU box confirmed; Drive state survives disconnects, checkpoints allow resume |
 | 22 Oct | The dataset is never uploaded to the Hub; only model + model card, private repo (`hackpipe publish`) | Organiser data is restricted / team-specific |
 | 22 Oct | All 94 handover demos have bit-identical state/action trajectories; only lighting (images) differs | Measured by R2 redundancy check; reported in QC report + dataset card. The policy will not learn pose variation from this data |

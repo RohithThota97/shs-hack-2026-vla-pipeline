@@ -4,10 +4,22 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from pathlib import Path
 
 
 def _print(obj) -> None:
     print(json.dumps(obj, indent=2, default=str))
+
+
+def _writes(args) -> bool:
+    """Commands that change the registry claim the writer role first (see common/writelock.py)."""
+    if args.cmd in ("ingest", "qc", "eval", "gates", "deploy", "rollback"):
+        return True
+    if args.cmd == "dataset":
+        return args.action in ("create", "approve")
+    if args.cmd in ("train", "publish"):
+        return not args.dry_run
+    return False
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -62,8 +74,38 @@ def main(argv: list[str] | None = None) -> None:
     s.add_argument("--public", action="store_true", help="make the repo public (default: private)")
     s.add_argument("--dry-run", action="store_true", help="write the card and list files, upload nothing")
     sub.add_parser("status", help="show registry contents")
+    s = sub.add_parser("console", help="start the web console (needs the [console] extra)")
+    s.add_argument("--port", type=int, default=8501)
+    s = sub.add_parser("jobs", help="list background jobs started from the console")
+    s.add_argument("--cancel", metavar="JOB_ID")
+    s = sub.add_parser("writer", help="show / release / take over the registry writer role")
+    g = s.add_mutually_exclusive_group()
+    g.add_argument("--release", action="store_true")
+    g.add_argument("--take-over", action="store_true", help="only when the other machine has stopped writing")
 
     args = p.parse_args(argv)
+
+    if args.cmd == "console":
+        import subprocess
+        from hackpipe.common.config import REPO_ROOT
+        app = Path(__file__).parent / "console" / "app.py"
+        sys.exit(subprocess.call([sys.executable, "-m", "streamlit", "run", str(app),
+                                  "--server.port", str(args.port)], cwd=REPO_ROOT))
+    if args.cmd == "writer":
+        from hackpipe.common import writelock
+        if args.release:
+            print("released" if writelock.release() else "this machine is not the writer")
+        elif args.take_over:
+            _print(writelock.acquire(force=True))
+        else:
+            _print({"writer": writelock.holder(), "this_machine": writelock.machine_id()})
+        return
+    if _writes(args):
+        from hackpipe.common import writelock
+        try:
+            writelock.acquire()
+        except writelock.WriterLockError as e:
+            sys.exit(str(e))
 
     from hackpipe.common.registry import Registry
     reg = Registry()
@@ -129,6 +171,14 @@ def main(argv: list[str] | None = None) -> None:
     elif args.cmd == "publish":
         from hackpipe.hub.publish import publish
         _print(publish(args.model, args.repo, private=not args.public, dry_run=args.dry_run, registry=reg))
+    elif args.cmd == "jobs":
+        from hackpipe.jobs import runner
+        runner.reconcile(reg)
+        if args.cancel:
+            print("cancelled" if runner.cancel(args.cancel, reg) else "not running")
+        else:
+            _print([{k: j[k] for k in ("job_id", "kind", "status", "needs", "machine", "estimate_s", "started_at",
+                                       "ended_at", "exit_code")} for j in reg.jobs(limit=20)])
     elif args.cmd == "status":
         _print({
             "demos": {s: len(reg.demos(status=s)) for s in ("imported", "VALID", "REVIEW", "INVALID")},

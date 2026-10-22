@@ -18,6 +18,7 @@ dependencies = [
 [project.optional-dependencies]
 video = ["av>=15,<16"]   # LeRobot 0.6.1 needs av<16 (its "dataset" extra)
 dashboard = ["streamlit>=1.30"]
+console = ["streamlit>=1.40", "plotly>=5"]
 dev = ["pytest>=7", "huggingface_hub>=0.24"]
 hub = ["huggingface_hub>=0.24"]
 
