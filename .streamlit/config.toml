@@ -1,0 +1,16 @@
+# Console theme (Siemens Healthineers-like approximation; tokens also in src/hackpipe/console/theme.py)
+[theme]
+base = "light"
+primaryColor = "#EC6602"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F6F6F6"
+textColor = "#1A1A1A"
+
+[client]
+toolbarMode = "viewer"   # hide Streamlit's own Deploy button (not our Deploy stage)
+
+[server]
+headless = true
+
+[browser]
+gatherUsageStats = false

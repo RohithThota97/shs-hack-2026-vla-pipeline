@@ -26,6 +26,8 @@ pytest                             # all tests should pass
 #   see docs/runbook.md → "Environment setup"
 ```
 
+**Console (web UI):** `pip install -e ".[console]"` then `hackpipe console` → http://localhost:8501. Page specs in [`docs/ui/`](docs/ui/README.md).
+
 **Training on free Colab:** open `notebooks/colab_train.ipynb` (data from your Google Drive, never from the Hub).
 
 Typical flow (each step writes to the registry in `registry/registry.db`):
