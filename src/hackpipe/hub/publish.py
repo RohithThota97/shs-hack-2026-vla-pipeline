@@ -8,6 +8,7 @@ The Hub repo and commit are written back into the registry (models.meta.hub).
 from __future__ import annotations
 
 import json
+import re
 import shutil
 from pathlib import Path
 from typing import Any
@@ -89,7 +90,9 @@ def build_model_card(model_version: str, repo_id: str, registry: Registry | None
     if evals:
         from hackpipe.reporting.model_card import build_card
         latest = sorted(evals, key=lambda e: e["created_at"])[-1]
-        lines += [build_card(latest["eval_id"], reg).replace("# Quality statement", "### Quality statement"), ""]
+        statement = re.sub(r"^# Quality statement", "### Quality statement", build_card(latest["eval_id"], reg),
+                           count=1, flags=re.MULTILINE)
+        lines += [statement, ""]
     else:
         lines += ["n/a — not evaluated yet.", ""]
     lines += ["## Known limitations", ""] + [f"- {g}" for g in gaps] + [
@@ -125,7 +128,9 @@ def stage(model_version: str, repo_id: str, registry: Registry | None = None) ->
     for name in ("run_record.json", "loss.csv", "loss.png"):
         if run_dir and (run_dir / name).exists():
             shutil.copyfile(run_dir / name, out / name)
-    ckpt_files = sorted(p for p in ckpt.rglob("*") if p.is_file())
+    staged = {p.name for p in out.iterdir()}
+    # Generated files win: LeRobot's save_pretrained may write its own README.md into the checkpoint.
+    ckpt_files = sorted(p for p in ckpt.rglob("*") if p.is_file() and p.relative_to(ckpt).as_posix() not in staged)
     bad = [p for p in ckpt_files + sorted(out.iterdir()) if p.suffix.lower() in DATA_SUFFIXES]
     if bad:
         raise RuntimeError(f"Refusing to upload data-like files: {[str(p) for p in bad]}")
@@ -138,8 +143,13 @@ def publish(model_version: str, repo_id: str | None = None, private: bool = True
     repo_id = repo_id or (project_config().get("hub") or {}).get("model_repo_id")
     if not repo_id:
         raise ValueError("No repo id: pass --repo <hf-user>/<name> or set hub.model_repo_id in configs/project.yaml")
-    out, ckpt_files = stage(model_version, repo_id, reg)
     model = reg.get_model(model_version)
+    if model is None:
+        raise KeyError(model_version)
+    if model["status"] in ("training", "failed"):
+        raise RuntimeError(f"{model_version} is '{model['status']}': its checkpoint is not a finished model. "
+                           "Resume or retrain it first.")
+    out, ckpt_files = stage(model_version, repo_id, reg)
     ckpt = Path(model["checkpoint_dir"])
     plan = {"repo_id": repo_id, "private": private, "staged": str(out),
             "files": [p.relative_to(ckpt).as_posix() for p in ckpt_files] + sorted(p.name for p in out.iterdir())}

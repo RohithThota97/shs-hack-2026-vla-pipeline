@@ -94,3 +94,19 @@ def test_repo_id_from_config(trained_model, test_configs):
     proj["hub"]["model_repo_id"] = "someone/from-config"
     (test_configs / "project.yaml").write_text(yaml.safe_dump(proj))
     assert publish("m-v1", None, dry_run=True, registry=reg)["repo_id"] == "someone/from-config"
+
+
+def test_generated_card_wins_over_checkpoint_readme(trained_model):
+    _, reg, ckpt = trained_model
+    (ckpt / "README.md").write_text("auto-generated stub")
+    api = FakeApi()
+    plan = publish("m-v1", "user/smolvla-test", registry=reg, api=api)
+    assert plan["files"].count("README.md") == 1 and api.commits[0]["files"].count("README.md") == 1
+
+
+@pytest.mark.parametrize("status", ["training", "failed"])
+def test_refuses_unfinished_models(trained_model, status):
+    _, reg, _ = trained_model
+    reg.set_model_status("m-v1", status)
+    with pytest.raises(RuntimeError, match=status):
+        publish("m-v1", "user/smolvla-test", registry=reg, api=FakeApi())

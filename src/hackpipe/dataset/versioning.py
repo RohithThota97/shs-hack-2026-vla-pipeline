@@ -2,7 +2,7 @@
 
 - Splits by episode (never by frame), optionally keeping whole groups (e.g. task) in one split.
 - Fixed seed; held-out test = explicit episodes or whole held-out source datasets (`splits.test_sources`).
-- Test split is frozen: once a dataset version exists, later versions must keep exactly the same test demos.
+- Test split is frozen: once a dataset version is approved, later versions must keep exactly the same test demos.
 - Leakage guard: a test demo, test group or test variation (`splits.leakage_keys`, e.g. seed) can never
   appear in train/val.
 - Preprocessing record: fps, cameras, state/action keys and shapes, image size, rename map, normalisation stats
@@ -102,8 +102,10 @@ def demo_fingerprint_item(d: dict[str, Any]) -> str:
 
 
 def frozen_test_ids(registry: Registry) -> tuple[str, list[str]] | None:
-    """(version, test demo_ids) of the first dataset version: the frozen test split."""
-    versions = sorted(registry.datasets(), key=lambda d: int(d["version"].split("-v", 1)[1]))
+    """(version, test demo_ids) of the first approved dataset version: the frozen test split.
+    Drafts don't freeze anything, so a wrong draft can simply be replaced."""
+    versions = sorted((d for d in registry.datasets() if d["status"] == "approved"),
+                      key=lambda d: int(d["version"].split("-v", 1)[1]))
     if not versions:
         return None
     first = json.loads(Path(versions[0]["manifest_path"]).read_text())

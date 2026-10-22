@@ -165,7 +165,7 @@ def check_dataset(root: str | Path, cfg: dict[str, Any] | None = None) -> dict[s
         dataset_issues.append(f"corrupted video files: {len(videos['corrupted'])}")
 
     ep_meta = ds.episodes_meta()
-    if len(ep_meta) and ds.video_keys and not videos.get("skipped"):
+    if len(ep_meta) and ds.video_keys:        # file presence + sync need no decoding; frame counts do
         corrupted = {Path(c["file"]) for c in videos.get("corrupted", [])}
         tol_s = q["timestamp_tolerance_s"] if q["timestamp_tolerance_s"] is not None else 0.5 / ds.fps
         by_ep = {e.episode_index: e for e in episodes}

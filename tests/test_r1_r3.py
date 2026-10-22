@@ -24,6 +24,19 @@ def use_config(test_configs: Path, **overrides) -> None:
 
 # ---------- R1 ----------
 
+def test_source_key_through_symlinked_repo_path(tmp_path):
+    link = tmp_path / "repo_link"
+    link.symlink_to(REPO_ROOT)
+    assert source_key(link / "data" / "raw" / "x") == "data/raw/x"
+
+
+def test_report_name_inside_and_outside_repo():
+    from hackpipe.quality.report import report_name
+    assert report_name("data/raw/fr3_duo_handover_84") == "fr3_duo_handover_84"
+    a, b = report_name("/mnt/a/fr3_duo_handover_84"), report_name("/mnt/b/fr3_duo_handover_84")
+    assert a != b and a.startswith("fr3_duo_handover_84-")
+
+
 def test_source_key_is_repo_relative_inside_repo(tmp_path):
     assert source_key(REPO_ROOT / "data" / "raw" / "x") == "data/raw/x"
     assert source_key("data/raw/x") == "data/raw/x"
@@ -57,7 +70,8 @@ def test_watch_imports_and_refreshes_qc(workspace):
     watch(root, interval_s=0, registry=reg, max_polls=1)
     assert len(reg.demos()) == 6
     assert all(d["status"] == VALID for d in reg.demos())
-    assert (tmp / "outputs" / "qc" / "ds" / "qc_report.md").exists()
+    from hackpipe.quality.report import report_name
+    assert (tmp / "outputs" / "qc" / report_name(source_key(root)) / "qc_report.md").exists()
 
 
 # ---------- R2 ----------
@@ -73,6 +87,12 @@ def test_missing_video_frames_is_review(tmp_path):
     by = {e.episode_index: e for e in res["episodes"]}
     assert by[3].status == REVIEW and any(s.startswith("missing_frames:front (27") for s in by[3].soft)
     assert by[2].status == VALID
+
+
+def test_missing_video_found_without_decoding(tmp_path, test_configs):
+    use_config(test_configs, quality__check_videos=False)
+    res = check_dataset(fr3_dataset(tmp_path / "ds", video="missing"))
+    assert all(e.status == INVALID and "missing_video:front" in e.hard for e in res["episodes"])
 
 
 @pytest.mark.parametrize("video,reason", [("corrupt", "video_corrupted:front"), ("missing", "missing_video:front")])
@@ -142,8 +162,8 @@ def test_held_out_source_is_the_test_split(workspace, test_configs):
     assert len(m["splits"]["val"]) == 1
     test_ids = set(m["demo_ids"]["test"])
     assert test_ids == {d["demo_id"] for d in reg.demos(source=source_key(test_root))}
-    assert (tmp / "outputs" / "qc" / "night" / "qc_report.md").exists()
-    assert (tmp / "outputs" / "qc" / "lighting" / "qc_report.md").exists()
+    reports = sorted(p.name for p in (tmp / "outputs" / "qc").iterdir())
+    assert len(reports) == 2 and reports[0].startswith("lighting-") and reports[1].startswith("night-")
 
 
 def test_leakage_guard_on_seed(workspace, test_configs):
@@ -159,6 +179,8 @@ def test_test_split_is_frozen(workspace, test_configs, dataset):
     run_qc(dataset, reg)
     create_dataset_version(reg)
     use_config(test_configs, splits__seed=4242)          # different seed → different ratio-based test split
+    create_dataset_version(reg)                          # ds-v1 is only a draft: nothing frozen yet
+    approve("ds-v1", reg)
     with pytest.raises(LeakageError, match="frozen since ds-v1"):
         create_dataset_version(reg)
 
@@ -256,3 +278,39 @@ def test_loss_log_parsing(tmp_path):
     r = export(tmp_path / "train.log", tmp_path / "run")
     assert r["points"] == 3 and r["final_loss"] == 0.15
     assert (tmp_path / "run" / "loss.csv").read_text().splitlines()[-1] == "2500,0.15"
+
+
+def _approved(workspace, dataset):
+    tmp, reg = workspace
+    ingest(dataset, reg)
+    run_qc(dataset, reg)
+    create_dataset_version(reg)
+    approve("ds-v1", reg)
+    return reg
+
+
+def test_resume_rejects_overrides(workspace, dataset):
+    from hackpipe.training.train import train
+    reg = _approved(workspace, dataset)
+    with pytest.raises(ValueError, match="--resume"):
+        train("configs/train/smolvla_fr3_duo.yaml", "ds-v1", registry=reg, resume_model="m-v1",
+              overrides={"steps": 40000})
+
+
+def test_launch_failure_marks_model_failed(workspace, dataset, monkeypatch):
+    import subprocess
+    from hackpipe.training.train import train
+    reg = _approved(workspace, dataset)
+    real_run = subprocess.run
+
+    def fake_run(cmd, **kw):
+        if cmd[0] != "lerobot-train":
+            return real_run(cmd, **kw)
+        raise FileNotFoundError("lerobot-train")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    with pytest.raises(FileNotFoundError):
+        train("configs/train/smolvla_fr3_duo.yaml", "ds-v1", registry=reg)
+    assert reg.get_model("m-v1")["status"] == "failed"
+    rec = json.loads(Path(reg.get_model("m-v1")["run_record_path"]).read_text())
+    assert rec["error"].startswith("FileNotFoundError")

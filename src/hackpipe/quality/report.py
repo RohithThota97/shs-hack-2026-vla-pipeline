@@ -4,6 +4,7 @@ One report per dataset folder: outputs/qc/<folder name>/qc_report.{json,md}.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 from collections import Counter
 from pathlib import Path
@@ -34,12 +35,19 @@ def run_qc(root: str | Path, registry: Registry | None = None, out_dir: str | Pa
             result["dataset_issues"].append("some episodes are not in the registry yet: run `hackpipe ingest` first")
             break
     report = summarize(result)
-    out = resolve(out_dir or Path(project_config()["project"]["outputs_dir"]) / "qc" / Path(source).name)
+    out = resolve(out_dir or Path(project_config()["project"]["outputs_dir"]) / "qc" / report_name(source))
     out.mkdir(parents=True, exist_ok=True)
     (out / "qc_report.json").write_text(json.dumps(report, indent=2, default=str))
     (out / "qc_report.md").write_text(to_markdown(report))
     report["paths"] = {"json": str(out / "qc_report.json"), "md": str(out / "qc_report.md")}
     return report
+
+
+def report_name(source: str) -> str:
+    """Folder name for a dataset's report: its name inside the repo; name + path hash outside it, so two
+    folders with the same name elsewhere don't overwrite each other."""
+    name = Path(source).name
+    return name if not Path(source).is_absolute() else f"{name}-{hashlib.sha256(source.encode()).hexdigest()[:8]}"
 
 
 def summarize(result: dict[str, Any]) -> dict[str, Any]:

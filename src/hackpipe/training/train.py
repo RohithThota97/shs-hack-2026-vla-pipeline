@@ -78,6 +78,9 @@ def train(config_path: str, dataset_version: str, dry_run: bool = False, registr
     cfg = apply_overrides(load_yaml(config_path), overrides or {})
     outputs = resolve(project_config()["project"]["outputs_dir"])
 
+    if resume_model and overrides:
+        raise ValueError("--set cannot be combined with --resume: lerobot-train resumes from the saved "
+                         "train_config.json, so the overrides would be recorded but not applied.")
     if resume_model:
         model = reg.get_model(resume_model)
         if model is None:
@@ -127,7 +130,14 @@ def train(config_path: str, dataset_version: str, dry_run: bool = False, registr
     print(f"{version}: training started — resume after a crash with "
           f"`hackpipe train --dataset {dataset_version} --resume {version}`", flush=True)
     t0 = time.time()
-    proc = subprocess.run(cmd)
+    try:
+        proc = subprocess.run(cmd)
+    except BaseException as e:                 # lerobot-train missing, Ctrl+C, …: never leave 'training' behind
+        record.update({"ended_at": now_iso(), "duration_s": round(time.time() - t0, 1), "exit_code": None,
+                       "error": f"{type(e).__name__}: {e}"})
+        record_path.write_text(json.dumps(record, indent=2))
+        reg.set_model_status(version, "failed")
+        raise
     record.update({"ended_at": now_iso(), "duration_s": round(time.time() - t0, 1), "exit_code": proc.returncode})
     record_path.write_text(json.dumps(record, indent=2))
     reg.set_model_status(version, "trained" if proc.returncode == 0 else "failed")

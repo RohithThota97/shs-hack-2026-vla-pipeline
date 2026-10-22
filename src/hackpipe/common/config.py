@@ -52,7 +52,8 @@ def source_key(root: str | Path) -> str:
     """Stable name for a dataset folder: repo-relative inside the repo (same on laptop and Colab), else absolute.
     Symlinks are not followed, so data/raw/<name> keeps its name wherever the files really live."""
     p = Path(os.path.normpath(os.path.abspath(resolve(root))))
-    try:
-        return p.relative_to(REPO_ROOT.resolve()).as_posix()
-    except ValueError:
-        return p.as_posix()
+    repo = REPO_ROOT.resolve()
+    for ancestor in [p, *p.parents]:          # the repo may be reached through a symlink (/tmp, Drive mounts)
+        if ancestor.resolve() == repo:
+            return p.relative_to(ancestor).as_posix() or "."
+    return p.as_posix()
