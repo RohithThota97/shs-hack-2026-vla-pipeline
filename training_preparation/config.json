@@ -1,0 +1,21 @@
+{
+  "seed": 20261022,
+  "test_fraction": 0.15,
+  "val_fraction": 0.15,
+  "sync_tolerance_s": 0.002,
+  "min_duration_s": 1,
+  "max_duration_s": 300,
+  "video_workers": 3,
+  "sources": {
+    "handover": {
+      "path": "fr3_duo_handover_84_ep/fr3_duo_handover_v9_night_84",
+      "domain_claim": "user: real; source metadata: Isaac Sim rendering; unresolved",
+      "limits": {}
+    },
+    "stacking": {
+      "path": "fr3_duo_rand500/fr3_duo_rand500",
+      "domain_claim": "simulation (user supplied)",
+      "limits": {}
+    }
+  }
+}
