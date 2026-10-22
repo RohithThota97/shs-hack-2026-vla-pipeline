@@ -1,7 +1,12 @@
-# 00 · Environment on the GPU box
+# 00 · Environment (Colab or GPU box)
 
-**Goal:** the RTX 4090 machine runs the pipeline, LeRobot can read the FR3 Duo handover datasets (AV1 video),
+**Goal:** a GPU machine runs the pipeline, LeRobot can read the FR3 Duo handover datasets (AV1 video),
 and the data is in place for P1 and P2.
+
+**Default: free Google Colab (T4, 16 GB)** — `notebooks/colab_train.ipynb` does every step below (install,
+registry/outputs on Drive, data from Drive, AV1 check). A human runs it; agents prepare code and read results.
+The steps below are for a dedicated GPU box (e.g. the RTX 4090), if one becomes available.
+
 **Where:** GPU box, runner session, `~/shs-hack-2026-vla-pipeline`.
 **Read first:** `agents/README.md`, `docs/runbook.md` ("Environment setup"),
 `data/C2_Teach-the-robot_VLA/Environment/…/isaac_sim_hackathon_environment.md` (in the environment zip).
@@ -14,7 +19,7 @@ and the data is in place for P1 and P2.
 2. **Repo.** `~/shs-hack-2026-vla-pipeline` must exist and be a git repo with at least one commit.
    If it doesn't exist: STOP and ask where the zip or GitHub remote is.
 3. **Python env.** `python3 -m venv .venv && source .venv/bin/activate && pip install -U pip &&
-   pip install -e ".[dev,dashboard,video]" && pytest -q` → all tests pass. Note the count.
+   pip install -e ".[dev,dashboard,video,hub]" && pytest -q` → all tests pass. Note the count.
 4. **LeRobot side by side**, not inside the repo:
    ```bash
    cd ~ && git clone https://github.com/huggingface/lerobot.git && cd lerobot
@@ -44,7 +49,7 @@ and the data is in place for P1 and P2.
    (`video_backend='pyav'` / `'torchcodec'`), then an ffmpeg build with `libdav1d`.
    Also time 200 random `ds[i]` reads — that is the data-loader ceiling for training.
 7. **Check the box** — `scripts/check_env.sh` **(to build, see TASKS T3)**. Until it exists, the checks above
-   are the check.
+   are the check. (Colab: notebook steps 1–5 are the check.)
 8. **No reference model, no smoke-test rollout.** There is no simulator policy interface yet (P3). Skip the
    old LIBERO steps.
 

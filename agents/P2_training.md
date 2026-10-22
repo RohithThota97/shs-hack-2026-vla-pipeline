@@ -2,7 +2,8 @@
 
 **Goal:** `model_v1` = SmolVLA fine-tuned on `ds-v1` (FR3 Duo handover) with a complete run record and
 training metrics. Later `model_v2` on `ds-v2` with the identical config and step count.
-**Owner:** Person 2 · Training. **Where:** code session for §0–1; runner session on the GPU box from §2.
+**Owner:** Person 2 · Training. **Where:** code session for §0–1; from §2 the GPU run happens in
+`notebooks/colab_train.ipynb` on free Colab (T4, 16 GB), run by a human — or a runner session on a GPU box.
 **Read first:** `configs/train/smolvla.yaml`, `src/hackpipe/training/train.py`, `docs/interfaces.md`
 (run record), `docs/data_schema_fr3_duo.md` (from P1), the `config.json` of `lerobot/smolvla_base`.
 **Needs:** for §2+: `ds-v1` approved (`hackpipe status`). **GPU: yes, hours.**
@@ -17,11 +18,15 @@ Write `docs/model_choice.md` (half a page), facts from config files and docs onl
   no failure demos.
 - ACT = baseline candidate. π0.5 / GR00T = not on one 24 GB GPU (`docs/decisions.md`).
 
-## 1 · Code gaps (code session, before any GPU run)
+## 1 · Code gaps (code session, before any GPU run) — **done 22 Oct**
 
-1. **`hackpipe train --set key=value`** (repeatable) **(to build)**: overrides `args` in the train config;
-   overrides are stored in the run record. Unit test.
-2. **`configs/train/smolvla_fr3_duo.yaml`** **(to build)**, based on `smolvla.yaml`:
+`hackpipe train --set key=value`, `configs/train/smolvla_fr3_duo.yaml` (T4-sized: batch 8, save every 1000,
+2 workers), the camera `rename_map` in `configs/dataset.yaml` (→ `camera1..3`, checked against
+`lerobot/smolvla_base`'s config.json), model registered before the run (resumable), `scripts/plot_loss.py`,
+`hackpipe publish`. Tests in `tests/test_r1_r3.py` and `tests/test_publish.py`. What the config contains:
+
+1. `--set` overrides are stored in the run record.
+2. `configs/train/smolvla_fr3_duo.yaml`:
    - `policy.path: lerobot/smolvla_base`, `policy.device: cuda`, `policy.push_to_hub: false`
    - camera mapping: `preprocessing.rename_map` in `configs/dataset.yaml` (the wrapper passes it as
      `--rename_map`) from `observation.images.external_camera` / `left_wrist_camera` / `right_wrist_camera`
@@ -39,7 +44,8 @@ hackpipe train --config configs/train/smolvla_fr3_duo.yaml --dataset ds-v1 --dry
 ```
 
 Check the printed `lerobot-train` command line by line: `--dataset.repo_id`, `--dataset.root`
-(`data/raw/fr3_duo_handover_84`), `--dataset.episodes` = train split only (no lighting10, no val),
+(absolute path ending in `data/raw/fr3_duo_handover_84`), `--dataset.episodes` = the 76 train episodes only
+(no val, nothing from lighting10),
 `--rename_map`, policy path, batch size, steps, save frequency, seed, output dir, logging target.
 Show it to the human.
 
@@ -56,7 +62,8 @@ kill %1
 - Read seconds/step from the log and peak VRAM from the CSV.
 - Watch GPU utilisation: if it is low, AV1 decoding is the bottleneck → raise `num_workers`, try the other
   video backend, and note it.
-- Out of memory → `--set batch_size=8` and repeat.
+- Out of memory → `--set batch_size=4` and repeat (the config starts at 8 for the T4).
+- T4 has no bf16: if SmolVLA's VLM runs in bf16 it is emulated and slow — the timing run shows it.
 - The timing run also gets a model ID: write it into STATUS.md as "timing run, not a result".
 
 ## 4 · Set the step count
@@ -85,11 +92,18 @@ After a crash: `hackpipe train --config configs/train/smolvla_fr3_duo.yaml --dat
 
 - `outputs/runs/<model>/run_record.json` has: exact command, config, overrides, dataset ID and fingerprint,
   seed, git commit, packages, GPU. Fill any gap in the code (with a test).
-- Training metrics: export loss vs step from the log to `outputs/runs/<model>/loss.csv` and a plot
-  `loss.png` (`scripts/plot_loss.py` **(to build)**).
+- Training metrics: `python scripts/plot_loss.py --log outputs/logs/train_v1.log --model <model>` →
+  `outputs/runs/<model>/loss.csv` + `loss.png`.
 - Checkpoint folder `outputs/train/<model>/checkpoints/` contains the policy config and weights.
 - Quick sanity check (no simulator): load the last checkpoint, run it on a few validation frames, compare
   predicted vs recorded actions (mean abs error per joint). Label it "offline sanity check, not a success rate".
+
+## 6b · Model + model card → Hugging Face (private)
+
+`hackpipe publish --model <model> --repo <hf-user>/<name> --dry-run` → read `outputs/hub/<model>/README.md`,
+then without `--dry-run`. Uploads checkpoint, model card, run record, dataset summary (IDs/counts, no data),
+loss curve; refuses data-like files; private unless `--public`. The card says "not evaluated" until P4 has an
+evaluation — then publish again. Never upload the dataset.
 
 ## 7 · model_v2 (later)
 
@@ -103,9 +117,11 @@ Only if a GPU slot is free and the team agrees. Same ds-v1. Label it "baseline, 
 ## Done when
 
 - [ ] `docs/model_choice.md`
-- [ ] `train --set` and `smolvla_fr3_duo.yaml` merged with tests; dry-run command checked by a human
+- [x] `train --set` and `smolvla_fr3_duo.yaml` merged with tests
+- [ ] Dry-run command checked by a human
 - [ ] Timing: seconds/step, peak VRAM, batch size, data-loader bottleneck (yes/no) recorded
 - [ ] model_v1 trained; run record complete; `loss.csv` + `loss.png`; offline sanity check
+- [ ] model_v1 + card published to the private Hub repo (HF username from the team)
 - [ ] (later) model_v2 trained with identical settings; run-record diff checked
 
 ## Hand-off (STATUS.md)

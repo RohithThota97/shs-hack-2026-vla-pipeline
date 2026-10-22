@@ -52,10 +52,10 @@ One GPU, so GPU jobs run strictly one after another.
 
 | # | Task | Needs | GPU | When |
 |---|---|---|---|---|
-| 1 | 00_setup (incl. AV1 decode check, data copied to the box) | — | short | Day 1 evening |
+| 1 | 00_setup — Colab notebook steps 0–5 (incl. AV1 check, data from Drive) | — | short | Day 1 evening |
 | 2 | P1 → ds-v1 from the 84-episode set (human approves) | 1 | no | Day 1 evening |
 | 3 | P2 → code gaps + config (laptop), then dry run, timing run | ds-v1 approved | yes, ~15 min | Day 1 evening |
-| 4 | P2 → model_v1 full run | 3 + step budget from human | yes, hours | Day 1 night |
+| 4 | P2 → model_v1 full run, then `hackpipe publish` (model + card, private) | 3 + step budget from human | yes, hours | Day 1 night |
 | 5 | Evaluation, gates, improve, model_v2 | model_v1 | — | Day 2+ (briefs P3–P5 to be rewritten) |
 
 In parallel, code only, no GPU: P1 (schema doc, extra QC checks, importer reads per-episode metadata),
@@ -88,10 +88,12 @@ would be lost.
 
 | What | Path |
 |---|---|
-| QC report | `outputs/qc/qc_report.md` (+ `.json`) |
+| QC report | `outputs/qc/<dataset folder>/qc_report.md` (+ `.json`) |
 | Dataset card / manifest | `outputs/datasets/<ds-vN>/` |
 | Training output (checkpoints) | `outputs/train/<model>/` |
 | Run record | `outputs/runs/<model>/run_record.json` |
+| Loss curve | `outputs/runs/<model>/loss.csv`, `loss.png` |
+| Hub upload staging (model card) | `outputs/hub/<model>/` |
 | Logs (create it) | `outputs/logs/` |
 | Registry | `registry/registry.db` |
 
@@ -106,6 +108,8 @@ would be lost.
   frozen test suite, and never deletes `data/`, `outputs/` or `registry/`. It stops and asks.
 - **The held-out test set stays held out.** No episode of `v9_lighting10` goes into any training or
   validation split.
+- **Data never goes to the Hub.** Only models and model cards, private repos, via `hackpipe publish`.
+- **Colab is run by a human.** Agents write code and read the results the notebook leaves on Drive.
 - **Numbers only from logged runs.** Never estimate or invent a result. Unmeasured = `n/a`, never 0.
   Dummy-adapter results are labelled as fake everywhere.
 - **IDs as printed.** Model and evaluation IDs are numbered in registration order. Use the ID the command

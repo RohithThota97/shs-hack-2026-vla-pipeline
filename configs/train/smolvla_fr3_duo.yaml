@@ -1,0 +1,19 @@
+# model_v1: SmolVLA fine-tuned from lerobot/smolvla_base on the FR3 Duo handover data (ds-v1).
+# smolvla_base: cameras camera1..3 (mapped in configs/dataset.yaml → preprocessing.rename_map),
+# max_state_dim = max_action_dim = 32 (our 16 are padded), chunk_size = n_action_steps = 50 (≈1.7 s at 30 fps),
+# freeze_vision_encoder = train_expert_only = true.
+# Sized for a free Colab T4 (16 GB, no bf16): batch 8, frequent checkpoints because sessions drop.
+# Everything under `args` is passed to lerobot-train as --key=value; override with `hackpipe train --set k=v`.
+
+policy_name: smolvla
+args:
+  policy.path: lerobot/smolvla_base
+  policy.device: cuda
+  policy.push_to_hub: false   # publishing goes through `hackpipe publish` (model card + registry)
+  batch_size: 8
+  steps: 20000                # placeholder — set from the timing run (agents/P2_training.md §4), then frozen
+  save_freq: 1000
+  log_freq: 50
+  num_workers: 2              # Colab has 2 vCPUs; raise on a bigger machine
+  wandb.enable: false
+seed: 1000

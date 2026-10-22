@@ -26,6 +26,8 @@ pytest                             # all tests should pass
 #   see docs/runbook.md → "Environment setup"
 ```
 
+**Training on free Colab:** open `notebooks/colab_train.ipynb` (data from your Google Drive, never from the Hub).
+
 Typical flow (each step writes to the registry in `registry/registry.db`):
 
 ```bash
@@ -33,7 +35,8 @@ hackpipe ingest  --root data/raw/<dataset>          # R1  import episodes as dem
 hackpipe qc      --root data/raw/<dataset>          # R2  quality checks + report
 hackpipe dataset create                              # R3  versioned splits → ds-v1 (draft)
 hackpipe dataset approve ds-v1                       # R3  human approval
-hackpipe train   --config configs/train/act.yaml --dataset ds-v1        # R4
+hackpipe train   --config configs/train/smolvla_fr3_duo.yaml --dataset ds-v1 [--set steps=200]   # R4
+hackpipe publish --model <id> --repo <hf-user>/<name> [--dry-run]       # model + card → private HF repo
 hackpipe eval    --model m-v1 --suite configs/eval/test_suite_v1.yaml    # R5 (needs sim adapter)
 hackpipe gates   --eval <eval_id>                    # R6
 hackpipe card    --eval <eval_id>                    # R7  quality statement (model card)
