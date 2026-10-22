@@ -82,3 +82,15 @@ def test_candidate_folders(tmp_path):
     found = candidate_folders(tmp_path)
     assert any(f.endswith("data/incoming/batch1") for f in found)
     assert any(f.endswith("data/raw/zipdir/inner") for f in found) and len(found) == 2
+
+
+def test_token_protects_console(workspace, monkeypatch):
+    monkeypatch.setenv("HACKPIPE_CONSOLE_TOKEN", "s3cret")
+    at = AppTest.from_file(str(CONSOLE / "app.py"), default_timeout=30)
+    at.run()
+    assert not at.exception and "protected" in at.info[0].value
+    assert not any("FR3 Duo · Demo-to-Deployment" in m.value for m in at.markdown)
+    at.text_input[0].input("wrong").run()
+    assert not any("FR3 Duo · Demo-to-Deployment" in m.value for m in at.markdown)
+    at.text_input[0].input("s3cret").run()
+    assert any("FR3 Duo · Demo-to-Deployment" in m.value for m in at.markdown)
