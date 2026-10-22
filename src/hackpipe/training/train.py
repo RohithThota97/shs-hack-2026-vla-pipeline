@@ -7,6 +7,7 @@ LeRobot itself writes train_config.json into every checkpoint; resume with --res
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -83,6 +84,24 @@ def build_command(train_cfg: dict[str, Any], manifest: dict[str, Any], output_di
     return cmd
 
 
+class PreflightError(RuntimeError):
+    pass
+
+
+def preflight() -> None:
+    """`lerobot-train --help` must start: it imports every policy, so dependency clashes show up here
+    (e.g. Colab's preinstalled torchao vs diffusers: `cannot import name 'FqnToConfig'`)."""
+    exe = shutil.which("lerobot-train")
+    if exe is None:
+        raise PreflightError("lerobot-train not found: install LeRobot (pip install 'lerobot[smolvla,dataset]==0.6.1')")
+    proc = subprocess.run([exe, "--help"], capture_output=True, text=True, timeout=300)
+    if proc.returncode != 0:
+        tail = "\n".join((proc.stderr or proc.stdout).strip().splitlines()[-6:])
+        hint = ("\nFix: pip uninstall -y torchao  (SmolVLA doesn't need it; the preinstalled version clashes "
+                "with diffusers)") if "FqnToConfig" in tail or "torchao" in tail else ""
+        raise PreflightError(f"lerobot-train cannot start:\n{tail}{hint}")
+
+
 def train(config_path: str, dataset_version: str, dry_run: bool = False, registry: Registry | None = None,
           resume_model: str | None = None, overrides: dict[str, Any] | None = None) -> dict[str, Any]:
     reg = registry or Registry()
@@ -134,6 +153,7 @@ def train(config_path: str, dataset_version: str, dry_run: bool = False, registr
         print(" ".join(cmd))
         return record
 
+    preflight()                     # a broken LeRobot install fails here, before a model ID is used up
     # Register before launching, so a session that dies mid-run (e.g. Colab) can still be resumed by model ID.
     ckpt = output_dir / "checkpoints" / "last" / "pretrained_model"
     record_path.write_text(json.dumps(record, indent=2))

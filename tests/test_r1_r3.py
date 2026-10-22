@@ -249,6 +249,7 @@ def test_train_set_overrides_and_rename_map(workspace, test_configs, dataset):
 
 
 def test_model_registered_before_training_finishes(workspace, dataset, monkeypatch):
+    monkeypatch.setattr("hackpipe.training.train.preflight", lambda: None)
     import subprocess
     from hackpipe.training.train import train
     tmp, reg = workspace
@@ -300,6 +301,7 @@ def test_resume_rejects_overrides(workspace, dataset):
 
 
 def test_launch_failure_marks_model_failed(workspace, dataset, monkeypatch):
+    monkeypatch.setattr("hackpipe.training.train.preflight", lambda: None)
     import subprocess
     from hackpipe.training.train import train
     reg = _approved(workspace, dataset)
@@ -316,3 +318,44 @@ def test_launch_failure_marks_model_failed(workspace, dataset, monkeypatch):
     assert reg.get_model("m-v1")["status"] == "failed"
     rec = json.loads(Path(reg.get_model("m-v1")["run_record_path"]).read_text())
     assert rec["error"].startswith("FileNotFoundError")
+
+
+def test_preflight_blocks_broken_lerobot_before_registering(workspace, dataset, monkeypatch):
+    import subprocess
+    from hackpipe.training import train as t
+    reg = _approved(workspace, dataset)
+    monkeypatch.setattr(t.shutil, "which", lambda name: "/usr/bin/lerobot-train")
+    real_run = subprocess.run
+
+    def fake_run(cmd, **kw):
+        if cmd[1:] == ["--help"]:
+            return subprocess.CompletedProcess(cmd, 1, "", "ImportError: cannot import name 'FqnToConfig' "
+                                                           "from 'torchao.quantization'")
+        return real_run(cmd, **kw)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    with pytest.raises(t.PreflightError, match="pip uninstall -y torchao"):
+        t.train("configs/train/smolvla_fr3_duo.yaml", "ds-v1", registry=reg)
+    assert reg.models() == []                                   # no model ID used up
+
+
+def test_preflight_needs_lerobot(monkeypatch):
+    from hackpipe.training import train as t
+    monkeypatch.setattr(t.shutil, "which", lambda name: None)
+    with pytest.raises(t.PreflightError, match="not found"):
+        t.preflight()
+
+
+def test_log_steps_rebuilt_from_log_freq(tmp_path):
+    from hackpipe.training.loss import export, parse_metrics
+    lines = [f"INFO step:{s if s < 1000 else str(round(s / 1000)) + 'K'} smpl:1 ep:0 epch:0.01 loss:{1 / s:.4f} "
+             f"grdn:1.0 lr:1.0e-04 updt_s:0.420 data_s:0.031 smp/s:19 mem_gb:9.87" for s in range(500, 3001, 500)]
+    rows = parse_metrics("\n".join(lines), log_freq=500)
+    assert [r["step"] for r in rows] == [500, 1000, 1500, 2000, 2500, 3000]   # printed: 500,1K,2K,2K,2K,3K
+    assert rows[0]["updt_s"] == 0.42 and rows[0]["data_s"] == 0.031 and rows[0]["mem_gb"] == 9.87
+    assert rows[0]["smp/s"] == 19 and rows[0]["lr"] == 1e-4
+    assert [r["step"] for r in parse_metrics("\n".join(lines))][2] == 2000       # no log_freq: as printed
+    (tmp_path / "t.log").write_text("\n".join(lines))
+    export(tmp_path / "t.log", tmp_path / "run", log_freq=500)
+    assert (tmp_path / "run" / "loss.csv").read_text().splitlines()[3].startswith("1500,")
+    assert (tmp_path / "run" / "metrics.csv").read_text().splitlines()[0].startswith("step,loss,grdn,lr,updt_s")
