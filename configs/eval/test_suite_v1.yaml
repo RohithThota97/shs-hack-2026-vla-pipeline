@@ -1,0 +1,39 @@
+# Test suite v1 — frozen once used. Any change creates test_suite_v2.
+# CONFIRM against the organisers' evaluation rules; their rules come first.
+
+version: test-v1
+env_version: env-v1          # bump when the simulator or scene changes
+default_time_limit_s: 60
+
+scenarios:
+  - id: seen-01
+    category: seen
+    seen: true
+    instruction: "Pick the {item} and place it on the {target}."   # fill from task definition
+    initial_layout: "as in training"                               # CONFIRM
+    n_runs: 5
+    seed_base: 1000
+  - id: unseen-pos-01
+    category: unseen_positions
+    seen: false
+    instruction: "Pick the {item} and place it on the {target}."
+    initial_layout: "item positions not used in training"
+    n_runs: 5
+    seed_base: 2000
+  - id: env-var-01
+    category: environment_variation
+    seen: false
+    instruction: "Pick the {item} and place it on the {target}."
+    initial_layout: "as in training"
+    lighting: "changed"
+    distractors: true
+    n_runs: 5
+    seed_base: 3000
+  - id: obstacle-01
+    category: obstacle
+    seen: false
+    instruction: "Pick the {item} and place it on the {target}."
+    initial_layout: "as in training"
+    obstacles: "object in the arm path"
+    n_runs: 5
+    seed_base: 4000

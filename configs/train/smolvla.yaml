@@ -1,0 +1,17 @@
+# v2 main model: SmolVLA fine-tuned from lerobot/smolvla_base. ~10–16 GB GPU memory (LeRobot guide).
+# SmolVLA defaults: freeze_vision_encoder=true, train_expert_only=true (lighter fine-tune).
+
+policy_name: smolvla
+args:
+  policy.path: lerobot/smolvla_base
+  policy.device: cuda
+  policy.push_to_hub: false
+  batch_size: 8
+  steps: 20000            # set from total_frames: steps = epochs × total_frames / batch_size
+  save_freq: 2000
+  num_workers: 8
+seed: 1000
+
+# pi0.5 (v3 stretch): full fine-tune does not fit 24 GB. openpi lists LoRA fine-tuning at > 22.5 GB on an
+# RTX 4090 (Ubuntu 22.04). Run it through openpi, then register the checkpoint with:
+#   hackpipe train --register-only --checkpoint <dir> --dataset ds-vN --policy-name pi05_lora

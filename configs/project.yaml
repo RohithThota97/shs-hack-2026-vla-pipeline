@@ -1,0 +1,30 @@
+# Project-wide settings. Values marked CONFIRM must be checked against the organisers' docs on Day 1.
+
+project:
+  name: shs-hack-2026-vla-pipeline
+  registry_path: registry/registry.db
+  outputs_dir: outputs
+
+robot:
+  type: fr3_duo            # CONFIRM name used in the organisers' data schema
+  embodiment: dual_arm
+  notes: "Two FR3 arms; grippers and cameras per organiser schema (CONFIRM)"
+
+task:
+  name: fetch_item          # CONFIRM with the organisers' task definition
+  instruction_templates:     # CONFIRM wording used in the provided episodes
+    - "Pick the {item} and place it on the {target}."
+  language: en
+
+dataset:
+  # The provided dataset after download from the local file share.
+  root: data/raw/provided_dataset   # CONFIRM
+  repo_id: local/provided_dataset   # LeRobot needs a repo_id even for local datasets
+
+# Defaults used when a demo record has no metadata for these fields.
+demo_defaults:
+  operator: unknown
+  environment:
+    scene: provided_3d_clinical_environment
+    layout_id: unknown
+    lighting: unknown

@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hackpipe"
+version = "0.1.0"
+description = "Demo-to-deployment pipeline for the SHS Robotics & AI Hackathon 2026 (Challenge 2)"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "pyyaml>=6",
+    "numpy>=1.24",
+    "pandas>=2.0",
+    "pyarrow>=14",
+]
+
+[project.optional-dependencies]
+video = ["av>=12"]
+dashboard = ["streamlit>=1.30"]
+dev = ["pytest>=7"]
+
+[project.scripts]
+hackpipe = "hackpipe.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

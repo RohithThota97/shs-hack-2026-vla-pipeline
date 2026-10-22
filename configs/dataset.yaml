@@ -1,0 +1,34 @@
+# Quality checks (R2) and dataset versioning (R3).
+# Column names follow LeRobotDataset v3 defaults. CONFIRM against the organisers' data schema.
+
+columns:
+  episode: episode_index
+  frame: frame_index
+  timestamp: timestamp
+  task_index: task_index
+  state: observation.state
+  action: action
+  success: null            # e.g. "next.success" if the dataset has it; null = not checked
+
+quality:
+  min_episode_frames: 10       # shorter → REVIEW
+  max_episode_frames: 100000   # longer → REVIEW
+  timestamp_tolerance_s: null  # null = half a frame period (0.5 / fps)
+  gap_factor: 1.5              # a timestamp step > gap_factor / fps counts as missing frames
+  check_videos: true           # needs `pip install -e ".[video]"` (PyAV); skipped if not installed
+  joint_limits: null           # optional: {"observation.state": {"min": [...], "max": [...]}}
+  accept_review_as_valid: false
+
+splits:
+  seed: 1000
+  train: 0.8
+  val: 0.1
+  test: 0.1
+  # Hold out whole groups (e.g. task or layout) for the test split when the metadata has them.
+  group_key: null              # e.g. "task" to keep every episode of a task in one split
+  test_episodes: []            # explicit held-out episode indices (overrides the test ratio)
+
+preprocessing:
+  # Recorded in the dataset manifest so training is reproducible. Adjust to the chosen policy.
+  image_size: null             # null = keep dataset resolution
+  rename_map: {}               # dataset key → policy key (LeRobot --rename_map, observation keys only)

@@ -1,0 +1,19 @@
+# Quality gates (R6). Thresholds are TEAM TARGETS — agree them on Day 1, not industry standards.
+
+data:
+  require_approved_dataset: true
+
+training:
+  require_run_record: true
+
+evaluation:
+  min_runs: 20
+  min_success_rate: 0.8              # proposed team target
+  no_worse_than_current: true        # success rate must not drop vs the deployed model
+  max_collision_rate_increase: 0.0   # vs deployed model
+  max_safety_stop_rate_increase: 0.0 # vs deployed model
+  max_latency_p95_ms: null           # set from the action-chunk duration once known
+
+improve:
+  target_success_rate: 0.8
+  demos_per_gap: 20                  # suggested number of targeted demos per weak scenario category

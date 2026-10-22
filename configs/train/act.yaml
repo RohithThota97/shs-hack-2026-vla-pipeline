@@ -1,0 +1,14 @@
+# v1 baseline: ACT trained from scratch (LeRobot). ~2–6 GB GPU memory (LeRobot Compute HW Guide).
+# Everything under `args` is passed to lerobot-train as --key=value. The wrapper adds dataset, episodes,
+# output_dir, job_name and seed.
+
+policy_name: act
+args:
+  policy.type: act
+  policy.device: cuda
+  policy.push_to_hub: false
+  batch_size: 8
+  steps: 20000            # set from total_frames: steps = epochs × total_frames / batch_size
+  save_freq: 2000         # checkpoint roughly every 20 minutes
+  num_workers: 8
+seed: 1000

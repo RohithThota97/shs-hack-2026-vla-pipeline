@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Environment and secrets
+.env
+
+# Data, outputs, registry, weights (never commit)
+data/*
+!data/.gitkeep
+outputs/*
+!outputs/.gitkeep
+registry/*
+!registry/.gitkeep
+*.safetensors
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.mp4
+*.parquet
+wandb/
+mlruns/
+
+# OS / editors
+.DS_Store
+.vscode/
+.idea/
