@@ -13,10 +13,10 @@ def _print(obj) -> None:
 
 def _writes(args) -> bool:
     """Commands that change the registry claim the writer role first (see common/writelock.py)."""
-    if args.cmd in ("ingest", "qc", "eval", "gates", "deploy", "rollback"):
+    if args.cmd in ("ingest", "qc", "auto", "demo", "eval", "gates", "deploy", "rollback"):
         return True
     if args.cmd == "dataset":
-        return args.action in ("create", "approve")
+        return args.action in ("create", "approve") or (args.action == "materialize" and not args.plan)
     if args.cmd in ("train", "publish"):
         return not args.dry_run
     return False
@@ -31,15 +31,29 @@ def main(argv: list[str] | None = None) -> None:
     s.add_argument("--watch", action="store_true", help="keep polling for new episodes")
     s.add_argument("--interval", type=int, default=60)
 
-    s = sub.add_parser("qc", help="R2 data quality checks + report")
+    s = sub.add_parser("qc", help="R2 data quality checks + report (new/changed demos only)")
     s.add_argument("--root", required=True)
+    s.add_argument("--full", action="store_true", help="re-check every episode, not only new/changed ones")
+    s = sub.add_parser("auto", help="new demos → import → QC (new only) → next draft version, automatically")
+    s.add_argument("--root", required=True)
+    s.add_argument("--notes", default="")
+    s = sub.add_parser("demo", help="exclude / include a demo for future dataset versions")
+    s.add_argument("action", choices=["exclude", "include"])
+    s.add_argument("demo_id")
+    s.add_argument("--reason", default="")
+    s.add_argument("--by", default="")
 
     s = sub.add_parser("dataset", help="R3 versioned datasets")
     ds_sub = s.add_subparsers(dest="action", required=True)
     c = ds_sub.add_parser("create")
     c.add_argument("--notes", default="")
+    c.add_argument("--base", help="approved version to build on, or 'latest'")
     a = ds_sub.add_parser("approve")
     a.add_argument("version")
+    a.add_argument("--by", default="", help="who approves (recorded)")
+    mz = ds_sub.add_parser("materialize", help="merge a multi-source version into one training folder")
+    mz.add_argument("version")
+    mz.add_argument("--plan", action="store_true", help="print the merge command and mapping only")
     ds_sub.add_parser("list")
 
     s = sub.add_parser("train", help="R4 reproducible training")
@@ -115,20 +129,34 @@ def main(argv: list[str] | None = None) -> None:
         if args.watch:
             watch(args.root, args.interval, reg)
         else:
-            print(f"Imported {ingest(args.root, reg)} demos")
+            from hackpipe.ingest.importer import import_demos
+            r = import_demos(args.root, reg)
+            _print({k: (len(v) if isinstance(v, list) else v) for k, v in r.items()})
     elif args.cmd == "qc":
         from hackpipe.quality.report import run_qc
-        r = run_qc(args.root, reg)
-        _print({k: r[k] for k in ("n_episodes", "status_counts", "reason_counts", "dataset_issues", "paths")})
+        r = run_qc(args.root, reg, full=args.full)
+        _print({k: r[k] for k in ("n_episodes", "checked_now", "reused", "status_counts", "reason_counts",
+                                  "dataset_issues", "paths")})
+    elif args.cmd == "auto":
+        from hackpipe.pipeline.auto import run_auto
+        _print(run_auto(args.root, reg, args.notes))
+    elif args.cmd == "demo":
+        from hackpipe.dataset.versioning import set_excluded
+        set_excluded(args.demo_id, args.action == "exclude", args.reason, args.by, reg)
+        print(f"{args.demo_id} {args.action}d")
     elif args.cmd == "dataset":
         from hackpipe.dataset import versioning as v
         if args.action == "create":
-            m = v.create_dataset_version(reg, notes=args.notes)
-            _print({"version": m["version"], "fingerprint": m["fingerprint"],
-                    "counts": {k: len(x) for k, x in m["splits"].items()}, "status": "draft"})
+            base = v.latest_approved(reg) if args.base == "latest" else args.base
+            m = v.create_dataset_version(reg, notes=args.notes, base=base)
+            _print({"version": m["version"], "fingerprint": m["fingerprint"], "base": base,
+                    "counts": {k: len(x) for k, x in m["demo_ids"].items()}, "status": "draft"})
         elif args.action == "approve":
-            v.approve(args.version, reg)
-            print(f"{args.version} approved")
+            v.approve(args.version, reg, by=args.by)
+            print(f"{args.version} approved" + (f" by {args.by}" if args.by else ""))
+        elif args.action == "materialize":
+            from hackpipe.dataset.materialize import materialize
+            _print(materialize(args.version, reg, run=not args.plan))
         else:
             _print([{k: d[k] for k in ("version", "fingerprint", "status", "created_at")} for d in reg.datasets()])
     elif args.cmd == "train":
@@ -181,7 +209,7 @@ def main(argv: list[str] | None = None) -> None:
                                        "ended_at", "exit_code")} for j in reg.jobs(limit=20)])
     elif args.cmd == "status":
         _print({
-            "demos": {s: len(reg.demos(status=s)) for s in ("imported", "VALID", "REVIEW", "INVALID")},
+            "demos": {s: len(reg.demos(status=s)) for s in ("imported", "VALID", "REVIEW", "INVALID", "DUPLICATE")},
             "datasets": [{k: d[k] for k in ("version", "status")} for d in reg.datasets()],
             "models": [{k: m[k] for k in ("version", "policy_name", "dataset_version", "status")} for m in reg.models()],
             "evals": [{"eval_id": e["eval_id"], "success": e["metrics"]["task_success"]["rate"],

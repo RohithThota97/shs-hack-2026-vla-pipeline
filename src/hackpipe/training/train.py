@@ -51,14 +51,29 @@ def apply_overrides(cfg: dict[str, Any], overrides: dict[str, Any]) -> dict[str,
     return cfg
 
 
+def training_input(manifest: dict[str, Any], dataset_root: str | None = None) -> dict[str, Any]:
+    """Which folder, repo id and episode indices training reads: the merged folder for multi-source versions,
+    else the version's single source (falling back to the project dataset root for old manifests)."""
+    mat = manifest.get("materialized")
+    if mat:
+        return {"repo_id": mat["repo_id"], "root": str(resolve(mat["root"])), "episodes": mat["splits"]["train"]}
+    if manifest.get("needs_materialize"):
+        raise RuntimeError(f"{manifest['version']} has several sources; merge them first: "
+                           f"hackpipe dataset materialize {manifest['version']}")
+    src = manifest.get("source")
+    root = str(resolve(src)) if src else dataset_root
+    return {"repo_id": manifest["repo_id"], "root": root, "episodes": manifest["splits"]["train"]}
+
+
 def build_command(train_cfg: dict[str, Any], manifest: dict[str, Any], output_dir: Path, job_name: str,
                   dataset_root: str | None) -> list[str]:
-    cmd = ["lerobot-train", f"--dataset.repo_id={manifest['repo_id']}"]
-    if dataset_root:
-        cmd.append(f"--dataset.root={dataset_root}")
-    if manifest.get("revision"):
+    inp = training_input(manifest, dataset_root)
+    cmd = ["lerobot-train", f"--dataset.repo_id={inp['repo_id']}"]
+    if inp["root"]:
+        cmd.append(f"--dataset.root={inp['root']}")
+    if manifest.get("revision") and not manifest.get("materialized"):
         cmd.append(f"--dataset.revision={manifest['revision']}")
-    cmd.append(f"--dataset.episodes={_fmt(manifest['splits']['train'])}")
+    cmd.append(f"--dataset.episodes={_fmt(inp['episodes'])}")
     cmd += [f"--output_dir={output_dir}", f"--job_name={job_name}", f"--seed={train_cfg.get('seed', 1000)}"]
     rename = manifest["preprocessing"]["preprocessing"].get("rename_map") or {}
     if rename:

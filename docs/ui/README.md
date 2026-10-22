@@ -5,7 +5,7 @@ One file per page. Review a spec before its branch is built; change the spec fir
 | Spec | Page | Branch | State |
 |---|---|---|---|
 | [00_shell_and_overview.md](00_shell_and_overview.md) | Layout, theme, global page, jobs, machine, writer | `ui/specs-shell` | built |
-| [01_data.md](01_data.md) | Data (R1–R3) | `ui/data` | next |
+| [01_data.md](01_data.md) | Data (R1–R3) | `ui/data` | built |
 | [02_train.md](02_train.md) | Train (R4) | `ui/train` | spec for review |
 | [03_evaluate.md](03_evaluate.md) | Evaluate (R5, R8, option A) | `ui/evaluate` | spec for review |
 | [04_deploy.md](04_deploy.md) | Deploy (R6, R7, R10, Hub) | `ui/deploy` | spec for review |

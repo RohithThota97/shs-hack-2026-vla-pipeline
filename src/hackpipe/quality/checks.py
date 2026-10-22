@@ -134,7 +134,9 @@ def check_final_state(extra: dict[str, Any], rules: dict[str, Any]) -> list[str]
     return out
 
 
-def check_dataset(root: str | Path, cfg: dict[str, Any] | None = None) -> dict[str, Any]:
+def check_dataset(root: str | Path, cfg: dict[str, Any] | None = None,
+                  only_episodes: set[int] | None = None) -> dict[str, Any]:
+    """only_episodes: check just these episodes (incremental QC); dataset-level checks always run."""
     cfg = cfg or dataset_config()
     ds = DatasetFolder(root)
     cols, q = cfg["columns"], cfg["quality"]
@@ -148,15 +150,25 @@ def check_dataset(root: str | Path, cfg: dict[str, Any] | None = None) -> dict[s
             dataset_issues.append(f"{name} dim in info.json {dims[name]} != robot config {want}")
             dims[name] = want                      # every episode then fails the dimension check
     extras = ds.episode_extras()
+    n_episodes = int(df[cols["episode"]].nunique())
     episodes = [check_episode(ep, ds.fps, dims, cfg, extras.get(int(i)))
-                for i, ep in df.groupby(cols["episode"], sort=True)]
+                for i, ep in df.groupby(cols["episode"], sort=True)
+                if only_episodes is None or int(i) in only_episodes]
 
-    if "total_episodes" in ds.info and ds.info["total_episodes"] != len(episodes):
-        dataset_issues.append(f"info.json total_episodes={ds.info['total_episodes']} but found {len(episodes)}")
+    if "total_episodes" in ds.info and ds.info["total_episodes"] != n_episodes:
+        dataset_issues.append(f"info.json total_episodes={ds.info['total_episodes']} but found {n_episodes}")
     if "total_frames" in ds.info and ds.info["total_frames"] != len(df):
         dataset_issues.append(f"info.json total_frames={ds.info['total_frames']} but found {len(df)}")
-    if q.get("check_videos"):
-        videos, frame_times = check_videos(ds)
+    ep_meta = ds.episodes_meta()
+    files = None
+    if only_episodes is not None and len(ep_meta):
+        rows = ep_meta[ep_meta["episode_index"].isin(only_episodes)]
+        files = {ds.episode_video_file(k, r[f"videos/{k}/chunk_index"], r[f"videos/{k}/file_index"])
+                 for _, r in rows.iterrows() for k in ds.video_keys if f"videos/{k}/chunk_index" in r}
+    if not episodes:
+        videos, frame_times = {"skipped": "no episodes to check"}, {}
+    elif q.get("check_videos"):
+        videos, frame_times = check_videos(ds, files)
     else:
         videos, frame_times = {"skipped": "disabled in config"}, {}
     if videos.get("missing_keys"):
@@ -164,7 +176,6 @@ def check_dataset(root: str | Path, cfg: dict[str, Any] | None = None) -> dict[s
     if videos.get("corrupted"):
         dataset_issues.append(f"corrupted video files: {len(videos['corrupted'])}")
 
-    ep_meta = ds.episodes_meta()
     if len(ep_meta) and ds.video_keys:        # file presence + sync need no decoding; frame counts do
         corrupted = {Path(c["file"]) for c in videos.get("corrupted", [])}
         tol_s = q["timestamp_tolerance_s"] if q["timestamp_tolerance_s"] is not None else 0.5 / ds.fps
@@ -175,7 +186,7 @@ def check_dataset(root: str | Path, cfg: dict[str, Any] | None = None) -> dict[s
                 check_episode_videos(e, row, ds, frame_times, corrupted, tol_s)
                 e.finalize()
 
-    return {"root": str(Path(root).resolve()), "fps": ds.fps, "n_episodes": len(episodes),
+    return {"root": str(Path(root).resolve()), "fps": ds.fps, "n_episodes": n_episodes,
             "n_frames": int(len(df)), "episodes": episodes, "dataset_issues": dataset_issues, "videos": videos,
             "redundancy": redundancy(df, cols)}
 
@@ -221,8 +232,9 @@ def check_episode_videos(e: EpisodeCheck, row: pd.Series, ds: DatasetFolder,
                 e.soft.append(f"missing_frames:{name} ({decoded} decoded vs {n} expected)")
 
 
-def check_videos(ds: DatasetFolder) -> tuple[dict[str, Any], dict[Path, np.ndarray]]:
-    """Each video key has files, and each file decodes start to end (needs PyAV). Also returns frame times."""
+def check_videos(ds: DatasetFolder, files: set[Path] | None = None) -> tuple[dict[str, Any], dict[Path, np.ndarray]]:
+    """Each video key has files, and each file decodes start to end (needs PyAV). Also returns frame times.
+    files: decode only these (incremental QC); None = all."""
     out: dict[str, Any] = {"missing_keys": [], "corrupted": [], "checked_files": 0, "decoded_frames": 0}
     times: dict[Path, np.ndarray] = {}
     for key in ds.video_keys:
@@ -236,6 +248,8 @@ def check_videos(ds: DatasetFolder) -> tuple[dict[str, Any], dict[Path, np.ndarr
         return out, times
     for key in ds.video_keys:
         for f in ds.video_files(key):
+            if files is not None and f not in files:
+                continue
             out["checked_files"] += 1
             t = []
             try:

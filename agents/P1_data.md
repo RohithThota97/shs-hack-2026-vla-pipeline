@@ -41,6 +41,13 @@ final-state / redundancy checks built and tested). Left: the joint-limit `CONFIR
 4. Extra quality checks, if missing (each with a test): video frame count per camera == parquet rows;
    gripper values in [0, 1]; non-finite state/action; large jumps between consecutive joint targets.
 
+## Automatic path (preferred, 23 Oct)
+
+`hackpipe auto --root <folder>` (or Data → Add demonstrations → Run pipeline in `hackpipe console`) does import →
+QC of new/changed demos only → next draft version based on the latest approved one. Duplicates of already
+registered demos are recognised and skipped. You still STOP before approval; the human approves in the console or
+with `hackpipe dataset approve ds-vN --by <name>`. The manual steps below are what `auto` runs.
+
 ## B · ds-v1 (runner session)
 
 1. **Import:** `hackpipe ingest --root data/raw/fr3_duo_handover_84` → 84 demo records, one task.

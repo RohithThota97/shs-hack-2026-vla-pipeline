@@ -5,9 +5,15 @@ Per demo: source, recording span, robot config, operator, task, environment (inc
 lighting from meta/fr3_episodes_extra.jsonl when present), cameras, SHA-256 of every file holding the episode,
 import time and pipeline version.
 `watch()` polls a folder, imports new episodes as they appear and re-runs the quality report (R2).
+
+Incremental: a demo already registered with unchanged files is skipped; a changed one goes back to "imported"
+(re-checked by QC); a demo whose content and file checksums equal a demo from another folder is a DUPLICATE and
+never enters a dataset version. File hashes are cached by (path, size, mtime) so re-imports don't rehash GBs.
 """
 from __future__ import annotations
 
+import json
+import os
 import time
 from pathlib import Path
 from typing import Any
@@ -16,7 +22,7 @@ import numpy as np
 import pandas as pd
 
 import hackpipe
-from hackpipe.common.config import dataset_config, project_config, source_key
+from hackpipe.common.config import dataset_config, project_config, resolve, source_key
 from hackpipe.common.envinfo import git_info
 from hackpipe.common.ids import demo_id, now_iso, sha256_bytes, sha256_file
 from hackpipe.common.lerobot_io import DatasetFolder
@@ -66,7 +72,46 @@ def _outcome(extra: dict[str, Any]) -> dict[str, Any]:
             "placement_offset_mm": (fm.get("placement_offset_mm") or {}).get("horizontal")}
 
 
-def build_demo_records(root: str | Path, source: str | None = None) -> list[dict[str, Any]]:
+class HashCache:
+    """sha256 per file, reused while (size, mtime) are unchanged. Stored next to the registry."""
+
+    def __init__(self, path: Path | None = None):
+        reg = resolve(project_config()["project"]["registry_path"])
+        self.path = path or reg.with_name("file_hash_cache.json")
+        try:
+            self.data: dict[str, Any] = json.loads(self.path.read_text())
+        except (OSError, ValueError):
+            self.data = {}
+        self.hits = self.misses = 0
+
+    def sha(self, f: Path) -> str:
+        st = f.stat()
+        key, sig = str(f.resolve()), [st.st_size, st.st_mtime_ns]
+        hit = self.data.get(key)
+        if hit and hit["sig"] == sig:
+            self.hits += 1
+            return hit["sha256"]
+        self.misses += 1
+        digest = sha256_file(f)
+        self.data[key] = {"sig": sig, "sha256": digest}
+        return digest
+
+    def save(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(self.data))
+        os.replace(tmp, self.path)
+
+
+def duplicate_key(episode_index: int, meta: dict[str, Any]) -> str:
+    """Same episode of the same files: episode index + content + checksums of the files holding it.
+    (In LeRobot v3 several episodes share files, and here even their content is identical.)"""
+    files = meta.get("files_sha256") or {}
+    return "|".join([str(episode_index), str(meta.get("content_sha256")), *sorted(str(v) for v in files.values())])
+
+
+def build_demo_records(root: str | Path, source: str | None = None,
+                       cache: HashCache | None = None) -> list[dict[str, Any]]:
     ds = DatasetFolder(root)
     cfg = dataset_config()["columns"]
     proj = project_config()
@@ -78,7 +123,7 @@ def build_demo_records(root: str | Path, source: str | None = None) -> list[dict
     source = source or source_key(root)
     ep_col, ts_col = cfg["episode"], cfg["timestamp"]
     hash_cols = [cfg["frame"], ts_col, cfg["state"], cfg["action"]]
-    file_sha: dict[Path, str] = {}
+    cache = cache or HashCache()
     pipeline = {"hackpipe": hackpipe.__version__, "git_commit": git_info().get("commit")}
     cameras = {k: {"shape": ds.features[k].get("shape"),
                    "fps": (ds.features[k].get("info") or {}).get("video.fps", ds.fps),
@@ -94,8 +139,7 @@ def build_demo_records(root: str | Path, source: str | None = None) -> list[dict
         files = {}
         for f in _episode_files(ds, ep_rows.get(ep_idx)):
             if f.exists():
-                file_sha.setdefault(f, sha256_file(f))
-                files[f.relative_to(ds.root).as_posix()] = file_sha[f]
+                files[f.relative_to(ds.root).as_posix()] = cache.sha(f)
             else:
                 files[f.relative_to(ds.root).as_posix()] = None   # missing → R2 flags it
         extra = extras.get(ep_idx, {})
@@ -140,12 +184,41 @@ def build_demo_records(root: str | Path, source: str | None = None) -> list[dict
     return records
 
 
-def ingest(root: str | Path, registry: Registry | None = None) -> int:
+def import_demos(root: str | Path, registry: Registry | None = None) -> dict[str, Any]:
+    """Register the folder's episodes. Returns counts of new / changed / unchanged / duplicate demos."""
     reg = registry or Registry()
-    records = build_demo_records(root)
+    cache = HashCache()
+    records = build_demo_records(root, cache=cache)
+    cache.save()
+    known = {duplicate_key(d["episode_index"], d["meta"]): d for d in reg.demos() if d["status"] != "DUPLICATE"}
+    out: dict[str, Any] = {"source": source_key(root), "episodes": len(records), "new": [], "changed": [],
+                           "unchanged": [], "duplicate": [], "hash_cache": {"hits": cache.hits,
+                                                                            "misses": cache.misses}}
     for r in records:
+        existing = reg.get_demo(r["demo_id"])
+        if existing:
+            same = (existing["meta"].get("content_sha256") == r["meta"]["content_sha256"]
+                    and existing["meta"].get("files_sha256") == r["meta"]["files_sha256"])
+            if same:
+                out["unchanged"].append(r["episode_index"])
+                continue
+            reg.upsert_demo(r["demo_id"], r["source"], r["episode_index"], r["meta"], status="imported")
+            out["changed"].append(r["episode_index"])
+            continue
+        twin = known.get(duplicate_key(r["episode_index"], r["meta"]))
+        if twin and twin["source"] != r["source"]:
+            reg.upsert_demo(r["demo_id"], r["source"], r["episode_index"],
+                            {**r["meta"], "duplicate_of": twin["demo_id"]}, status="DUPLICATE")
+            out["duplicate"].append(r["episode_index"])
+            continue
         reg.upsert_demo(r["demo_id"], r["source"], r["episode_index"], r["meta"])
-    return len(records)
+        out["new"].append(r["episode_index"])
+    return out
+
+
+def ingest(root: str | Path, registry: Registry | None = None) -> int:
+    """Import a folder; returns the number of episodes in it (see import_demos for the breakdown)."""
+    return import_demos(root, registry)["episodes"]
 
 
 def watch(root: str | Path, interval_s: int = 60, registry: Registry | None = None,
