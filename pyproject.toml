@@ -18,7 +18,8 @@ dependencies = [
 [project.optional-dependencies]
 video = ["av>=12"]
 dashboard = ["streamlit>=1.30"]
-dev = ["pytest>=7"]
+dev = ["pytest>=7", "huggingface_hub>=0.24"]
+hub = ["huggingface_hub>=0.24"]
 
 [project.scripts]
 hackpipe = "hackpipe.cli:main"

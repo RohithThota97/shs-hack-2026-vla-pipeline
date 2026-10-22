@@ -12,6 +12,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 from hackpipe.common.config import load_yaml, project_config, resolve
 from hackpipe.common.envinfo import environment
 from hackpipe.common.ids import next_version, now_iso
@@ -27,11 +29,35 @@ def _fmt(v: Any) -> str:
     return str(v)
 
 
+def parse_overrides(pairs: list[str] | None) -> dict[str, Any]:
+    """["steps=200", "policy.device=cuda"] → {"steps": 200, "policy.device": "cuda"} (values parsed as YAML)."""
+    out: dict[str, Any] = {}
+    for pair in pairs or []:
+        key, sep, value = pair.partition("=")
+        if not sep or not key:
+            raise ValueError(f"--set expects key=value, got {pair!r}")
+        out[key.strip()] = yaml.safe_load(value)
+    return out
+
+
+def apply_overrides(cfg: dict[str, Any], overrides: dict[str, Any]) -> dict[str, Any]:
+    """`seed` and `policy_name` are top-level config keys; everything else is a lerobot-train arg."""
+    cfg = {**cfg, "args": dict(cfg.get("args") or {})}
+    for k, v in overrides.items():
+        if k in ("seed", "policy_name"):
+            cfg[k] = v
+        else:
+            cfg["args"][k] = v
+    return cfg
+
+
 def build_command(train_cfg: dict[str, Any], manifest: dict[str, Any], output_dir: Path, job_name: str,
                   dataset_root: str | None) -> list[str]:
     cmd = ["lerobot-train", f"--dataset.repo_id={manifest['repo_id']}"]
     if dataset_root:
         cmd.append(f"--dataset.root={dataset_root}")
+    if manifest.get("revision"):
+        cmd.append(f"--dataset.revision={manifest['revision']}")
     cmd.append(f"--dataset.episodes={_fmt(manifest['splits']['train'])}")
     cmd += [f"--output_dir={output_dir}", f"--job_name={job_name}", f"--seed={train_cfg.get('seed', 1000)}"]
     rename = manifest["preprocessing"]["preprocessing"].get("rename_map") or {}
@@ -43,15 +69,18 @@ def build_command(train_cfg: dict[str, Any], manifest: dict[str, Any], output_di
 
 
 def train(config_path: str, dataset_version: str, dry_run: bool = False, registry: Registry | None = None,
-          resume_model: str | None = None) -> dict[str, Any]:
+          resume_model: str | None = None, overrides: dict[str, Any] | None = None) -> dict[str, Any]:
     reg = registry or Registry()
     manifest = load_manifest(dataset_version, reg)
     if manifest["status"] != "approved":
         raise RuntimeError(f"{dataset_version} is '{manifest['status']}'. Approve it first: "
                            f"hackpipe dataset approve {dataset_version}")
-    cfg = load_yaml(config_path)
+    cfg = apply_overrides(load_yaml(config_path), overrides or {})
     outputs = resolve(project_config()["project"]["outputs_dir"])
 
+    if resume_model and overrides:
+        raise ValueError("--set cannot be combined with --resume: lerobot-train resumes from the saved "
+                         "train_config.json, so the overrides would be recorded but not applied.")
     if resume_model:
         model = reg.get_model(resume_model)
         if model is None:
@@ -62,8 +91,9 @@ def train(config_path: str, dataset_version: str, dry_run: bool = False, registr
     else:
         version = next_version([m["version"] for m in reg.models()], "m")
         output_dir = outputs / "train" / version
+        root = project_config()["dataset"].get("root")
         cmd = build_command(cfg, manifest, output_dir, f"{version}-{cfg.get('policy_name', 'policy')}",
-                            project_config()["dataset"].get("root"))
+                            str(resolve(root)) if root else None)
 
     record = {
         "model_version": version,
@@ -72,6 +102,7 @@ def train(config_path: str, dataset_version: str, dry_run: bool = False, registr
         "policy_name": cfg.get("policy_name"),
         "train_config_file": str(config_path),
         "train_config": cfg,
+        "overrides": overrides or {},
         "command": cmd,
         "output_dir": str(output_dir),
         "environment": environment(),
@@ -88,17 +119,28 @@ def train(config_path: str, dataset_version: str, dry_run: bool = False, registr
         print(" ".join(cmd))
         return record
 
+    # Register before launching, so a session that dies mid-run (e.g. Colab) can still be resumed by model ID.
+    ckpt = output_dir / "checkpoints" / "last" / "pretrained_model"
+    record_path.write_text(json.dumps(record, indent=2))
+    if resume_model:
+        reg.set_model_status(version, "training")
+    else:
+        reg.add_model(version, dataset_version, cfg.get("policy_name", "policy"), "training", str(ckpt),
+                      str(record_path), {"output_dir": str(output_dir), "train_config_file": str(config_path)})
+    print(f"{version}: training started — resume after a crash with "
+          f"`hackpipe train --dataset {dataset_version} --resume {version}`", flush=True)
     t0 = time.time()
-    proc = subprocess.run(cmd)
+    try:
+        proc = subprocess.run(cmd)
+    except BaseException as e:                 # lerobot-train missing, Ctrl+C, …: never leave 'training' behind
+        record.update({"ended_at": now_iso(), "duration_s": round(time.time() - t0, 1), "exit_code": None,
+                       "error": f"{type(e).__name__}: {e}"})
+        record_path.write_text(json.dumps(record, indent=2))
+        reg.set_model_status(version, "failed")
+        raise
     record.update({"ended_at": now_iso(), "duration_s": round(time.time() - t0, 1), "exit_code": proc.returncode})
     record_path.write_text(json.dumps(record, indent=2))
-    status = "trained" if proc.returncode == 0 else "failed"
-    ckpt = output_dir / "checkpoints" / "last" / "pretrained_model"
-    if resume_model:
-        reg.set_model_status(version, status)
-    else:
-        reg.add_model(version, dataset_version, cfg.get("policy_name", "policy"), status, str(ckpt),
-                      str(record_path), {"output_dir": str(output_dir), "train_config_file": str(config_path)})
+    reg.set_model_status(version, "trained" if proc.returncode == 0 else "failed")
     return record
 
 

@@ -1,7 +1,10 @@
 """R1 — Import episodes from a dataset folder into the registry as demo records.
 
 Each episode becomes one demo record with a deterministic UUID, so re-importing never duplicates.
-`watch()` polls a folder and imports new episodes as they appear.
+Per demo: source, recording span, robot config, operator, task, environment (incl. per-episode seed and
+lighting from meta/fr3_episodes_extra.jsonl when present), cameras, SHA-256 of every file holding the episode,
+import time and pipeline version.
+`watch()` polls a folder, imports new episodes as they appear and re-runs the quality report (R2).
 """
 from __future__ import annotations
 
@@ -12,8 +15,10 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from hackpipe.common.config import dataset_config, project_config
-from hackpipe.common.ids import demo_id, now_iso, sha256_bytes
+import hackpipe
+from hackpipe.common.config import dataset_config, project_config, source_key
+from hackpipe.common.envinfo import git_info
+from hackpipe.common.ids import demo_id, now_iso, sha256_bytes, sha256_file
 from hackpipe.common.lerobot_io import DatasetFolder
 from hackpipe.common.registry import Registry
 
@@ -30,40 +35,105 @@ def _episode_checksum(ep: pd.DataFrame, cols: list[str]) -> str:
     return sha256_bytes(b"".join(parts))
 
 
+def _episode_files(ds: DatasetFolder, row: pd.Series | None) -> list[Path]:
+    """Data file + one video file per camera that hold this episode (v3 packs many episodes per file)."""
+    if row is None:
+        return ds.data_files() + [f for k in ds.video_keys for f in ds.video_files(k)]
+    files = []
+    if "data/chunk_index" in row:
+        files.append(ds.episode_data_file(row["data/chunk_index"], row["data/file_index"]))
+    for k in ds.video_keys:
+        if f"videos/{k}/chunk_index" in row:
+            files.append(ds.episode_video_file(k, row[f"videos/{k}/chunk_index"], row[f"videos/{k}/file_index"]))
+    return files
+
+
+def _lighting(extra: dict[str, Any]) -> dict[str, Any] | None:
+    light = ((extra.get("randomization") or {}).get("applied") or {}).get("light")
+    if not light:
+        return None
+    return {"color_temperature_K": (light.get("rect") or {}).get("color_temperature_K"),
+            "rect_intensity": (light.get("rect") or {}).get("intensity_to"),
+            "dome_intensity": (light.get("dome") or {}).get("intensity_to"),
+            "rect_tilt_deg": light.get("rect_tilt_deg")}
+
+
+def _outcome(extra: dict[str, Any]) -> dict[str, Any]:
+    fm = extra.get("final_metrics") or {}
+    return {"status": extra.get("status"), "success": extra.get("success"), "failure": extra.get("failure"),
+            "at_rest": fm.get("at_rest"), "footprint_margin_mm": fm.get("footprint_margin_mm"),
+            "tilt_deg": fm.get("tilt_deg"),
+            "placement_offset_mm": (fm.get("placement_offset_mm") or {}).get("horizontal")}
+
+
 def build_demo_records(root: str | Path, source: str | None = None) -> list[dict[str, Any]]:
     ds = DatasetFolder(root)
     cfg = dataset_config()["columns"]
     proj = project_config()
     df = ds.frames()
     tasks = ds.tasks()
-    source = source or str(Path(root).resolve())
+    extras = ds.episode_extras()
+    ep_meta = ds.episodes_meta()
+    ep_rows = {int(r["episode_index"]): r for _, r in ep_meta.iterrows()} if len(ep_meta) else {}
+    source = source or source_key(root)
     ep_col, ts_col = cfg["episode"], cfg["timestamp"]
     hash_cols = [cfg["frame"], ts_col, cfg["state"], cfg["action"]]
+    file_sha: dict[Path, str] = {}
+    pipeline = {"hackpipe": hackpipe.__version__, "git_commit": git_info().get("commit")}
+    cameras = {k: {"shape": ds.features[k].get("shape"),
+                   "fps": (ds.features[k].get("info") or {}).get("video.fps", ds.fps),
+                   "codec": (ds.features[k].get("info") or {}).get("video.codec")} for k in ds.video_keys}
     records = []
     for ep_idx, ep in df.groupby(ep_col, sort=True):
+        ep_idx = int(ep_idx)
         ep = ep.sort_values(cfg["frame"]) if cfg["frame"] in ep.columns else ep
         task_text = None
         if cfg["task_index"] in ep.columns and len(ep):
             task_text = tasks.get(int(ep[cfg["task_index"]].iloc[0]))
         ts = ep[ts_col].to_numpy(dtype=float) if ts_col in ep.columns else np.array([])
+        files = {}
+        for f in _episode_files(ds, ep_rows.get(ep_idx)):
+            if f.exists():
+                file_sha.setdefault(f, sha256_file(f))
+                files[f.relative_to(ds.root).as_posix()] = file_sha[f]
+            else:
+                files[f.relative_to(ds.root).as_posix()] = None   # missing → R2 flags it
+        extra = extras.get(ep_idx, {})
+        environment = dict(proj["demo_defaults"]["environment"])
+        if extra:
+            environment.update({"variation": extra.get("name"), "seed": extra.get("seed"),
+                                "lighting": _lighting(extra)})
+            stage_root = (extra.get("stack_lock") or {}).get("root")
+            if stage_root:
+                environment["layout_id"] = Path(stage_root).name.split(".")[0]
         records.append({
-            "demo_id": demo_id(source, int(ep_idx)),
+            "demo_id": demo_id(source, ep_idx),
             "source": source,
-            "episode_index": int(ep_idx),
+            "episode_index": ep_idx,
             "meta": {
                 "n_frames": int(len(ep)),
                 "fps": ds.fps,
+                "recording": {"start_s": float(ts[0]) if ts.size else None,
+                              "end_s": float(ts[-1]) if ts.size else None,
+                              "wallclock_start": None},   # not in the provided data
                 "duration_s": float(ts[-1] - ts[0]) if ts.size > 1 else 0.0,
                 "task": task_text,
+                "instruction": task_text,
                 "robot": {"type": ds.robot_type or proj["robot"]["type"],
-                          "embodiment": proj["robot"].get("embodiment")},
-                "cameras": {k: ds.features[k].get("shape") for k in ds.video_keys},
+                          "embodiment": proj["robot"].get("embodiment"),
+                          "end_effector": proj["robot"].get("end_effector"),
+                          "controller": proj["robot"].get("controller")},
+                "cameras": cameras,
                 "state_dim": ds.feature_dim(cfg["state"]),
                 "action_dim": ds.feature_dim(cfg["action"]),
                 "operator": proj["demo_defaults"]["operator"],
-                "environment": proj["demo_defaults"]["environment"],
+                "environment": environment,
+                "outcome": _outcome(extra) if extra else None,
                 "content_sha256": _episode_checksum(ep, hash_cols),
+                "trajectory_sha256": _episode_checksum(ep, [cfg["state"], cfg["action"]]),
+                "files_sha256": files,
                 "codebase_version": ds.info.get("codebase_version"),
+                "pipeline": pipeline,
                 "imported_at": now_iso(),
             },
         })
@@ -78,12 +148,16 @@ def ingest(root: str | Path, registry: Registry | None = None) -> int:
     return len(records)
 
 
-def watch(root: str | Path, interval_s: int = 60, registry: Registry | None = None) -> None:
-    """Poll a dataset folder and import new episodes. Stop with Ctrl+C."""
+def watch(root: str | Path, interval_s: int = 60, registry: Registry | None = None,
+          max_polls: int | None = None) -> None:
+    """Poll a dataset folder, import new episodes and refresh the QC report. Stop with Ctrl+C."""
+    from hackpipe.quality.report import run_qc
     reg = registry or Registry()
-    seen = {d["demo_id"] for d in reg.demos(source=str(Path(root).resolve()))}
+    seen = {d["demo_id"] for d in reg.demos(source=source_key(root))}
     print(f"Watching {root} every {interval_s}s ({len(seen)} demos already registered)")
-    while True:
+    polls = 0
+    while max_polls is None or polls < max_polls:
+        polls += 1
         try:
             records = build_demo_records(root)
         except FileNotFoundError as e:
@@ -94,5 +168,7 @@ def watch(root: str | Path, interval_s: int = 60, registry: Registry | None = No
             reg.upsert_demo(r["demo_id"], r["source"], r["episode_index"], r["meta"])
             seen.add(r["demo_id"])
         if new:
-            print(f"{now_iso()} imported {len(new)} new demos")
-        time.sleep(interval_s)
+            report = run_qc(root, reg)
+            print(f"{now_iso()} imported {len(new)} new demos · QC {report['status_counts']}")
+        if max_polls is None or polls < max_polls:
+            time.sleep(interval_s)

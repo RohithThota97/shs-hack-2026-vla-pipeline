@@ -1,4 +1,6 @@
-# Project-wide settings. Values marked CONFIRM must be checked against the organisers' docs on Day 1.
+# Project-wide settings. Track: organisers' FR3 Duo handover data (decided 22 Oct, docs/decisions.md).
+# Sources: dataset meta/info.json + meta/fr3_conversion.json, and isaac_sim_hackathon_environment.md
+# (environment zip). Values still marked CONFIRM are not stated in the organisers' files.
 
 project:
   name: shs-hack-2026-vla-pipeline
@@ -6,25 +8,36 @@ project:
   outputs_dir: outputs
 
 robot:
-  type: fr3_duo            # CONFIRM name used in the organisers' data schema
-  embodiment: dual_arm
-  notes: "Two FR3 arms; grippers and cameras per organiser schema (CONFIRM)"
+  type: fr3_duo                        # info.json robot_type
+  embodiment: dual_arm                 # two mirrored 7-axis FR3 v2 arms (environment doc)
+  end_effector: robotiq_2f85           # Robotiq 2F-85 grippers, ~85 mm open (environment doc)
+  controller: "absolute joint position targets at 30 Hz (sim 60 Hz); demos from a scripted IK controller"
+  state_dim: 16                        # left q1..q7, left gripper, right q1..q7, right gripper
+  action_dim: 16                       # same order; gripper command 1 = open, 0 = closed
 
 task:
-  name: fetch_item          # CONFIRM with the organisers' task definition
-  instruction_templates:     # CONFIRM wording used in the provided episodes
-    - "Pick the {item} and place it on the {target}."
+  name: handover_box_to_tray
+  instruction_templates:               # meta/tasks.parquet (verbatim)
+    - "Hand the box from the left gripper to the right gripper and place it on the serving tray."
   language: en
 
 dataset:
-  # The provided dataset after download from the local file share.
-  root: data/raw/provided_dataset   # CONFIRM
-  repo_id: local/provided_dataset   # LeRobot needs a repo_id even for local datasets
+  # Train/val source. The data is NOT on the Hugging Face Hub (organiser data, not to be uploaded):
+  # copy it to this folder (laptop / GPU box) or unzip it here from Google Drive (Colab notebook).
+  root: data/raw/fr3_duo_handover_84
+  repo_id: local/fr3_duo_handover_84   # LeRobot needs a repo_id even for local datasets
+  revision: null                       # only for a Hub dataset; null = local folder (pinned by fingerprint)
 
-# Defaults used when a demo record has no metadata for these fields.
+# Defaults used when a demo record has no metadata for these fields. Per-episode seed, lighting and layout come
+# from meta/fr3_episodes_extra.jsonl when present.
 demo_defaults:
-  operator: unknown
+  operator: scripted_controller        # simulation demos, no human teleoperation
   environment:
-    scene: provided_3d_clinical_environment
+    scene: isaac_sim_hospital_fr3duo_workcell
     layout_id: unknown
     lighting: unknown
+    items_present: [box, serving_tray, bottle, pill_container]   # environment doc; only the box is manipulated
+
+hub:
+  model_repo_id: RohithThota/smolvla-fr3duo-handover   # private model repo (Hugging Face user RohithThota)
+  private: true

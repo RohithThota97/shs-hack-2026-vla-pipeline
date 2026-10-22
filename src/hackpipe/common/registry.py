@@ -153,6 +153,14 @@ class Registry:
         self.conn.execute("UPDATE models SET status=? WHERE version=?", (status, version))
         self.conn.commit()
 
+    def update_model_meta(self, version: str, extra: dict[str, Any]) -> None:
+        m = self.get_model(version)
+        if m is None:
+            raise KeyError(version)
+        self.conn.execute("UPDATE models SET meta=? WHERE version=?",
+                          (json.dumps({**m["meta"], **extra}, default=str), version))
+        self.conn.commit()
+
     def get_model(self, version: str) -> dict[str, Any] | None:
         rows = self._rows("SELECT * FROM models WHERE version=?", (version,))
         return rows[0] if rows else None

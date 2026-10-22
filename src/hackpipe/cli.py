@@ -38,6 +38,8 @@ def main(argv: list[str] | None = None) -> None:
     s.add_argument("--register-only", action="store_true", help="register an externally trained checkpoint")
     s.add_argument("--checkpoint")
     s.add_argument("--policy-name")
+    s.add_argument("--set", action="append", default=[], metavar="KEY=VALUE",
+                   help="override a train-config value, e.g. --set steps=200 (repeatable; stored in the run record)")
 
     s = sub.add_parser("eval", help="R5 run the test suite")
     s.add_argument("--model", required=True)
@@ -54,6 +56,11 @@ def main(argv: list[str] | None = None) -> None:
     s.add_argument("--model", required=True)
     s.add_argument("--allow-supervised", action="store_true")
     sub.add_parser("rollback", help="R10 roll back to the previous deployed model")
+    s = sub.add_parser("publish", help="push a model + model card to the Hugging Face Hub (never the dataset)")
+    s.add_argument("--model", required=True)
+    s.add_argument("--repo", help="<hf-user>/<name>; default hub.model_repo_id in configs/project.yaml")
+    s.add_argument("--public", action="store_true", help="make the repo public (default: private)")
+    s.add_argument("--dry-run", action="store_true", help="write the card and list files, upload nothing")
     sub.add_parser("status", help="show registry contents")
 
     args = p.parse_args(argv)
@@ -91,7 +98,8 @@ def main(argv: list[str] | None = None) -> None:
         else:
             if not args.config and not args.resume:
                 sys.exit("--config is required")
-            rec = t.train(args.config, args.dataset, args.dry_run, reg, resume_model=args.resume)
+            rec = t.train(args.config, args.dataset, args.dry_run, reg, resume_model=args.resume,
+                          overrides=t.parse_overrides(args.set))
             _print({k: rec.get(k) for k in ("model_version", "dataset_version", "output_dir", "exit_code")})
     elif args.cmd == "eval":
         from hackpipe.evaluation.runner import run_suite
@@ -118,6 +126,9 @@ def main(argv: list[str] | None = None) -> None:
     elif args.cmd == "rollback":
         from hackpipe.deploy.deploy import rollback
         _print(rollback(reg))
+    elif args.cmd == "publish":
+        from hackpipe.hub.publish import publish
+        _print(publish(args.model, args.repo, private=not args.public, dry_run=args.dry_run, registry=reg))
     elif args.cmd == "status":
         _print({
             "demos": {s: len(reg.demos(status=s)) for s in ("imported", "VALID", "REVIEW", "INVALID")},

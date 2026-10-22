@@ -19,9 +19,14 @@ def load_yaml(path: str | Path) -> dict[str, Any]:
         return yaml.safe_load(f) or {}
 
 
+def config_dir() -> Path:
+    """configs/, or HACKPIPE_CONFIG_DIR (tests use synthetic-data configs)."""
+    return Path(os.environ["HACKPIPE_CONFIG_DIR"]) if os.environ.get("HACKPIPE_CONFIG_DIR") else CONFIG_DIR
+
+
 def project_config() -> dict[str, Any]:
     """configs/project.yaml; HACKPIPE_OUTPUTS_DIR / HACKPIPE_REGISTRY override paths (used by tests)."""
-    cfg = load_yaml(CONFIG_DIR / "project.yaml")
+    cfg = load_yaml(config_dir() / "project.yaml")
     if os.environ.get("HACKPIPE_OUTPUTS_DIR"):
         cfg["project"]["outputs_dir"] = os.environ["HACKPIPE_OUTPUTS_DIR"]
     if os.environ.get("HACKPIPE_REGISTRY"):
@@ -30,14 +35,25 @@ def project_config() -> dict[str, Any]:
 
 
 def dataset_config() -> dict[str, Any]:
-    return load_yaml(CONFIG_DIR / "dataset.yaml")
+    return load_yaml(config_dir() / "dataset.yaml")
 
 
 def gates_config() -> dict[str, Any]:
-    return load_yaml(CONFIG_DIR / "gates.yaml")
+    return load_yaml(config_dir() / "gates.yaml")
 
 
 def resolve(path: str | Path) -> Path:
     """Resolve a repo-relative path to an absolute one."""
     p = Path(path)
     return p if p.is_absolute() else REPO_ROOT / p
+
+
+def source_key(root: str | Path) -> str:
+    """Stable name for a dataset folder: repo-relative inside the repo (same on laptop and Colab), else absolute.
+    Symlinks are not followed, so data/raw/<name> keeps its name wherever the files really live."""
+    p = Path(os.path.normpath(os.path.abspath(resolve(root))))
+    repo = REPO_ROOT.resolve()
+    for ancestor in [p, *p.parents]:          # the repo may be reached through a symlink (/tmp, Drive mounts)
+        if ancestor.resolve() == repo:
+            return p.relative_to(ancestor).as_posix() or "."
+    return p.as_posix()

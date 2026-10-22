@@ -8,7 +8,7 @@ Status: **Decisions made 22 Oct — FR3 Duo handover + SmolVLA.** Briefs 00 / P1
 | D2 | Handover data (`v9_night_84`) trains model_v1; rand500 unused |
 | D3 | `v9_lighting10` = held-out test set (assumed from the suggestion — change if you disagree) |
 | D4 | SmolVLA from `lerobot/smolvla_base`; ACT optional baseline |
-| D5 | **Open** — GPU box, internet, who runs it |
+| D5 | Free Google Colab (T4) via `notebooks/colab_train.ipynb`; data from our Drive, never to the Hub; model + card to a private HF repo |
 Scope stops at "model_v1 trained and registered". Evaluation, gates, deploy are out of scope here.
 
 ---
@@ -186,6 +186,18 @@ multiple of `save_freq`. Commit to the config, reason in `docs/decisions.md`. Fr
 **STOP:** crash that `--resume` doesn't fix.
 
 ---
+
+## Progress 22 Oct (branch `r1-r3-colab-hub`)
+
+| Task | State |
+|---|---|
+| T4 configs | ✅ done (joint limits from the FR3 datasheet — CONFIRM against the USD) |
+| T6 ingest + QC | ✅ code done to the R1/R2 spec; run on the real data in a scratch registry: 84 + 10 VALID, 566,244 frames decoded |
+| T7 ds-v1 | ✅ code done to the R3 spec; scratch run: 76 / 8 / 10, leakage guard passed. Real ds-v1 is created in Colab and approved by a human |
+| T8 training code | ✅ `--set`, `smolvla_fr3_duo.yaml`, rename map, resumable registration, `plot_loss.py` |
+| Colab + Hub | ✅ notebook, `hackpipe publish` (model + card only, private) — HF username still needed |
+| T2 / T3 / T5 / T9 | open (T2 = notebook steps 0–5 on Colab) |
+| Finding | all 94 demos share one identical state/action trajectory; only lighting differs |
 
 ## Order / dependencies
 

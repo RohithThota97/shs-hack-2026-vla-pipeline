@@ -1,5 +1,5 @@
-# Quality checks (R2) and dataset versioning (R3).
-# Column names follow LeRobotDataset v3 defaults. CONFIRM against the organisers' data schema.
+# Quality checks (R2) and dataset versioning (R3) for the FR3 Duo handover data.
+# Column names follow LeRobotDataset v3 (meta/info.json of the provided datasets).
 
 columns:
   episode: episode_index
@@ -8,27 +8,44 @@ columns:
   task_index: task_index
   state: observation.state
   action: action
-  success: null            # e.g. "next.success" if the dataset has it; null = not checked
+  success: success             # per-frame success flag in the provided data
 
 quality:
-  min_episode_frames: 10       # shorter → REVIEW
-  max_episode_frames: 100000   # longer → REVIEW
+  min_episode_frames: 2000     # every provided episode has 2247 frames (~75 s); shorter = likely cut off → REVIEW
+  max_episode_frames: 2500     # longer → REVIEW
   timestamp_tolerance_s: null  # null = half a frame period (0.5 / fps)
   gap_factor: 1.5              # a timestamp step > gap_factor / fps counts as missing frames
-  check_videos: true           # needs `pip install -e ".[video]"` (PyAV); skipped if not installed
-  joint_limits: null           # optional: {"observation.state": {"min": [...], "max": [...]}}
+  check_videos: true           # decode every video; needs `pip install -e ".[video]"` (PyAV with AV1)
+  # FR3 joint limits (rad) from the Franka FR3 datasheet, same for both arms; grippers normalised 0..1.
+  # CONFIRM against the joint limits in the USD robot (Hackathon_FR3Duo.usd).
+  joint_limits:
+    observation.state: &fr3_duo_limits
+      min: [-2.7437, -1.7837, -2.9007, -3.0421, -2.8065, 0.5445, -3.0159, 0.0,
+            -2.7437, -1.7837, -2.9007, -3.0421, -2.8065, 0.5445, -3.0159, 0.0]
+      max: [2.7437, 1.7837, 2.9007, -0.1518, 2.8065, 4.5169, 3.0159, 1.0,
+            2.7437, 1.7837, 2.9007, -0.1518, 2.8065, 4.5169, 3.0159, 1.0]
+    action: *fr3_duo_limits
+  final_state:                 # from meta/fr3_episodes_extra.jsonl (final_metrics); failing → REVIEW
+    require_at_rest: true
+    min_footprint_margin_mm: 0.0   # box footprint inside the tray
+    max_tilt_deg: 10.0
   accept_review_as_valid: false
 
 splits:
   seed: 1000
-  train: 0.8
+  train: 0.9
   val: 0.1
-  test: 0.1
-  # Hold out whole groups (e.g. task or layout) for the test split when the metadata has them.
-  group_key: null              # e.g. "task" to keep every episode of a task in one split
-  test_episodes: []            # explicit held-out episode indices (overrides the test ratio)
+  test: 0.0                    # the test split is the held-out source below
+  group_key: null
+  test_episodes: []
+  # Whole datasets held out as the test split (other seeds and lighting); never in train/val.
+  test_sources: [data/raw/fr3_duo_handover_lighting10]
+  leakage_keys: [environment.seed]   # a test seed may never appear in train/val
+  freeze_test: true                  # later versions must keep the same test demos
 
 preprocessing:
-  # Recorded in the dataset manifest so training is reproducible. Adjust to the chosen policy.
-  image_size: null             # null = keep dataset resolution
-  rename_map: {}               # dataset key → policy key (LeRobot --rename_map, observation keys only)
+  image_size: null             # keep 224×224; SmolVLA resizes with padding internally
+  rename_map:                  # dataset key → SmolVLA (lerobot/smolvla_base) camera key; passed as --rename_map
+    observation.images.external_camera: observation.images.camera1
+    observation.images.left_wrist_camera: observation.images.camera2
+    observation.images.right_wrist_camera: observation.images.camera3

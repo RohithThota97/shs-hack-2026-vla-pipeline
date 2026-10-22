@@ -20,7 +20,10 @@ Known facts (from the files — re-check, don't trust blindly):
 
 ## A · Configs and schema doc (code session, do first)
 
-1. Fill the `CONFIRM` values:
+Status 22 Oct: steps 1, 3 and 4 are **done** (configs filled, importer reads the per-episode records, video /
+final-state / redundancy checks built and tested). Left: the joint-limit `CONFIRM` and step 2.
+
+1. Fill the `CONFIRM` values (done — joint limits still to confirm against the USD robot):
    - `configs/project.yaml`: `robot.type: fr3_duo`, `task.name: handover_box_to_tray`,
      `task.instruction_templates`: the exact task string above,
      `dataset.root: data/raw/fr3_duo_handover_84`, `dataset.repo_id: local/fr3_duo_handover_84`,
@@ -41,24 +44,26 @@ Known facts (from the files — re-check, don't trust blindly):
 ## B · ds-v1 (runner session)
 
 1. **Import:** `hackpipe ingest --root data/raw/fr3_duo_handover_84` → 84 demo records, one task.
-2. **Quality check:** `hackpipe qc --root data/raw/fr3_duo_handover_84` → read `outputs/qc/qc_report.md`.
-   Every REVIEW / INVALID has a reason. Expect all VALID — investigate anything else.
+2. **Quality check:** `hackpipe qc --root data/raw/fr3_duo_handover_84` → read
+   `outputs/qc/fr3_duo_handover_84/qc_report.md`. Every REVIEW / INVALID has a reason. Expect all VALID and
+   the Redundancy section to say 1 distinct trajectory (measured 22 Oct) — investigate anything else.
+   Also ingest + QC the held-out set now (section C) — `dataset create` needs it.
 3. **Create the version:**
    ```bash
    hackpipe dataset create --notes "v1: fr3_duo_handover_v9_night_84, 90/10 train/val; test = lighting10 (separate)"
    ```
-   Check `outputs/datasets/ds-v1/dataset_card.md`: train / val counts, leakage guard passed, fingerprint present.
+   Check `outputs/datasets/ds-v1/dataset_card.md`: 76 train / 8 val / 10 test (lighting10), leakage guard on
+   seed passed, fingerprint present, known gaps listed. (Measured on a scratch registry 22 Oct.)
 4. **STOP.** Show the human the QC summary (VALID / REVIEW / INVALID counts and reasons) and the dataset card.
    The human runs `hackpipe dataset approve ds-v1`. You don't.
 
 ## C · Held-out test set (lighting10)
 
-1. Run QC on it so its quality is documented: `hackpipe qc --root data/raw/fr3_duo_handover_lighting10`.
-   This overwrites `outputs/qc/qc_report.md` — copy the ds-v1 report to `outputs/qc/qc_report_night84.md`
-   first, and save this one as `outputs/qc/qc_report_lighting10.md`.
-2. Do **not** ingest it into the same registry unless demo IDs include the dataset name (check the importer).
-   If they don't, two datasets with episode indexes 0–9 would collide → skip ingest, note it in STATUS.md.
-3. Never include it in a training split. It is used by evaluation (P4) only.
+1. `hackpipe ingest --root data/raw/fr3_duo_handover_lighting10` and `hackpipe qc --root …` → report in
+   `outputs/qc/fr3_duo_handover_lighting10/`. Demo IDs include the source path, so they don't collide with night84.
+2. `configs/dataset.yaml` → `splits.test_sources` makes it the whole test split; the leakage guard refuses any
+   test seed in train/val, and the test split is frozen from ds-v1 on.
+3. Never in a training split. Used by evaluation (P4) only.
 
 ## Later · ds-v2
 

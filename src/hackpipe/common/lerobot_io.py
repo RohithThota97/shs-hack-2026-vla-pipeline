@@ -80,3 +80,34 @@ class DatasetFolder:
 
     def video_files(self, key: str) -> list[Path]:
         return sorted((self.root / "videos" / key).rglob("*.mp4"))
+
+    # ---------- per-episode metadata ----------
+    def episodes_meta(self) -> pd.DataFrame:
+        """meta/episodes/*/*.parquet without the per-episode stats columns; empty if absent."""
+        files = sorted((self.root / "meta" / "episodes").rglob("*.parquet"))
+        if not files:
+            return pd.DataFrame()
+        df = pd.concat([pd.read_parquet(f) for f in files], ignore_index=True)
+        return df[[c for c in df.columns if not c.startswith("stats/")]]
+
+    def episode_extras(self) -> dict[int, dict[str, Any]]:
+        """Optional per-episode records (organiser format: meta/fr3_episodes_extra.jsonl) keyed by episode."""
+        p = self.root / "meta" / "fr3_episodes_extra.jsonl"
+        if not p.exists():
+            return {}
+        out = {}
+        for i, line in enumerate(l for l in p.read_text().splitlines() if l.strip()):
+            rec = json.loads(line)
+            out[int(rec.get("episode_index", i))] = rec
+        return out
+
+    def episode_video_file(self, key: str, chunk_index: int, file_index: int) -> Path:
+        template = self.info.get("video_path", "videos/{video_key}/chunk-{chunk_index:03d}/file-{file_index:03d}.mp4")
+        return self.root / template.format(video_key=key, chunk_index=int(chunk_index), file_index=int(file_index))
+
+    def episode_data_file(self, chunk_index: int, file_index: int) -> Path:
+        template = self.info.get("data_path", "data/chunk-{chunk_index:03d}/file-{file_index:03d}.parquet")
+        return self.root / template.format(chunk_index=int(chunk_index), file_index=int(file_index))
+
+    def stats_path(self) -> Path:
+        return self.root / "meta" / "stats.json"
