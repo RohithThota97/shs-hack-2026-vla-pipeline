@@ -132,6 +132,8 @@ def main(argv: list[str] | None = None) -> None:
                    help="'timing' = short speed measurement, labelled 'timing run, not a result'")
     s.add_argument("--set", action="append", default=[], metavar="KEY=VALUE",
                    help="override a train-config value, e.g. --set steps=200 (repeatable; stored in the run record)")
+    s.add_argument("--init-from", metavar="MODEL_VERSION",
+                   help="fine-tune: start from this model's checkpoint (config defaults to the model's own)")
 
     s = sub.add_parser("eval", help="R5 run the test suite")
     s.add_argument("--model", required=True)
@@ -306,10 +308,10 @@ def main(argv: list[str] | None = None) -> None:
                 sys.exit("--register-only needs --checkpoint and --policy-name")
             print(t.register_external(args.checkpoint, args.dataset, args.policy_name, reg))
         else:
-            if not args.config and not args.resume:
+            if not args.config and not args.resume and not args.init_from:
                 sys.exit("--config is required")
             rec = t.train(args.config, args.dataset, args.dry_run, reg, resume_model=args.resume,
-                          overrides=t.parse_overrides(args.set), purpose=args.purpose)
+                          overrides=t.parse_overrides(args.set), purpose=args.purpose, init_from=args.init_from)
             _print({k: rec.get(k) for k in ("model_version", "dataset_version", "output_dir", "exit_code")})
     elif args.cmd == "sim":
         if args.action == "reference":

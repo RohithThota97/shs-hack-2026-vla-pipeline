@@ -1,4 +1,5 @@
-"""Train page (R4): setup + dry run, timing run, step budget, full run / resume, runs. Spec: docs/ui/02_train.md."""
+"""Train page (R4): mode (config from the base, or fine-tune the best model), what this dataset already trained,
+start bar, then setup + dry run, timing run, step budget, live progress / resume, runs. Spec: docs/ui/02_train.md."""
 import json
 from pathlib import Path
 
@@ -7,7 +8,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from hackpipe.common import writelock
-from hackpipe.common.config import REPO_ROOT, load_yaml
+from hackpipe.common.config import REPO_ROOT, load_yaml, resolve
 from hackpipe.common.registry import Registry
 from hackpipe.console.components.shell import machine_info
 from hackpipe.console.theme import TOKENS, badge
@@ -16,6 +17,7 @@ from hackpipe.jobs.estimates import fmt_duration
 from hackpipe.training import progress
 from hackpipe.dataset.versioning import load_manifest, trainable_sources
 from hackpipe.training import curriculum as cur
+from hackpipe.training import ranking
 from hackpipe.training.train import apply_overrides, is_curriculum, parse_overrides, set_config_steps, train
 
 reg = Registry()
@@ -49,16 +51,99 @@ def set_args(pairs: list[str]) -> list[str]:
     return [a for kv in pairs for a in ("--set", kv)]
 
 
+def config_rel(path: str | None) -> str | None:
+    if not path:
+        return None
+    try:
+        return resolve(path).relative_to(REPO_ROOT).as_posix()
+    except ValueError:
+        return str(path)
+
+
+def run_record(mdl: dict) -> dict:
+    p = Path(mdl.get("run_record_path") or "")
+    return json.loads(p.read_text()) if p.is_file() else {}
+
+
+AUTO = "Automatic — fine-tune the best model"
+MANUAL = "Choose a config (start from its base policy)"
+
+
 if not approved:
     st.info("Approve a dataset version first (Data → Versions).")
 else:
+    ranked = ranking.ranking(reg)
+    best = ranking.best_model(reg, ranked)
+    mode = st.radio("How to train", [MANUAL, AUTO], horizontal=True,
+                    help="Automatic: the best model so far (sim success → offline test error → final loss) is the "
+                         "starting checkpoint, with its own config and overrides; only the dataset is yours to pick.")
     c1, c2 = st.columns(2)
     ds = c1.selectbox("Dataset (approved only)", approved)
     manifest = load_manifest(ds, reg)
-    cfg_path = c2.selectbox("Train config", configs,
-                            index=configs.index("configs/train/smolvla_fr3_duo.yaml")
-                            if "configs/train/smolvla_fr3_duo.yaml" in configs else 0)
+    blocked = ""                       # why training can't start with this dataset + config
+    init_from = None
+    best_rec: dict = {}
+    if mode == AUTO and best is None:
+        st.warning("No model can be fine-tuned yet: it needs a finished run (not a timing run) with a checkpoint on "
+                   "this machine and some evidence (sim eval, offline eval or loss.csv). Train one from a config "
+                   "first.")
+        blocked = "no best model yet"
+    elif mode == AUTO:
+        bm = best["model"]
+        init_from = bm["version"]
+        best_rec = run_record(bm)
+        leak = ranking.init_leakage(bm, manifest, reg)
+        with st.container(border=True):
+            st.markdown(f"**Starting point: {init_from}** — {best['label']} · trained on {bm['dataset_version']} "
+                        f"with `{config_rel(bm['meta'].get('train_config_file'))}`"
+                        + (f" (itself fine-tuned from {bm['meta']['init_from']})" if bm["meta"].get("init_from")
+                           else ""))
+            if best["tier"] == "loss":
+                st.caption("Ranked by training loss only — no sim or offline eval beats hold-still yet. Run "
+                           "`hackpipe eval --model … --offline` for a better choice.")
+            if leak:
+                blocked = f"{init_from} was trained on {len(leak)} test episodes of {ds}"
+                st.error(f"{blocked} (e.g. {leak[:3]}): its scores on {ds}'s test split would not be honest. "
+                         "Pick a dataset whose test split it never saw.")
+    with st.expander("Model ranking (how the best model is chosen)", expanded=False):
+        st.dataframe(pd.DataFrame([{"model": r["model"]["version"], "dataset": r["model"]["dataset_version"],
+                                    "evidence": r["tier"] or "—", "score": r["label"],
+                                    "can fine-tune": "yes" if r["eligible"] else r["why_not"]} for r in ranked]),
+                     hide_index=True, use_container_width=True)
+        st.caption("Order: sim success rate (higher better) → offline test arm error, only when it beats hold-still "
+                   "(lower better) → final training loss (lower better; not comparable across datasets).")
+
+    on_ds = [m for m in reg.models() if m["dataset_version"] == ds and m["meta"].get("purpose") != "timing"]
+    trained_cfgs: dict[str, list[str]] = {}
+    for m in on_ds:
+        if m["status"] in ranking.FINISHED:
+            trained_cfgs.setdefault(config_rel(m["meta"].get("train_config_file")) or "?", []).append(m["version"])
+    if mode == AUTO and init_from:
+        cfg_path = config_rel(bm["meta"]["train_config_file"])
+        c2.selectbox("Train config (the starting model's)", [cfg_path], disabled=True)
+    else:
+        cfg_path = c2.selectbox("Train config", configs,
+                                index=configs.index("configs/train/smolvla_fr3_duo.yaml")
+                                if "configs/train/smolvla_fr3_duo.yaml" in configs else 0,
+                                format_func=lambda c: c + (f"  · trained on {ds} → {', '.join(trained_cfgs[c])}"
+                                                           if c in trained_cfgs else ""))
+    if on_ds:
+        with st.expander(f"Already trained on {ds}: {len(on_ds)} model(s)", expanded=True):
+            sc = {r["model"]["version"]: r for r in ranked}
+            st.dataframe(pd.DataFrame([{
+                "model": m["version"], "config": config_rel(m["meta"].get("train_config_file")) or "external",
+                "started from": m["meta"].get("init_from") or "base policy", "status": m["status"],
+                "steps": ((run_record(m).get("train_config") or {}).get("args") or {}).get("steps"),
+                "score": sc[m["version"]]["label"]} for m in on_ds]), hide_index=True, use_container_width=True)
+        if mode == MANUAL and cfg_path in trained_cfgs:
+            st.info(f"`{cfg_path}` already trained {', '.join(trained_cfgs[cfg_path])} on {ds}. Starting it again "
+                    "makes a new model with the same data and config (only useful with changed overrides, e.g. "
+                    "another seed). To compare, pick another config — or switch to **Automatic** to fine-tune the "
+                    "best model.")
     cfg = load_yaml(cfg_path)
+    best_ov = {k: v for k, v in (best_rec.get("overrides") or {}).items() if k != "policy.path"}
+    plan_ov = {k: best_ov.pop(k) for k in ("curriculum", "no_curriculum") if k in best_ov}
+    cfg = apply_overrides(cfg, plan_ov)       # the plan editor and baseline toggle start from the best model's plan
     args = cfg.get("args") or {}
     curriculum = is_curriculum(cfg)
     _train_src, _data_only = trainable_sources(manifest)
@@ -66,8 +151,10 @@ else:
         st.caption(f"{ds} trains on {', '.join(f'`{x}`' for x in _train_src)}; kept as data only (other "
                    f"fps / schema, not trained): {', '.join(f'`{x}`' for x in _data_only)}. The curriculum "
                    "config (`smolvla_curriculum.yaml`) trains both at one rate.")
-    ov_text = st.text_area("Overrides (`key=value`, one per line — stored in the run record)", height=68,
-                           placeholder="batch_size=4")
+    prefill = "\n".join(f"{k}={json.dumps(v)}" for k, v in best_ov.items())    # JSON is YAML: values round-trip
+    ov_text = st.text_area("Overrides (`key=value`, one per line — stored in the run record)"
+                           + (f" — prefilled with {init_from}'s" if init_from else ""), value=prefill, height=68,
+                           placeholder="batch_size=4", key=f"ov-{init_from or 'manual'}")
     try:
         overrides = parse_overrides([l.strip() for l in ov_text.splitlines() if l.strip()])
     except ValueError as e:
@@ -75,7 +162,6 @@ else:
         overrides = {}
 
     # ---------- curriculum: labels + stage plan ----------
-    blocked = ""                       # why training can't start with this dataset + config
     plan_info = None
     if curriculum:
         if not manifest.get("subtasks"):
@@ -115,6 +201,8 @@ else:
                 overrides["curriculum"] = edited
             if baseline != bool(args.get("no_curriculum")):
                 overrides["no_curriculum"] = baseline
+            for k, v in plan_ov.items():          # unchanged in the editor: still the best model's plan
+                overrides.setdefault(k, v)
             if not blocked:
                 try:
                     plan_info = cur.describe(apply_overrides(cfg, overrides), manifest)
@@ -130,7 +218,7 @@ else:
                                          plan_info["sample_mix"])]), hide_index=True, use_container_width=True)
                 st.caption(f"{plan_info['rate_hz']} Hz, {plan_info['chunk']} actions per prediction · train episodes "
                            + ", ".join(f"`{s}` {n}" for s, n in plan_info["train_episodes"].items()))
-    ov_list = [f"{k}={json.dumps(v) if isinstance(v, (dict, list, bool)) else v}" for k, v in overrides.items()]
+    ov_list = [f"{k}={json.dumps(v)}" for k, v in overrides.items()]
     batch = int(overrides.get("batch_size", args.get("batch_size", 8)))
     save_freq = int(overrides.get("save_freq", args.get("save_freq", 1000)))
     log_freq = int(overrides.get("log_freq", args.get("log_freq", 50)))
@@ -138,8 +226,37 @@ else:
     frames = (progress.curriculum_frames(ds, reg, rate, overrides.get("train_sources", args.get("train_sources")))
               if curriculum and manifest.get("subtasks")
               else progress.train_frames(ds, reg))
+    init_args = ["--init-from", init_from] if init_from else []
 
-    tabs = st.tabs(["Setup & dry run", "Timing run", "Step budget", "Full run", "Runs"])
+    # ---------- start bar ----------
+    target = int(overrides.get("steps", args.get("steps", 0)))
+    done_tj = next((j for j in reg.jobs(kind="train_timing", limit=20) if j["status"] == "done"), None)
+    done_t = t = progress.timing_summary(done_tj, done_tj["meta"].get("log_freq", log_freq)) if done_tj else None
+    est = ({"seconds": progress.expected_seconds(target, t["seconds_per_step"], t["startup_s"]),
+            "basis": f"timing run {t['job_id']}: {t['seconds_per_step']} s/step × {target} steps + start-up"}
+           if t and t["seconds_per_step"] else None)
+    ok, why = writer_ok()
+    with st.container(border=True):
+        a, b = st.columns([3, 1])
+        a.markdown(f"**{target:,} steps** on **{ds}** with `{cfg_path}`, starting from "
+                   + (f"**{init_from}** (fine-tune)" if init_from else f"`{args.get('policy.path', '?')}`")
+                   + f" · expected **{fmt_duration(est['seconds']) if est else 'n/a'}**"
+                   + (f" ({est['basis']})" if est else " — run the timing run first for an estimate"))
+        if b.button("Start training", type="primary", use_container_width=True,
+                    disabled=not (gpus and ok and target > 0) or bool(blocked),
+                    help=why or blocked or (None if gpus else "needs a GPU — open the console on Colab")):
+            jid = runner.submit("train", runner.hackpipe_cmd("train", "--config", cfg_path, "--dataset", ds,
+                                                             *init_args, *set_args(ov_list)),
+                                needs="gpu", work_units=target,
+                                label=f"Training · {ds}" + (f" from {init_from}" if init_from else ""), registry=reg,
+                                estimate_override=est, extra_meta={"target_steps": target, "dataset": ds,
+                                                                   "config": cfg_path, "log_freq": log_freq,
+                                                                   "init_from": init_from})
+            st.success(f"Started {jid}. Checkpoints every {save_freq} steps — progress under **Progress & resume**.")
+        if blocked:
+            a.caption(f"Can't start: {blocked}.")
+
+    tabs = st.tabs(["Setup & dry run", "Timing run", "Step budget", "Progress & resume", "Runs"])
 
     # ---------- Setup & dry run ----------
     with tabs[0]:
@@ -148,11 +265,11 @@ else:
         m[1].metric("Batch size", batch)
         m[2].metric("Steps (config)", int(overrides.get("steps", args.get("steps", 0))))
         m[3].metric("Checkpoint every", save_freq)
-        st.caption(f"Policy {args.get('policy.path', args.get('policy.type', '?'))} · seed {cfg.get('seed')} · "
+        st.caption(f"Policy {f'{init_from} (fine-tune)' if init_from else args.get('policy.path', args.get('policy.type', '?'))} · seed {cfg.get('seed')} · "
                    f"{args.get('num_workers', '?')} data workers")
         if st.button("Dry run — show the exact training command"):
             try:
-                rec = train(cfg_path, ds, dry_run=True, registry=reg, overrides=overrides)
+                rec = train(cfg_path, ds, dry_run=True, registry=reg, overrides=overrides, init_from=init_from)
                 st.code(" \\\n  ".join(rec["command"]), language="bash")
                 if curriculum:
                     st.caption("Check: dataset version with sub-task labels, stage plan and steps (above), "
@@ -173,7 +290,7 @@ else:
         if st.button("Start timing run (200 steps)", type="primary", disabled=not (gpus and ok) or bool(blocked),
                      help=why or blocked or (None if gpus else "needs a GPU")):
             jid = runner.submit("train_timing", runner.hackpipe_cmd(
-                "train", "--config", cfg_path, "--dataset", ds, "--purpose", "timing",
+                "train", "--config", cfg_path, "--dataset", ds, "--purpose", "timing", *init_args,
                 *set_args(ov_list + ["steps=200", "save_freq=200"]
                           + (["stage_end_eval=false", "val_every=1000000"] if curriculum else []))),
                 needs="gpu", work_units=200, label=f"Timing run · {ds}", registry=reg,
@@ -200,8 +317,7 @@ else:
 
     # ---------- Step budget ----------
     with tabs[2]:
-        tj = next((j for j in reg.jobs(kind="train_timing", limit=20) if j["status"] == "done"), None)
-        t = progress.timing_summary(tj, tj["meta"].get("log_freq", log_freq)) if tj else None
+        tj, t = done_tj, done_t
         if not t or not t["seconds_per_step"]:
             st.info("Needs a finished timing run (seconds per step are measured, never assumed).")
         else:
@@ -224,29 +340,16 @@ else:
                 st.success("Written. Commit the config and note the reason in docs/decisions.md — the same steps "
                            "are used for model_v2.")
 
-    # ---------- Full run ----------
+    # ---------- Progress & resume ----------
     with tabs[3]:
-        target = int(overrides.get("steps", args.get("steps", 0)))
-        tj = next((j for j in reg.jobs(kind="train_timing", limit=20) if j["status"] == "done"), None)
-        t = progress.timing_summary(tj, tj["meta"].get("log_freq", log_freq)) if tj else None
-        est = ({"seconds": progress.expected_seconds(target, t["seconds_per_step"], t["startup_s"]),
-                "basis": f"timing run {t['job_id']}: {t['seconds_per_step']} s/step × {target} steps + start-up"}
-               if t and t["seconds_per_step"] else None)
-        st.markdown(f"**{target:,} steps** on {ds} · expected **{fmt_duration(est['seconds']) if est else 'n/a'}**"
-                    + (f" ({est['basis']})" if est else " — run the timing run first"))
-        ok, why = writer_ok()
-        if st.button("Start training", type="primary", disabled=not (gpus and ok and target > 0) or bool(blocked),
-                     help=why or blocked or (None if gpus else "needs a GPU")):
-            jid = runner.submit("train", runner.hackpipe_cmd("train", "--config", cfg_path, "--dataset", ds,
-                                                             *set_args(ov_list)),
-                                needs="gpu", work_units=target, label=f"Training · {ds}", registry=reg,
-                                estimate_override=est, extra_meta={"target_steps": target, "dataset": ds,
-                                                                   "config": cfg_path, "log_freq": log_freq})
-            st.success(f"Started {jid}. Checkpoints every {save_freq} steps.")
-        for j in [j for j in reg.jobs(kind="train", limit=10) if j["status"] in ("running", "queued")]:
+        running = [j for j in reg.jobs(kind="train", limit=10) if j["status"] in ("running", "queued")]
+        if not running:
+            st.caption("No training running. Start one with **Start training** above.")
+        for j in running:
             lv = progress.live(j, j["meta"].get("target_steps"), j["meta"].get("log_freq"))
             with st.container(border=True):
-                st.markdown(f"**{j['job_id']}** {badge(j['status'])} · {j['meta'].get('dataset')}",
+                st.markdown(f"**{j['job_id']}** {badge(j['status'])} · {j['meta'].get('dataset')}"
+                            + (f" · from {j['meta']['init_from']}" if j["meta"].get("init_from") else ""),
                             unsafe_allow_html=True)
                 if lv["step"] is not None and j["meta"].get("target_steps"):
                     st.progress(min(lv["step"] / j["meta"]["target_steps"], 1.0),
@@ -283,7 +386,8 @@ else:
                 final = loss_csv.read_text().splitlines()[-1].split(",")[-1] if loss_csv.exists() else None
                 rows.append({"model": mdl["version"],
                              "purpose": "timing run, not a result" if mdl["meta"].get("purpose") == "timing"
-                             else "model", "dataset": mdl["dataset_version"], "status": mdl["status"],
+                             else "model", "dataset": mdl["dataset_version"],
+                             "started from": mdl["meta"].get("init_from") or "base policy", "status": mdl["status"],
                              "steps": ((rec.get("train_config") or {}).get("args") or {}).get("steps"),
                              "wall time": fmt_duration(rec.get("duration_s")), "final loss": final or "n/a"})
             st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)

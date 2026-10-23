@@ -33,3 +33,10 @@ Newest first. One line for the decision, one for the reason.
 | 22 Oct | π0.5 only as LoRA stretch; no GR00T fine-tuning | One RTX 4090 (24 GB): π0.5 LoRA is tight, GR00T fine-tuning needs 40 GB+ |
 | 22 Oct | Optional modules A (success judge) + B (self-improving pipeline) | Both extend the core we build anyway; C/D only if time remains |
 | 22 Oct | SQLite registry + Streamlit dashboard | No server needed; works offline |
+
+## 2026-10-23 — Train page: automatic mode fine-tunes the best model
+- Chosen by the team: "automatic" = fine-tune the best checkpoint (not auto-start on approval), best = sim success →
+  offline test error (must beat hold-still) → loss. A fine-tune keeps the starting model's config and trainer, so
+  the rate (6 Hz vs 30 fps) and chunk length stay consistent.
+- Guard: no fine-tune from a model that saw the target version's test episodes (its test scores would be leaked).
+  Normalisation statistics are recomputed from the new data, as for any run.
