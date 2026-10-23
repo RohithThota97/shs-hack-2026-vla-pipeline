@@ -65,6 +65,9 @@ def materialize(version: str, registry: Registry | None = None, run: bool = True
     manifest = load_manifest(version, reg)
     if not manifest.get("needs_materialize"):
         return {"version": version, "needed": False, "reason": "single source: train directly from it"}
+    if manifest.get("mixed_schemas"):
+        raise MaterializeError(f"{version} mixes sources with different fps / schemas; LeRobot merges only equal "
+                               "fps (\"Same fps is expected\"). Kept as data only.")
     p = plan(version, reg)
     if not run:
         return p | {"needed": True, "ran": False}

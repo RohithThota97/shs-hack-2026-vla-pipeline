@@ -45,6 +45,11 @@ splits:
   leakage_keys: [environment.seed]   # a test seed may never appear in train/val
   freeze_test: true                  # later versions must keep the same test demos
 
+versions:                      # not part of the preprocessing record, so it doesn't change fingerprints
+  # fr3_duo_rand500 (cube stacking, 6 fps) is included as a subtask next to the 30 fps handover data (decided
+  # 23 Oct, data only). Versions may then hold sources with different fps; they can't be merged for training.
+  allow_mixed_schemas: true
+
 preprocessing:
   image_size: null             # keep 224×224; SmolVLA resizes with padding internally
   rename_map:                  # dataset key → SmolVLA (lerobot/smolvla_base) camera key; passed as --rename_map
