@@ -39,9 +39,10 @@ def log_dir() -> Path:
 
 def submit(kind: str, argv: list[str], needs: str = "cpu", work_units: float | None = None, label: str = "",
            registry: Registry | None = None, start: bool = True, estimate_override: dict | None = None,
-           extra_meta: dict | None = None) -> str:
+           extra_meta: dict | None = None, env: dict[str, str] | None = None) -> str:
     """Record and start a job. Claims the registry writer role for this machine first.
-    estimate_override: {"seconds", "basis"} measured elsewhere (e.g. training: timing run × steps)."""
+    estimate_override: {"seconds", "basis"} measured elsewhere (e.g. training: timing run × steps).
+    env: extra environment for the job only (e.g. access tokens) — not recorded anywhere."""
     if needs not in ("cpu", "gpu"):
         raise ValueError("needs must be 'cpu' or 'gpu'")
     reg = registry or Registry()
@@ -55,7 +56,7 @@ def submit(kind: str, argv: list[str], needs: str = "cpu", work_units: float | N
     reg.update_job(job_id, log_path=str(log_dir() / f"{job_id}.log"))
     if start:
         subprocess.Popen([sys.executable, "-m", "hackpipe.jobs.worker", job_id], start_new_session=True,
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=os.environ.copy())
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env={**os.environ, **(env or {})})
     return job_id
 
 

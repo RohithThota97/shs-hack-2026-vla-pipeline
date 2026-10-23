@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -52,11 +53,15 @@ def set_config_steps(config_path: str | Path, steps: int) -> None:
     p.write_text(new)
 
 
+TOP_LEVEL = ("seed", "policy_name", "keep_checkpoints")
+
+
 def apply_overrides(cfg: dict[str, Any], overrides: dict[str, Any]) -> dict[str, Any]:
-    """`seed` and `policy_name` are top-level config keys; everything else is a lerobot-train arg."""
+    """`seed`, `policy_name` and `keep_checkpoints` are top-level config keys; everything else is a
+    lerobot-train arg."""
     cfg = {**cfg, "args": dict(cfg.get("args") or {})}
     for k, v in overrides.items():
-        if k in ("seed", "policy_name"):
+        if k in TOP_LEVEL:
             cfg[k] = v
         else:
             cfg["args"][k] = v
@@ -97,6 +102,33 @@ def build_command(train_cfg: dict[str, Any], manifest: dict[str, Any], output_di
 
 class PreflightError(RuntimeError):
     pass
+
+
+def prune_checkpoints(output_dir: Path, keep: int) -> list[str]:
+    """Delete all but the newest `keep` step checkpoints (and never the one `last` points to), so a run fits a
+    15 GB Drive. lerobot-train writes checkpoints/<step>/ and then moves the `last` link to it."""
+    ck = Path(output_dir) / "checkpoints"
+    if keep < 1 or not ck.is_dir():
+        return []
+    steps = sorted((d for d in ck.iterdir() if d.is_dir() and not d.is_symlink() and d.name.isdigit()),
+                   key=lambda d: int(d.name))
+    last = (ck / "last").resolve() if (ck / "last").exists() else None
+    removed = []
+    for d in steps[:-keep]:
+        if last is not None and d.resolve() == last:
+            continue
+        shutil.rmtree(d, ignore_errors=True)
+        removed.append(d.name)
+    return removed
+
+
+def _pruner(output_dir: Path, keep: int, stop: threading.Event, every_s: float = 60) -> threading.Thread:
+    def loop() -> None:
+        while not stop.wait(every_s):
+            prune_checkpoints(output_dir, keep)
+    t = threading.Thread(target=loop, daemon=True)
+    t.start()
+    return t
 
 
 def preflight() -> None:
@@ -180,6 +212,10 @@ def train(config_path: str, dataset_version: str, dry_run: bool = False, registr
     print(f"{version}: training started — resume after a crash with "
           f"`hackpipe train --dataset {dataset_version} --resume {version}`", flush=True)
     t0 = time.time()
+    keep = int(cfg.get("keep_checkpoints") or 0)          # 0 = keep all
+    stop = threading.Event()
+    if keep:
+        _pruner(output_dir, keep, stop)
     try:
         proc = subprocess.run(cmd)
     except BaseException as e:                 # lerobot-train missing, Ctrl+C, …: never leave 'training' behind
@@ -188,6 +224,10 @@ def train(config_path: str, dataset_version: str, dry_run: bool = False, registr
         record_path.write_text(json.dumps(record, indent=2))
         reg.set_model_status(version, "failed")
         raise
+    finally:
+        stop.set()
+        if keep:
+            prune_checkpoints(output_dir, keep)
     record.update({"ended_at": now_iso(), "duration_s": round(time.time() - t0, 1), "exit_code": proc.returncode})
     record_path.write_text(json.dumps(record, indent=2))
     reg.set_model_status(version, "trained" if proc.returncode == 0 else "failed")

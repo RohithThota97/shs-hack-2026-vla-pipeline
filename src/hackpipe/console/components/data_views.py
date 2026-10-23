@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import json
+import os
+import secrets
+import shutil
 from pathlib import Path
 
 import numpy as np
@@ -17,7 +20,8 @@ from hackpipe.console.theme import TOKENS, badge
 from hackpipe.dataset.versioning import approve, frozen_test_ids, set_excluded
 from hackpipe.jobs import runner
 from hackpipe.jobs.estimates import fmt_duration
-from hackpipe.pipeline.preview import candidate_folders, preview
+from hackpipe.pipeline.preview import candidate_folders, new_folders, preview
+from hackpipe.pipeline.sources import KEY_DIR, dataset_name
 from hackpipe.quality.report import report_name
 
 
@@ -37,10 +41,149 @@ def writer_ok() -> tuple[bool, str]:
 
 
 # ---------- 1 · Add demonstrations ----------
+SOURCES = {"This machine (folder / zip, mounted Drive)": "local", "Upload a zip": "upload",
+           "Hugging Face": "hf", "GitHub": "github", "Google Drive link": "gdrive",
+           "Cloud bucket (S3 / GCS / Azure)": "cloud"}
+
+
+def _secret(label: str, env_var: str, key: str) -> str:
+    """Password field; empty means: use the variable from this machine's environment (if set)."""
+    have = bool(os.environ.get(env_var))
+    return st.text_input(label, type="password", key=key,
+                         placeholder=f"using {env_var} from the environment" if have else "",
+                         help=f"Only passed to the fetch job as {env_var}; not saved, not logged.")
+
+
+def _private_file(data: bytes, name: str) -> str:
+    """Owner-only file in KEY_DIR (created 0600, never world-readable); the fetch job deletes it after use."""
+    KEY_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    f = KEY_DIR / name
+    fd = os.open(f, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "wb") as out:
+        out.write(data)
+    return str(f)
+
+
+@st.cache_data(ttl=20, show_spinner=False)
+def _scan(folders: tuple[str, ...], n_demos: int, n_imported: int) -> tuple[list[dict], list[str]]:
+    """new_folders() for the page, cached briefly: it previews every folder (keyed on what would change it)."""
+    errors: list[str] = []
+    return new_folders(Registry(), folders=list(folders), errors=errors), errors
+
+
+def scan_section(reg: Registry, folders: list[str]) -> None:
+    """Every folder under data/incoming and data/raw with demos the registry hasn't seen → one click."""
+    demos = reg.demos()
+    new, errors = _scan(tuple(folders), len(demos), sum(d["status"] == "imported" for d in demos))
+    for e in errors:
+        st.warning(f"Can't read {e}")
+    if not new:
+        st.caption("No new dataset folders under data/incoming or data/raw — everything there is registered.")
+        return
+    st.markdown(f"**{len(new)} folder(s) with new demonstrations found**")
+    st.dataframe(pd.DataFrame([{"folder": p["source"], "episodes": p["episodes"], "new": p["new"],
+                                "waiting for QC": p["pending_qc"], "cameras": len(p["cameras"])} for p in new]),
+                 hide_index=True, use_container_width=True)
+    units = sum(p["work_units"] for p in new)
+    ok, why = writer_ok()
+    if st.button("Run pipeline on all new folders", type="primary", disabled=not ok, help=why or None):
+        argv = runner.hackpipe_cmd("auto", *[a for p in new for a in ("--root", p["source"])])
+        jid = runner.submit("auto", argv, work_units=units or None, label=f"Pipeline · {len(new)} folder(s)",
+                            registry=reg)
+        st.success(f"Started {jid}: import → QC (new only) → one draft version for all of them.")
+
+
+def fetch_section(reg: Registry) -> None:
+    """Bring a dataset in from elsewhere; a background job fetches it into data/incoming and runs the pipeline."""
+    kind = SOURCES[st.radio("From", list(SOURCES), horizontal=True)]
+    env: dict[str, str] = {}
+    args: list[str] = []
+    src = default_name = ""
+    if kind == "local":
+        src = st.text_input("Folder or .zip on this machine", placeholder="/content/drive/MyDrive/shs-hack-2026/data")
+        copy = st.checkbox("Copy to local disk (faster than reading from a Drive mount)")
+        if copy:
+            args.append("--copy")
+        st.caption("A folder containing several datasets is fine — each one with meta/info.json is found.")
+    elif kind == "upload":
+        up = st.file_uploader("Zip of a LeRobot v3 dataset (meta/, data/, videos/), up to 2 GB", type=["zip"],
+                              help="Bigger: copy it to this machine or Drive and use 'This machine'.")
+        if up:
+            saved = st.session_state.setdefault("saved_uploads", {})
+            if up.file_id not in saved:        # write each upload once, even after the job removed the zip
+                d = resolve("data/incoming/_uploads")
+                d.mkdir(parents=True, exist_ok=True)
+                dest = d / f"{dataset_name(up.name)}-{up.file_id[:8]}.zip"
+                with open(dest, "wb") as out:
+                    shutil.copyfileobj(up, out, 16 << 20)
+                saved[up.file_id] = (str(dest), dataset_name(up.name))
+            src, default_name = saved[up.file_id]
+        kind = "local"
+    elif kind == "hf":
+        src = st.text_input("Dataset repo ID", placeholder="your-user/fr3_duo_handover")
+        c = st.columns(2)
+        rev = c[0].text_input("Revision (optional)", placeholder="main")
+        sub = c[1].text_input("Subfolder (optional)")
+        args += [*(["--revision", rev] if rev else []), *(["--subdir", sub] if sub else [])]
+        env["HF_TOKEN"] = _secret("Hugging Face token (private repos)", "HF_TOKEN", "k-hf")
+    elif kind == "github":
+        src = st.text_input("Repository", placeholder="owner/repo or https://github.com/owner/repo")
+        rev = st.text_input("Branch / tag (optional)")
+        args += ["--revision", rev] if rev else []
+        env["GITHUB_TOKEN"] = _secret("GitHub token (private repos)", "GITHUB_TOKEN", "k-gh")
+        st.caption("Large files in Git LFS are pulled when git-lfs is installed on this machine.")
+    elif kind == "gdrive":
+        src = st.text_input("Share link (file or folder, 'anyone with the link')",
+                            placeholder="https://drive.google.com/drive/folders/…")
+        st.caption("A zip is fastest (folder links download at most 50 files). Drive mounted on this machine "
+                   "(Colab, Drive for desktop)? Use 'This machine' with its path instead — private files work then.")
+    elif kind == "cloud":
+        prov = st.selectbox("Provider", ["Amazon S3 / R2 / MinIO", "Google Cloud Storage", "Azure Blob"])
+        if prov.startswith("Amazon"):
+            src = st.text_input("URL", placeholder="s3://bucket/path/to/dataset (or …/dataset.zip)")
+            c = st.columns(2)
+            env["AWS_ACCESS_KEY_ID"] = c[0].text_input("Access key ID", key="k-s3id")
+            env["AWS_SECRET_ACCESS_KEY"] = c[1].text_input("Secret access key", type="password", key="k-s3s")
+            c = st.columns(2)
+            env["AWS_DEFAULT_REGION"] = c[0].text_input("Region (optional)", key="k-s3r")
+            env["AWS_ENDPOINT_URL"] = c[1].text_input("Endpoint URL (R2 / MinIO, optional)", key="k-s3e")
+            st.caption("Empty fields use this machine's AWS environment / ~/.aws credentials.")
+        elif prov.startswith("Google"):
+            src = st.text_input("URL", placeholder="gs://bucket/path/to/dataset")
+            sa = st.file_uploader("Service-account key (JSON, optional)", type=["json"], key="k-gcs",
+                                  help="Stored owner-only in ~/.cache/hackpipe/keys until the fetch job used it.")
+            if sa:
+                env["GOOGLE_APPLICATION_CREDENTIALS"] = f"@{sa.file_id}"      # written at submit time
+        else:
+            src = st.text_input("URL", placeholder="az://container/path/to/dataset")
+            env["AZURE_STORAGE_CONNECTION_STRING"] = st.text_input("Connection string", type="password",
+                                                                   key="k-az")
+    env = {k: v for k, v in env.items() if v}
+    if not src:
+        return
+    name = st.text_input("Name under data/incoming", value=default_name or dataset_name(src),
+                         help="Demo IDs depend on this path — use the same name on every machine.")
+    ok, why = writer_ok()
+    if st.button("Fetch and run pipeline", type="primary", disabled=not (ok and name.strip()), help=why or None):
+        if env.get("GOOGLE_APPLICATION_CREDENTIALS", "").startswith("@"):
+            env["GOOGLE_APPLICATION_CREDENTIALS"] = _private_file(st.session_state["k-gcs"].getvalue(),
+                                                                  f"gcs-{secrets.token_hex(6)}.json")
+        argv = runner.hackpipe_cmd("fetch", "--from", kind, src, "--name", name.strip(), *args, "--auto")
+        jid = runner.submit("fetch", argv, label=f"Fetch · {name.strip()}", registry=reg, env=env)
+        st.success(f"Started {jid}: fetch → import → QC (new only) → draft version. Follow it in the jobs panel.")
+
+
 def add_tab(reg: Registry) -> None:
-    st.markdown("Pick a LeRobot v3 folder. **Run pipeline** imports it, checks only new or changed demos, "
-                "recognises duplicates and creates the next draft dataset version for your approval.")
+    st.markdown("New demonstrations are found by themselves: every LeRobot v3 folder under `data/incoming` or "
+                "`data/raw` that has demos the registry hasn't seen is listed here. **Run pipeline** imports it, "
+                "checks only new or changed demos, recognises duplicates and creates the next draft dataset "
+                "version for your approval.")
     folders = candidate_folders()
+    scan_section(reg, folders)
+    with st.expander("Bring in a dataset from elsewhere — this machine, upload, Hugging Face, GitHub, Drive, "
+                     "cloud", expanded=not folders):
+        fetch_section(reg)
+    st.markdown("**Check one folder**")
     choice = st.selectbox("Folder (data/incoming, data/raw)", folders + ["Other path…"], index=None,
                           placeholder="Choose a dataset folder")
     if choice == "Other path…":

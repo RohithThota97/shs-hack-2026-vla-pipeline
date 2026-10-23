@@ -24,26 +24,28 @@ def _waiting_draft(reg: Registry) -> str | None:
     return max(drafts, key=lambda v: int(v.split("-v", 1)[1])) if drafts else None
 
 
-def run_auto(root: str, registry: Registry | None = None, notes: str = "") -> dict[str, Any]:
-    reg = registry or Registry()
+def _import_and_check(root: str, reg: Registry) -> tuple[dict[str, Any], bool]:
     imp = import_demos(root, reg)
     source = source_key(root)
     pending = [d for d in reg.demos(source=source) if d["status"] == "imported"]
     out: dict[str, Any] = {"source": source,
                            "import": {k: (len(v) if isinstance(v, list) else v) for k, v in imp.items()
                                       if k != "source"},
-                           "qc": None, "version": None, "base": latest_approved(reg)}
+                           "qc": None}
     if pending:
         r = run_qc(root, reg)
         out["qc"] = {"checked_now": r["checked_now"], "reused": r["reused"], "status_counts": r["status_counts"],
                      "report": r["paths"]["md"]}
-    changed = bool(imp["new"] or imp["changed"] or pending)
+    return out, bool(imp["new"] or imp["changed"] or pending)
+
+
+def _next_version(reg: Registry, out: dict[str, Any], changed: bool, notes: str) -> dict[str, Any]:
     waiting = _waiting_draft(reg)
     if waiting and not changed:
-        out["reason"] = f"{waiting} is waiting for approval and this folder brought nothing new."
+        out["reason"] = f"{waiting} is waiting for approval and nothing new came in."
         return out
     try:
-        m = create_dataset_version(reg, notes=notes or f"auto: {source}", base=out["base"])
+        m = create_dataset_version(reg, notes=notes, base=out["base"])
     except NothingNewError as e:
         out["reason"] = str(e)
         return out
@@ -57,3 +59,29 @@ def run_auto(root: str, registry: Registry | None = None, notes: str = "") -> di
                 "removed": len(lin.get("removed", [])), "needs_materialize": m["needs_materialize"],
                 "reason": f"{m['version']} is waiting for approval."})
     return out
+
+
+def run_auto(root: str, registry: Registry | None = None, notes: str = "") -> dict[str, Any]:
+    reg = registry or Registry()
+    out, changed = _import_and_check(root, reg)
+    out.update({"version": None, "base": latest_approved(reg)})
+    return _next_version(reg, out, changed, notes or f"auto: {out['source']}")
+
+
+def run_auto_many(roots: list[str], registry: Registry | None = None, notes: str = "") -> dict[str, Any]:
+    """Several folders (e.g. everything new under data/incoming + data/raw) → one draft version. A folder that
+    fails is listed under "errors" and the others still go in."""
+    reg = registry or Registry()
+    parts, errors = [], []
+    for r in roots:
+        try:
+            parts.append(_import_and_check(r, reg))
+        except Exception as e:  # noqa: BLE001 — report it, carry on with the other folders
+            errors.append({"source": source_key(r), "error": f"{type(e).__name__}: {e}"})
+    out: dict[str, Any] = {"sources": [p for p, _ in parts], "errors": errors, "version": None,
+                           "base": latest_approved(reg)}
+    if not parts:
+        out["reason"] = "no dataset folders could be read" if errors else "no dataset folders found"
+        return out
+    srcs = ", ".join(p["source"] for p, _ in parts)
+    return _next_version(reg, out, any(c for _, c in parts), notes or f"auto: {srcs}")

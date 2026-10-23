@@ -6,6 +6,9 @@ import json
 import sys
 from pathlib import Path
 
+from hackpipe.pipeline.sources import KINDS as SOURCE_KINDS   # stdlib-only module, cheap to import
+
+
 
 def _print(obj) -> None:
     print(json.dumps(obj, indent=2, default=str))
@@ -19,6 +22,8 @@ def _writes(args) -> bool:
         return args.action in ("create", "approve") or (args.action == "materialize" and not args.plan)
     if args.cmd in ("train", "publish"):
         return not args.dry_run
+    if args.cmd == "fetch":
+        return args.auto
     return False
 
 
@@ -35,8 +40,20 @@ def main(argv: list[str] | None = None) -> None:
     s.add_argument("--root", required=True)
     s.add_argument("--full", action="store_true", help="re-check every episode, not only new/changed ones")
     s = sub.add_parser("auto", help="new demos → import → QC (new only) → next draft version, automatically")
-    s.add_argument("--root", required=True)
+    g = s.add_mutually_exclusive_group(required=True)
+    g.add_argument("--root", action="append", help="dataset folder (repeat for several → one version)")
+    g.add_argument("--all", action="store_true", help="every dataset folder under data/incoming and data/raw")
     s.add_argument("--notes", default="")
+    s = sub.add_parser("fetch", help="bring a dataset into data/incoming/<name> from a folder/zip, Hugging Face, "
+                                     "GitHub, Google Drive or a cloud bucket; keys from the environment")
+    s.add_argument("--from", dest="kind", required=True, choices=SOURCE_KINDS,
+                   help="local = folder or zip on this machine (also a mounted Drive)")
+    s.add_argument("src", help="path / zip, HF dataset repo ID, owner/repo or URL, Drive link, s3:// gs:// az://")
+    s.add_argument("--name", help="folder name under data/incoming (default: from src)")
+    s.add_argument("--revision", help="branch / tag / commit (hf, github)")
+    s.add_argument("--subdir", default="", help="only this folder of the HF repo")
+    s.add_argument("--copy", action="store_true", help="local: copy instead of linking the folder")
+    s.add_argument("--auto", action="store_true", help="then run the pipeline on what was fetched")
     s = sub.add_parser("demo", help="exclude / include a demo for future dataset versions")
     s.add_argument("action", choices=["exclude", "include"])
     s.add_argument("demo_id")
@@ -106,7 +123,8 @@ def main(argv: list[str] | None = None) -> None:
         from hackpipe.common.config import REPO_ROOT
         app = Path(__file__).parent / "console" / "app.py"
         sys.exit(subprocess.call([sys.executable, "-m", "streamlit", "run", str(app),
-                                  "--server.port", str(args.port)], cwd=REPO_ROOT))
+                                  "--server.port", str(args.port), "--server.maxUploadSize", "2048"],
+                                 cwd=REPO_ROOT))
     if args.cmd == "writer":
         from hackpipe.common import writelock
         if args.release:
@@ -140,8 +158,29 @@ def main(argv: list[str] | None = None) -> None:
         _print({k: r[k] for k in ("n_episodes", "checked_now", "reused", "status_counts", "reason_counts",
                                   "dataset_issues", "paths")})
     elif args.cmd == "auto":
-        from hackpipe.pipeline.auto import run_auto
-        _print(run_auto(args.root, reg, args.notes))
+        from hackpipe.pipeline.auto import run_auto, run_auto_many
+        if args.all:
+            from hackpipe.pipeline.preview import candidate_folders
+            out = run_auto_many(candidate_folders(), reg, args.notes)
+        elif len(args.root) == 1:
+            out = run_auto(args.root[0], reg, args.notes)
+        else:
+            out = run_auto_many(args.root, reg, args.notes)
+        _print(out)
+        if out.get("errors"):
+            sys.exit(1)
+    elif args.cmd == "fetch":
+        from hackpipe.common.config import source_key
+        from hackpipe.pipeline.sources import fetch
+        roots = fetch(args.kind, args.src, args.name, args.revision, args.subdir, args.copy)
+        for r in roots:
+            print(f"found dataset: {source_key(r)}")
+        if args.auto:
+            from hackpipe.pipeline.auto import run_auto_many
+            out = run_auto_many([str(r) for r in roots], reg)
+            _print(out)
+            if out.get("errors"):
+                sys.exit(1)
     elif args.cmd == "demo":
         from hackpipe.dataset.versioning import set_excluded
         set_excluded(args.demo_id, args.action == "exclude", args.reason, args.by, reg)

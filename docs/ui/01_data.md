@@ -8,7 +8,22 @@ ds-v1's validated demos; nothing is checked twice; demos that already exist are 
 ## Tabs
 
 ### 1 · Add demonstrations
-- **Pick a folder:** a select box of folders under `data/incoming/` and `data/raw/`, or a typed path. The folder
+- **New folders found automatically:** every LeRobot v3 folder at any depth under `data/incoming/` and
+  `data/raw/` (e.g. `fr3_duo_rand500/fr3_duo_rand500`) with demos the registry hasn't seen is listed;
+  **Run pipeline on all new folders** = `hackpipe auto --root A --root B …` → one draft version for all of them.
+- **Bring in a dataset from elsewhere** (`hackpipe fetch --from KIND SRC --name N --auto`, a background job) into
+  `data/incoming/<name>`, then the pipeline:
+  | From | Source | Keys (password fields, passed to the job as env vars only — never saved or logged) |
+  |---|---|---|
+  | This machine | folder (linked, or copied) or `.zip`; a mounted Drive path works here | — |
+  | Upload a zip | browser upload, up to 2 GB (Streamlit holds it in memory; bigger → copy to this machine / Drive) | — |
+  | Hugging Face | dataset repo ID, revision, subfolder | `HF_TOKEN` |
+  | GitHub | `owner/repo` or URL, branch; Git LFS pulled if installed | `GITHUB_TOKEN` (sent as a header) |
+  | Google Drive link | share link to a zip or folder (`gdown`, folders ≤ 50 files) | — (link sharing) |
+  | Cloud bucket | `s3://` (also R2 / MinIO), `gs://`, `az://`, folder or `.zip` | AWS keys + endpoint, GCS service-account JSON, Azure connection string |
+  Empty key fields fall back to this machine's environment. Extras: `pip install -e ".[sources]"` (HF, Drive),
+  `".[cloud]"` (buckets).
+- **Check one folder:** a select box of folders under `data/incoming/` and `data/raw/`, or a typed path. The folder
   must be a LeRobotDataset v3 (`meta/info.json`).
 - **Preview before running** (read-only, instant):
   - episodes, frames, fps, cameras, task, robot type, from `info.json`;

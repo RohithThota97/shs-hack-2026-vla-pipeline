@@ -17,3 +17,4 @@ args:
   num_workers: 2              # Colab has 2 vCPUs; raise on a bigger machine
   wandb.enable: false
 seed: 1000
+keep_checkpoints: 2          # older step checkpoints are deleted during the run (15 GB Drive); 0 = keep all
