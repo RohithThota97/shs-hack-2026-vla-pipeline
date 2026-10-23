@@ -28,8 +28,9 @@ final-state / redundancy checks built and tested). Left: the joint-limit `CONFIR
      `task.instruction_templates`: the exact task string above,
      `dataset.root: data/raw/fr3_duo_handover_84`, `dataset.repo_id: local/fr3_duo_handover_84`,
      `demo_defaults.environment.scene`: the USD scene name from the environment doc.
-   - `configs/dataset.yaml`: `columns.success: success`; `quality.min_episode_frames` /
-     `max_episode_frames` around 2247 (any other length → REVIEW); `quality.joint_limits` from FR3 joint
+   - `configs/dataset.yaml`: `columns.success: success`; `quality.min_episode_seconds` /
+     `max_episode_seconds` (50 s / 83.34 s; length = frames / fps, so 30 and 6 fps data share one rule);
+     `quality.joint_limits` from FR3 joint
      limits (or dataset `stats.json` min/max with a margin — say which); splits: `train: 0.9`, `val: 0.1`,
      `test: 0.0` (the test set is the separate lighting10 dataset).
    Record every value and its source in `docs/decisions.md`.

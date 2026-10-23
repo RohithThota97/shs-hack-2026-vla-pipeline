@@ -24,7 +24,7 @@ SEARCH_DIRS = (INCOMING, "data/raw")      # where new dataset folders are looked
 KINDS = ("local", "hf", "github", "gdrive", "cloud")
 KEY_DIR = Path.home() / ".cache" / "hackpipe" / "keys"
 MAX_DEPTH = 4          # how deep below a folder to look for meta/info.json
-_SKIP = {".git", "node_modules", "__pycache__", ".cache"}
+_SKIP = {".git", "node_modules", "__pycache__", ".cache", "_partial"}   # _partial: unfinished Drive downloads
 
 
 def find_roots(top: str | Path, max_depth: int = MAX_DEPTH) -> list[Path]:
@@ -140,17 +140,30 @@ def _uses_lfs(repo: Path) -> bool:
 def fetch_github(src: str, dest: Path, revision: str | None = None) -> None:
     env = _git_env()
     git = ["git", "-C", str(dest)]
-    if revision and re.fullmatch(r"[0-9a-f]{7,40}", revision):     # a commit: --branch can't take it
+    if revision and revision.startswith("-"):
+        raise ValueError(f"not a branch / tag / commit: {revision!r}")
+    url = github_url(src)
+    hexrev = bool(revision) and re.fullmatch(r"[0-9a-f]{7,40}", revision) is not None
+    is_ref = True
+    if hexrev:              # a branch / tag named like a commit? ls-remote matches ref name endings: compare exactly
+        refs = subprocess.run(["git", "ls-remote", "--heads", "--tags", "--", url], check=True, env=env,
+                              capture_output=True, text=True).stdout.split()
+        is_ref = any(r in (f"refs/heads/{revision}", f"refs/tags/{revision}") for r in refs)
+    if revision and not is_ref and re.fullmatch(r"[0-9a-f]{40}", revision):   # full commit: shallow fetch by SHA
         dest.mkdir(parents=True)
         subprocess.run([*git, "init", "-q"], check=True, env=env)
-        subprocess.run([*git, "remote", "add", "--", "origin", github_url(src)], check=True, env=env)
+        subprocess.run([*git, "remote", "add", "--", "origin", url], check=True, env=env)
         subprocess.run([*git, "fetch", "--depth", "1", "--", "origin", revision], check=True, env=env)
         subprocess.run([*git, "checkout", "-q", "FETCH_HEAD"], check=True, env=env)
+    elif revision and not is_ref and re.fullmatch(r"[0-9a-f]{7,39}", revision):
+        # short commit (as GitHub shows it): servers only fetch full SHAs. History without file contents
+        # (--filter=blob:none, no LFS smudge), then only that commit's files are downloaded on checkout.
+        subprocess.run(["git", "clone", "-q", "--filter=blob:none", "--no-checkout", "--", url, str(dest)],
+                       check=True, env={**env, "GIT_LFS_SKIP_SMUDGE": "1"})
+        subprocess.run([*git, "checkout", "-q", revision], check=True, env={**env, "GIT_LFS_SKIP_SMUDGE": "1"})
     else:
-        if revision and revision.startswith("-"):
-            raise ValueError(f"not a branch / tag: {revision!r}")
         subprocess.run(["git", "clone", "--depth", "1", *(["--branch", revision] if revision else []), "--",
-                        github_url(src), str(dest)], check=True, env=env)
+                        url, str(dest)], check=True, env=env)
     if _uses_lfs(dest):                       # datasets keep videos/parquet in LFS
         if not shutil.which("git-lfs"):
             raise RuntimeError("this repo stores files in Git LFS: install git-lfs (brew / apt install git-lfs), "
@@ -177,35 +190,99 @@ NO_ACCESS = ("Google Drive refused access to this link. Either share it as 'Anyo
              "'This machine' with the folder's path (~/Library/CloudStorage/GoogleDrive-…/My Drive/…).")
 
 
-def fetch_gdrive(src: str, dest: Path) -> str:
+def _rmdir_if_empty(d: Path) -> None:
+    try:
+        d.rmdir()
+    except OSError:
+        pass
+
+
+def partial_dir(src: str, base: Path = REPO_ROOT) -> Path:
+    """Where an unfinished Drive download is kept, so running the same fetch again only gets the missing files."""
+    return base / INCOMING / "_partial" / f"gdrive-{gdrive_id(src)[1]}"
+
+
+def _gdrive_folder(gdown, fid: str, part: Path) -> None:
+    """List the folder once, then download only files that aren't on disk yet. Google refuses some files after
+    many downloads of a shared link ('too many accesses'); those are counted, the rest is kept for a retry."""
+    from gdown.exceptions import DownloadError
+    import json
+    files = gdown.download_folder(id=fid, output=str(part) + "/", skip_download=True, quiet=True)
+    if not files:
+        raise RuntimeError(NO_ACCESS)
+    listing = sorted([f.id, f.path] for f in files)
+    mark = part / ".listing.json"                    # what the kept files belong to
+    try:
+        before = json.loads(mark.read_text())
+    except (OSError, ValueError):
+        before = None
+    if before is not None and before != listing:     # the folder changed on Drive since the first attempt
+        print("Drive folder changed since the last attempt: starting over", flush=True)
+        for p in part.iterdir():
+            shutil.rmtree(p) if p.is_dir() else p.unlink()
+    mark.write_text(json.dumps(listing))
+    missing = [f for f in files if not Path(f.local_path).is_file()]
+    print(f"Drive folder: {len(files)} files, {len(files) - len(missing)} already here, {len(missing)} to download",
+          flush=True)
+    failed = []
+    for f in missing:
+        Path(f.local_path).parent.mkdir(parents=True, exist_ok=True)
+        try:
+            gdown.download(id=f.id, output=f.local_path, quiet=False, resume=True)
+        except DownloadError as e:
+            failed.append(f.path)
+            print(f"failed: {f.path}: {str(e).strip().splitlines()[0]}", flush=True)
+    if failed:
+        raise RuntimeError(
+            f"{len(failed)} of {len(files)} files could not be downloaded. Usually Google's limit on downloads of "
+            "shared links ('too many accesses') — or those files aren't shared themselves (check their sharing). "
+            f"The other {len(files) - len(failed)} are kept in {part}: run the same fetch again later (only the "
+            "missing files are fetched), or share the dataset as one zip instead.")
+
+
+def fetch_gdrive(src: str, dest: Path, base: Path = REPO_ROOT) -> str:
     """Shared link ('anyone with the link'). A zip is extracted. Returns the name on Drive (folder or zip
-    without .zip). A mounted Drive (Colab, Drive for desktop) is a folder on this machine — use kind 'local'."""
+    without .zip). A mounted Drive (Colab, Drive for desktop) is a folder on this machine — use kind 'local'.
+    Downloads into partial_dir(src) first and moves it to dest when complete."""
     try:
         import gdown
         from gdown.exceptions import DownloadError, FileURLRetrievalError
     except ImportError as e:
         raise RuntimeError("Google Drive links need gdown: pip install -e '.[sources]'") from e
     kind, fid = gdrive_id(src)
-    dest.mkdir(parents=True)
+    part = partial_dir(src, base)
+    part.mkdir(parents=True, exist_ok=True)
     try:
         if kind == "folder":
-            files = gdown.download_folder(id=fid, output=str(dest) + "/", quiet=False)
+            _gdrive_folder(gdown, fid, part)
         else:
-            out = gdown.download(id=fid, output=str(dest) + "/", quiet=False)
-    except DownloadError as e:      # a file without access → FileURLRetrievalError; a folder → "status code 401"
-        if isinstance(e, FileURLRetrievalError) or re.search(r"status code 40[13]", str(e)):
+            out = gdown.download(id=fid, output=str(part) + "/", quiet=False, resume=True)
+    except BaseException as e:
+        if not any(p.name != ".listing.json" for p in part.rglob("*")):    # nothing downloaded: leave nothing
+            shutil.rmtree(part, ignore_errors=True)
+            _rmdir_if_empty(part.parent)
+        # a file without access → FileURLRetrievalError; a folder → "status code 401"
+        if isinstance(e, FileURLRetrievalError) or (isinstance(e, DownloadError)
+                                                    and re.search(r"status code 40[13]", str(e))):
             raise RuntimeError(NO_ACCESS) from e
         raise
     if kind == "folder":
-        if not files:
-            raise RuntimeError(NO_ACCESS)
-        kids = [p for p in dest.iterdir() if p.is_dir()]        # gdown puts the files in dest/<folder name>/
-        return kids[0].name if len(kids) == 1 else dataset_name(src)
+        (part / ".listing.json").unlink(missing_ok=True)
+        kids = [p for p in part.iterdir() if p.is_dir()]        # gdown puts the files in <part>/<folder name>/
+        name = kids[0].name if len(kids) == 1 else dataset_name(src)
+        part.rename(dest)
+        _rmdir_if_empty(part.parent)
+        return name
     if not out:
         raise RuntimeError(NO_ACCESS)
+    dest.mkdir(parents=True)
     if out.endswith(".zip"):
         extract_zip(out, dest)
         os.remove(out)
+    else:
+        shutil.move(out, dest / Path(out).name)
+    shutil.rmtree(part, ignore_errors=True)
+    _rmdir_if_empty(part.parent)
     return dataset_name(out)
 
 
@@ -276,7 +353,7 @@ def fetch(kind: str, src: str, name: str | None = None, revision: str | None = N
         got = {"local": lambda: fetch_local(src, dest, copy),
                "hf": lambda: fetch_hf(src, dest, revision, subdir),
                "github": lambda: fetch_github(src, dest, revision),
-               "gdrive": lambda: fetch_gdrive(src, dest),
+               "gdrive": lambda: fetch_gdrive(src, dest, base),
                "cloud": lambda: fetch_cloud(src, dest)}[kind]()
         roots = _check(dest)
         up = local_path(src) if kind == "local" else None

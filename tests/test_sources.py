@@ -137,6 +137,8 @@ def test_github_fetch_by_commit(tmp_path):
     sha = _git_repo(src, files)
     roots = sources.fetch("github", f"file://{src}", name="g", revision=sha, base=tmp_path / "repo")
     assert [r.name for r in roots] == ["tmpds"] and not (tmp_path / "repo" / "data" / "incoming" / "g" / ".git").exists()
+    roots = sources.fetch("github", f"file://{src}", name="g7", revision=sha[:7], base=tmp_path / "repo")
+    assert [r.name for r in roots] == ["tmpds"]                       # short SHA as GitHub shows it
 
 
 def test_github_lfs_without_git_lfs_fails_clearly(tmp_path, monkeypatch):
@@ -149,7 +151,9 @@ def test_github_lfs_without_git_lfs_fails_clearly(tmp_path, monkeypatch):
     assert not (tmp_path / "repo" / "data" / "incoming" / "g").exists()
 
 
-def _fake_gdown(monkeypatch, tmp_path, *, folder_name=None, zip_of=None, error=None):
+def _fake_gdown(monkeypatch, tmp_path, *, folder_name=None, zip_of=None, error=None, refuse=()):
+    """Like gdown 6: download_folder(skip_download=True) lists files, download(id, output) gets one.
+    refuse: file suffixes Google refuses ('too many accesses'); calls records every per-file download."""
     import sys
     import types
     exc = types.ModuleType("gdown.exceptions")
@@ -161,16 +165,31 @@ def _fake_gdown(monkeypatch, tmp_path, *, folder_name=None, zip_of=None, error=N
         pass
     exc.DownloadError, exc.FileURLRetrievalError = DownloadError, FileURLRetrievalError
     g = types.ModuleType("gdown")
+    g.calls = []
+    src = tmp_path / "drive" / folder_name if folder_name else None
+    if src and not src.exists():
+        make_dataset(src, n_episodes=2)
+    by_id = {}
 
-    def download_folder(id, output, quiet):
+    def download_folder(id, output, skip_download, quiet):
         if error:
             raise DownloadError(f"Failed to retrieve folder contents for folder ID: {id} (status code 401).")
-        shutil.copytree(make_dataset(tmp_path / "drive" / folder_name, n_episodes=2), output + folder_name)
-        return ["x"]
+        out = []
+        for i, p in enumerate(sorted(q for q in src.rglob("*") if q.is_file())):
+            rel = f"{folder_name}/{p.relative_to(src).as_posix()}"
+            by_id[f"id{i}"] = p
+            out.append(types.SimpleNamespace(id=f"id{i}", path=rel, local_path=output + rel))
+        return out
 
-    def download(id, output, quiet):
+    def download(id, output, quiet, resume):
+        g.calls.append(id)
         if error:
             raise FileURLRetrievalError("Cannot retrieve the public link of the file.")
+        if id in by_id:
+            if by_id[id].suffix in refuse:
+                raise FileURLRetrievalError("Failed to retrieve file url:\n\n\tCannot retrieve the public link")
+            shutil.copy(by_id[id], output)
+            return output
         z = output + zip_of
         with zipfile.ZipFile(z, "w") as f:
             ds = make_dataset(tmp_path / "zsrc", n_episodes=2)
@@ -180,6 +199,7 @@ def _fake_gdown(monkeypatch, tmp_path, *, folder_name=None, zip_of=None, error=N
     g.download_folder, g.download, g.exceptions = download_folder, download, exc
     monkeypatch.setitem(sys.modules, "gdown", g)
     monkeypatch.setitem(sys.modules, "gdown.exceptions", exc)
+    return g
 
 
 def test_gdrive_folder_link_named_after_drive_folder(tmp_path, monkeypatch):
@@ -282,3 +302,57 @@ def test_changed_files_are_found_without_hashing(workspace, monkeypatch):
     os.utime(f, ns=(f.stat().st_atime_ns, f.stat().st_mtime_ns + 10**9))
     assert pv.preview(str(root), reg)["changed_files"] == 1
     assert [p["source"] for p in pv.new_folders(reg, tmp)] == [pv.source_key(root)]
+
+
+def test_gdrive_throttled_files_are_kept_and_retry_gets_only_the_rest(tmp_path, monkeypatch):
+    link = "https://drive.google.com/drive/folders/1QVcgaNooB0MHn6Dj"
+    repo = tmp_path / "repo"
+    g = _fake_gdown(monkeypatch, tmp_path, folder_name="rand", refuse={".parquet"})
+    with pytest.raises(RuntimeError, match="could not be downloaded"):
+        sources.fetch("gdrive", link, base=repo)
+    part = sources.partial_dir(link, repo)
+    kept = [p for p in part.rglob("*") if p.is_file() and p.name != ".listing.json"]
+    n_refused = len(g.calls) - len(kept)
+    assert n_refused >= 1 and kept                        # everything except the refused files is kept
+    assert sources.find_roots(repo / "data" / "incoming") == []      # an unfinished download is not a dataset
+    g2 = _fake_gdown(monkeypatch, tmp_path, folder_name="rand")
+    roots = sources.fetch("gdrive", link, base=repo)
+    assert len(g2.calls) == n_refused                     # only the missing files
+    assert roots == [repo / "data" / "incoming" / "rand" / "rand"] and not part.exists()
+
+
+def test_gdrive_retry_starts_over_when_folder_changed(tmp_path, monkeypatch):
+    link = "https://drive.google.com/drive/folders/1QVcgaNooB0MHn6Dj"
+    repo = tmp_path / "repo"
+    _fake_gdown(monkeypatch, tmp_path, folder_name="rand", refuse={".parquet"})
+    with pytest.raises(RuntimeError):
+        sources.fetch("gdrive", link, base=repo)
+    part = sources.partial_dir(link, repo)
+    stale = part / "rand" / "old_file.json"
+    stale.write_text("{}")
+    (part / ".listing.json").write_text("[]")              # pretend the first attempt saw another listing
+    g = _fake_gdown(monkeypatch, tmp_path, folder_name="rand")
+    roots = sources.fetch("gdrive", link, base=repo)
+    assert len(g.calls) == 3 and not (roots[0] / "old_file.json").exists()
+    assert not (roots[0].parent / ".listing.json").exists()
+
+
+def test_gdrive_no_access_leaves_no_partial_folder(tmp_path, monkeypatch):
+    _fake_gdown(monkeypatch, tmp_path, error=True)
+    repo = tmp_path / "repo"
+    with pytest.raises(RuntimeError):
+        sources.fetch("gdrive", "https://drive.google.com/drive/folders/1QVcgaNooB0MHn6Dj", base=repo)
+    assert not (repo / "data" / "incoming" / "_partial").exists()
+
+
+def test_github_branch_named_like_a_commit(tmp_path):
+    src = tmp_path / "src"
+    ds = make_dataset(tmp_path / "tmpds", n_episodes=2)
+    files = {str(p.relative_to(ds.parent)): (p.read_text(errors="replace") if p.suffix == ".json" else "x")
+             for p in ds.rglob("*") if p.is_file()}
+    _git_repo(src, files)
+    subprocess.run(["git", "-C", str(src), "branch", "cafe123"], check=True)
+    subprocess.run(["git", "-C", str(src), "branch", "release/abc1234"], check=True)
+    assert sources.fetch("github", f"file://{src}", name="b", revision="cafe123", base=tmp_path / "repo")
+    with pytest.raises(subprocess.CalledProcessError):     # abc1234 is not a commit here, nor an exact ref
+        sources.fetch("github", f"file://{src}", name="c", revision="abc1234", base=tmp_path / "repo")

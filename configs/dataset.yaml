@@ -11,8 +11,10 @@ columns:
   success: success             # per-frame success flag in the provided data
 
 quality:
-  min_episode_frames: 2000     # every provided episode has 2247 frames (~75 s); shorter = likely cut off → REVIEW
-  max_episode_frames: 2500     # longer → REVIEW
+  # Episode length in seconds (frames / fps), so it works for every recording rate: night84 / lighting10 have
+  # 2247 frames at 30 fps (74.9 s), rand500 339–369 frames at 6 fps (56.5–61.5 s).
+  min_episode_seconds: 50      # shorter = likely cut off → REVIEW (was 2000 frames, which flagged all of rand500)
+  max_episode_seconds: 83.34   # longer → REVIEW (≥ the earlier 2500 frames at 30 fps = 83.33 s)
   timestamp_tolerance_s: null  # null = half a frame period (0.5 / fps)
   gap_factor: 1.5              # a timestamp step > gap_factor / fps counts as missing frames
   check_videos: true           # decode every video; needs `pip install -e ".[video]"` (PyAV with AV1)

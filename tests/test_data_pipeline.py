@@ -58,3 +58,29 @@ def test_train_dry_run_builds_command(workspace, dataset):
     assert cmd[0] == "lerobot-train"
     assert f"--dataset.episodes={json.dumps(m['splits']['train'], separators=(',', ':'))}" in cmd
     assert "--policy.type=act" in cmd and "--seed=1000" in cmd
+
+
+@pytest.mark.parametrize("fps,frames,short", [(30, 2247, False), (6, 345, False), (30, 1400, True), (6, 290, True)])
+def test_length_limit_is_in_seconds(fps, frames, short):
+    import pandas as pd
+    from hackpipe.common.config import CONFIG_DIR, load_yaml
+    from hackpipe.quality.checks import check_episode
+    cfg = load_yaml(CONFIG_DIR / "dataset.yaml")                 # the real limits, not the test config
+    cfg["quality"].update({"joint_limits": None, "final_state": None})
+    ep = pd.DataFrame({"episode_index": 0, "frame_index": range(frames),
+                       "timestamp": [i / fps for i in range(frames)]})
+    res = check_episode(ep, fps, {}, cfg)
+    assert any(s.startswith("too_short") for s in res.soft) == short
+    assert not any(s.startswith("too_long") for s in res.soft)
+
+
+def test_no_fps_does_not_crash_length_check():
+    import pandas as pd
+    from hackpipe.common.config import CONFIG_DIR, load_yaml
+    from hackpipe.quality.checks import check_episode
+    cfg = load_yaml(CONFIG_DIR / "dataset.yaml")
+    cfg["quality"].update({"joint_limits": None, "final_state": None, "min_episode_seconds": None,
+                           "min_episode_frames": 100})
+    ep = pd.DataFrame({"episode_index": 0, "frame_index": range(10), "timestamp": [0.0] * 10})
+    res = check_episode(ep, 0, {}, cfg)
+    assert "no_fps (length not checked)" in res.soft and not any(s.startswith("too_") for s in res.soft)

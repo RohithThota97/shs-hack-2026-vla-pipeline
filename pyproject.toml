@@ -21,7 +21,7 @@ dashboard = ["streamlit>=1.30"]
 console = ["streamlit>=1.40", "plotly>=5"]
 dev = ["pytest>=7", "huggingface_hub>=0.24"]
 hub = ["huggingface_hub>=0.24"]
-sources = ["huggingface_hub>=0.24", "gdown>=5"]           # Add demonstrations: HF, Google Drive links
+sources = ["huggingface_hub>=0.24", "gdown>=6"]           # Add demonstrations: HF, Google Drive links
 cloud = ["fsspec>=2024.2", "s3fs", "gcsfs", "adlfs"]     # Add demonstrations: S3 / R2 / MinIO, GCS, Azure
 
 [project.scripts]

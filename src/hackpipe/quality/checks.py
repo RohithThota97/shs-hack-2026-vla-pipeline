@@ -53,11 +53,23 @@ def check_episode(ep: pd.DataFrame, fps: float, expected_dims: dict[str, int | N
     n = len(ep)
     res.stats["n_frames"] = n
 
-    # Length
-    if n < q["min_episode_frames"]:
-        res.soft.append(f"too_short ({n} < {q['min_episode_frames']} frames)")
-    if n > q["max_episode_frames"]:
-        res.soft.append(f"too_long ({n} > {q['max_episode_frames']} frames)")
+    # Length, in seconds (frames / fps) so one limit fits 30 fps and 6 fps recordings; *_frames still accepted
+    lo, hi = q.get("min_episode_seconds"), q.get("max_episode_seconds")
+    if not fps or fps <= 0:
+        res.soft.append("no_fps (length not checked)")
+        lo = hi = None
+        secs = 0.0
+    else:
+        secs = n / fps
+        res.stats["seconds"] = round(secs, 2)
+        if lo is None and q.get("min_episode_frames") is not None:
+            lo = q["min_episode_frames"] / fps
+        if hi is None and q.get("max_episode_frames") is not None:
+            hi = q["max_episode_frames"] / fps
+    if lo is not None and secs < lo:
+        res.soft.append(f"too_short ({secs:.1f} s < {lo:g} s, {n} frames at {fps:g} fps)")
+    if hi is not None and secs > hi:
+        res.soft.append(f"too_long ({secs:.1f} s > {hi:g} s, {n} frames at {fps:g} fps)")
 
     # Frame index continuity
     if cols["frame"] in ep.columns and n:
@@ -66,8 +78,8 @@ def check_episode(ep: pd.DataFrame, fps: float, expected_dims: dict[str, int | N
         if fi[0] != 0 or not np.array_equal(fi, expected):
             res.soft.append("frame_index_gaps")
 
-    # Timestamps: increasing, gaps (missing frames), drift
-    if cols["timestamp"] in ep.columns and n > 1:
+    # Timestamps: increasing, gaps (missing frames), drift (need fps)
+    if cols["timestamp"] in ep.columns and n > 1 and fps and fps > 0:
         ts = ep[cols["timestamp"]].to_numpy(dtype=float)
         dt = np.diff(ts)
         if np.any(dt <= 0):
@@ -221,10 +233,10 @@ def check_episode_videos(e: EpisodeCheck, row: pd.Series, ds: DatasetFolder,
             e.hard.append(f"video_corrupted:{name}")
             continue
         t0, t1 = float(row[f"videos/{key}/from_timestamp"]), float(row[f"videos/{key}/to_timestamp"])
-        if abs((t1 - t0) - n / ds.fps) > tol_s:
+        if ds.fps and ds.fps > 0 and abs((t1 - t0) - n / ds.fps) > tol_s:      # no fps: flagged as no_fps
             e.soft.append(f"camera_state_desync:{name} (video {t1 - t0:.3f}s vs states {n / ds.fps:.3f}s)")
         times = frame_times.get(f)
-        if times is not None:
+        if times is not None and ds.fps and ds.fps > 0:
             half = 0.5 / ds.fps
             decoded = int(np.sum((times >= t0 - half) & (times < t1 - half)))
             e.stats[f"video_frames:{name}"] = decoded
