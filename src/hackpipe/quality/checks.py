@@ -53,11 +53,18 @@ def check_episode(ep: pd.DataFrame, fps: float, expected_dims: dict[str, int | N
     n = len(ep)
     res.stats["n_frames"] = n
 
-    # Length
-    if n < q["min_episode_frames"]:
-        res.soft.append(f"too_short ({n} < {q['min_episode_frames']} frames)")
-    if n > q["max_episode_frames"]:
-        res.soft.append(f"too_long ({n} > {q['max_episode_frames']} frames)")
+    # Length, in seconds (frames / fps) so one limit fits 30 fps and 6 fps recordings; *_frames still accepted
+    secs = n / fps if fps else 0.0
+    res.stats["seconds"] = round(secs, 2)
+    lo, hi = q.get("min_episode_seconds"), q.get("max_episode_seconds")
+    if lo is None and q.get("min_episode_frames") is not None:
+        lo = q["min_episode_frames"] / fps
+    if hi is None and q.get("max_episode_frames") is not None:
+        hi = q["max_episode_frames"] / fps
+    if lo is not None and secs < lo:
+        res.soft.append(f"too_short ({secs:.1f} s < {lo:g} s, {n} frames at {fps:g} fps)")
+    if hi is not None and secs > hi:
+        res.soft.append(f"too_long ({secs:.1f} s > {hi:g} s, {n} frames at {fps:g} fps)")
 
     # Frame index continuity
     if cols["frame"] in ep.columns and n:

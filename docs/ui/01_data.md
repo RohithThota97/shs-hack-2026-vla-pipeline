@@ -26,7 +26,7 @@ ds-v1's validated demos; nothing is checked twice; demos that already exist are 
   | Upload a zip | browser upload, up to 5 GB (Streamlit holds it in memory; on Colab prefer the Drive link / this machine) | — |
   | Hugging Face | dataset repo ID, revision, subfolder | `HF_TOKEN` |
   | GitHub | `owner/repo` or URL, branch; Git LFS pulled if installed | `GITHUB_TOKEN` (sent as a header) |
-  | Google Drive link | link shared as "Anyone with the link" to a zip or folder (`gdown`); named after the file / folder on Drive. Private Drive → Drive for desktop + "This machine" | — |
+  | Google Drive link | link shared as "Anyone with the link" to a zip or folder (`gdown`); named after the file / folder on Drive. Google limits downloads of shared links, so a folder may stop partway: the finished files stay in `data/incoming/_partial/` and the same fetch later gets only the missing ones. A zip (one file) avoids most of it. Private Drive → Drive for desktop + "This machine" | — |
   | Cloud bucket | `s3://` (also R2 / MinIO), `gs://`, `az://`, folder or `.zip` | AWS keys + endpoint, GCS service-account JSON, Azure connection string |
   Empty key fields fall back to this machine's environment. Extras: `pip install -e ".[sources]"` (HF, Drive),
   `".[cloud]"` (buckets).

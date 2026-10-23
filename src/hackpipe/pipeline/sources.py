@@ -24,7 +24,7 @@ SEARCH_DIRS = (INCOMING, "data/raw")      # where new dataset folders are looked
 KINDS = ("local", "hf", "github", "gdrive", "cloud")
 KEY_DIR = Path.home() / ".cache" / "hackpipe" / "keys"
 MAX_DEPTH = 4          # how deep below a folder to look for meta/info.json
-_SKIP = {".git", "node_modules", "__pycache__", ".cache"}
+_SKIP = {".git", "node_modules", "__pycache__", ".cache", "_partial"}   # _partial: unfinished Drive downloads
 
 
 def find_roots(top: str | Path, max_depth: int = MAX_DEPTH) -> list[Path]:
@@ -177,35 +177,83 @@ NO_ACCESS = ("Google Drive refused access to this link. Either share it as 'Anyo
              "'This machine' with the folder's path (~/Library/CloudStorage/GoogleDrive-…/My Drive/…).")
 
 
-def fetch_gdrive(src: str, dest: Path) -> str:
+def _rmdir_if_empty(d: Path) -> None:
+    try:
+        d.rmdir()
+    except OSError:
+        pass
+
+
+def partial_dir(src: str, base: Path = REPO_ROOT) -> Path:
+    """Where an unfinished Drive download is kept, so running the same fetch again only gets the missing files."""
+    return base / INCOMING / "_partial" / f"gdrive-{gdrive_id(src)[1]}"
+
+
+def _gdrive_folder(gdown, fid: str, part: Path) -> None:
+    """List the folder once, then download only files that aren't on disk yet. Google refuses some files after
+    many downloads of a shared link ('too many accesses'); those are counted, the rest is kept for a retry."""
+    from gdown.exceptions import DownloadError
+    files = gdown.download_folder(id=fid, output=str(part) + "/", skip_download=True, quiet=True)
+    if not files:
+        raise RuntimeError(NO_ACCESS)
+    missing = [f for f in files if not Path(f.local_path).is_file()]
+    print(f"Drive folder: {len(files)} files, {len(files) - len(missing)} already here, {len(missing)} to download",
+          flush=True)
+    failed = []
+    for f in missing:
+        Path(f.local_path).parent.mkdir(parents=True, exist_ok=True)
+        try:
+            gdown.download(id=f.id, output=f.local_path, quiet=False, resume=True)
+        except DownloadError as e:
+            failed.append(f.path)
+            print(f"failed: {f.path}: {str(e).strip().splitlines()[0]}", flush=True)
+    if failed:
+        raise RuntimeError(
+            f"{len(failed)} of {len(files)} files could not be downloaded — Google limits downloads of shared links "
+            f"('too many accesses'). The other {len(files) - len(failed)} are kept in {part}: run the same fetch "
+            "again later (only the missing files are fetched), or share the dataset as one zip instead.")
+
+
+def fetch_gdrive(src: str, dest: Path, base: Path = REPO_ROOT) -> str:
     """Shared link ('anyone with the link'). A zip is extracted. Returns the name on Drive (folder or zip
-    without .zip). A mounted Drive (Colab, Drive for desktop) is a folder on this machine — use kind 'local'."""
+    without .zip). A mounted Drive (Colab, Drive for desktop) is a folder on this machine — use kind 'local'.
+    Downloads into partial_dir(src) first and moves it to dest when complete."""
     try:
         import gdown
         from gdown.exceptions import DownloadError, FileURLRetrievalError
     except ImportError as e:
         raise RuntimeError("Google Drive links need gdown: pip install -e '.[sources]'") from e
     kind, fid = gdrive_id(src)
-    dest.mkdir(parents=True)
+    part = partial_dir(src, base)
+    part.mkdir(parents=True, exist_ok=True)
     try:
         if kind == "folder":
-            files = gdown.download_folder(id=fid, output=str(dest) + "/", quiet=False)
+            _gdrive_folder(gdown, fid, part)
         else:
-            out = gdown.download(id=fid, output=str(dest) + "/", quiet=False)
+            out = gdown.download(id=fid, output=str(part) + "/", quiet=False, resume=True)
     except DownloadError as e:      # a file without access → FileURLRetrievalError; a folder → "status code 401"
         if isinstance(e, FileURLRetrievalError) or re.search(r"status code 40[13]", str(e)):
+            if not any(part.rglob("*")):
+                part.rmdir()
+                _rmdir_if_empty(part.parent)
             raise RuntimeError(NO_ACCESS) from e
         raise
     if kind == "folder":
-        if not files:
-            raise RuntimeError(NO_ACCESS)
-        kids = [p for p in dest.iterdir() if p.is_dir()]        # gdown puts the files in dest/<folder name>/
-        return kids[0].name if len(kids) == 1 else dataset_name(src)
+        kids = [p for p in part.iterdir() if p.is_dir()]        # gdown puts the files in <part>/<folder name>/
+        name = kids[0].name if len(kids) == 1 else dataset_name(src)
+        part.rename(dest)
+        _rmdir_if_empty(part.parent)
+        return name
     if not out:
         raise RuntimeError(NO_ACCESS)
+    dest.mkdir(parents=True)
     if out.endswith(".zip"):
         extract_zip(out, dest)
         os.remove(out)
+    else:
+        shutil.move(out, dest / Path(out).name)
+    shutil.rmtree(part, ignore_errors=True)
+    _rmdir_if_empty(part.parent)
     return dataset_name(out)
 
 
@@ -276,7 +324,7 @@ def fetch(kind: str, src: str, name: str | None = None, revision: str | None = N
         got = {"local": lambda: fetch_local(src, dest, copy),
                "hf": lambda: fetch_hf(src, dest, revision, subdir),
                "github": lambda: fetch_github(src, dest, revision),
-               "gdrive": lambda: fetch_gdrive(src, dest),
+               "gdrive": lambda: fetch_gdrive(src, dest, base),
                "cloud": lambda: fetch_cloud(src, dest)}[kind]()
         roots = _check(dest)
         up = local_path(src) if kind == "local" else None

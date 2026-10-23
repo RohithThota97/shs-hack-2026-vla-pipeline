@@ -63,7 +63,7 @@ def write_test_configs(cfg_dir: Path, **dataset_overrides) -> Path:
     project["hub"]["model_repo_id"] = None
     ds = yaml.safe_load((REPO_CONFIGS / "dataset.yaml").read_text())
     ds["columns"]["success"] = None
-    ds["quality"].update({"min_episode_frames": 10, "max_episode_frames": 100000, "joint_limits": None})
+    ds["quality"].update({"min_episode_seconds": 1.0, "max_episode_seconds": 10000, "joint_limits": None})
     ds["splits"].update({"train": 0.8, "val": 0.1, "test": 0.1, "test_sources": [], "leakage_keys": []})
     ds["preprocessing"]["rename_map"] = {}
     for k, v in dataset_overrides.items():
