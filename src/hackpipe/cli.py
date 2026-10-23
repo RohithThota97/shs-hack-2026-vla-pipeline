@@ -31,6 +31,8 @@ def _writes(args) -> bool:
         return True
     if args.cmd == "dataset":
         return args.action in ("create", "approve") or (args.action == "materialize" and not args.plan)
+    if args.cmd == "subtasks":
+        return args.create
     if args.cmd in ("train", "publish"):
         return not args.dry_run
     if args.cmd == "fetch":
@@ -80,6 +82,8 @@ def main(argv: list[str] | None = None) -> None:
     c = ds_sub.add_parser("create")
     c.add_argument("--notes", default="")
     c.add_argument("--base", help="approved version to build on, or 'latest'")
+    c.add_argument("--subtasks", metavar="DIR", help="sub-task labels from `hackpipe subtasks label` (curriculum "
+                   "training); with --base, a new version even if no demo changed")
     a = ds_sub.add_parser("approve")
     a.add_argument("version")
     a.add_argument("--by", default="", help="who approves (recorded)")
@@ -87,6 +91,14 @@ def main(argv: list[str] | None = None) -> None:
     mz.add_argument("version")
     mz.add_argument("--plan", action="store_true", help="print the merge command and mapping only")
     ds_sub.add_parser("list")
+
+    s = sub.add_parser("subtasks", help="sub-task labels for curriculum training (robot signals, no video re-encode)")
+    st_sub = s.add_subparsers(dest="action", required=True)
+    lb = st_sub.add_parser("label", help="label the train/val episodes of an approved version")
+    lb.add_argument("--base", required=True, help="approved version, or 'latest'")
+    lb.add_argument("--create", action="store_true", help="then create the next draft version with these labels")
+    lb.add_argument("--no-images", action="store_true", help="skip the review images")
+    lb.add_argument("--notes", default="")
 
     s = sub.add_parser("train", help="R4 reproducible training")
     s.add_argument("--config")
@@ -224,7 +236,7 @@ def main(argv: list[str] | None = None) -> None:
         from hackpipe.dataset import versioning as v
         if args.action == "create":
             base = v.latest_approved(reg) if args.base == "latest" else args.base
-            m = v.create_dataset_version(reg, notes=args.notes, base=base)
+            m = v.create_dataset_version(reg, notes=args.notes, base=base, subtasks=args.subtasks)
             _print({"version": m["version"], "fingerprint": m["fingerprint"], "base": base,
                     "counts": {k: len(x) for k, x in m["demo_ids"].items()}, "status": "draft"})
         elif args.action == "approve":
@@ -235,6 +247,18 @@ def main(argv: list[str] | None = None) -> None:
             _print(materialize(args.version, reg, run=not args.plan))
         else:
             _print([{k: d[k] for k in ("version", "fingerprint", "status", "created_at")} for d in reg.datasets()])
+    elif args.cmd == "subtasks":
+        from hackpipe.dataset import versioning as v
+        from hackpipe.dataset.subtasks import label
+        base = v.latest_approved(reg) if args.base == "latest" else args.base
+        out = label(base, reg, review_images=False if args.no_images else None)
+        if args.create:
+            m = v.create_dataset_version(reg, notes=args.notes or f"{base} + sub-task labels", base=base,
+                                         subtasks=out)
+            _print({"labels": str(out), "version": m["version"], "fingerprint": m["fingerprint"], "base": base,
+                    "flagged": {s: x["flagged"] for s, x in m["subtasks"]["sources"].items()}, "status": "draft"})
+        else:
+            _print({"labels": str(out), "next": f"hackpipe dataset create --base {base} --subtasks {out}"})
     elif args.cmd == "train":
         from hackpipe.training import train as t
         if args.register_only:

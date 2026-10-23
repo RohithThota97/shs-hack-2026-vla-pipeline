@@ -1,0 +1,40 @@
+# Curriculum training of SmolVLA on sub-task labels (hackpipe.training.curriculum, ported from the team's
+# train_curriculum.py). Needs an approved dataset version with sub-task labels:
+#   hackpipe subtasks label --base ds-v2 --create   → draft ds-v3 (same demos and split + labels) → approve it.
+# Both datasets train at rate_hz (6 Hz): rand500 is 6 fps, the 30 fps handover uses every 5th frame.
+# Sized for a free Colab T4 (16 GB, no bf16): batch 8. The team ran batch 32 (~12 GB) on a bigger GPU.
+# Baseline for the comparison: same config with `--set no_curriculum=true` (all skills mixed from the start).
+# Everything under `args` is read by the curriculum trainer; override with `hackpipe train --set k=v`.
+
+trainer: curriculum
+policy_name: smolvla_curriculum
+args:
+  policy.path: lerobot/smolvla_base
+  policy.device: cuda
+  batch_size: 8
+  steps: 20000                # placeholder — set from the timing run, then frozen
+  chunk: 20                   # actions per prediction: 20 at 6 Hz = 3.3 s
+  rate_hz: 6
+  save_freq: 1000
+  log_freq: 50
+  val_every: 1000
+  val_batches: 4
+  num_workers: 2              # Colab has 2 vCPUs
+  subtask_tail: hold          # after a sub-task's end the target holds the end pose (learn to stop); or mask
+  paraphrase_prob: 0.3        # share of samples with a reworded instruction
+  gripper_lag_fix: true       # cube recordings: gripper command moved to where the gripper starts moving
+  bf16: false                 # Ampere+ only (not on a T4)
+  no_curriculum: false
+  keep_stage_checkpoints: false   # true also keeps each stage's model (≈1 GB each; 15 GB Drive)
+  policy_overrides:
+    freeze_vision_encoder: true
+    train_expert_only: true
+curriculum:
+  new_skill_weight: 0.7       # share of a stage's samples from the skills it adds; the rest rehearses earlier ones
+  stages:
+    - {name: stage1_reach_grasp, frac: 0.15, skills: [reach_grasp]}
+    - {name: stage2_transport_place, frac: 0.20, skills: [reach_grasp, transport_place]}
+    - {name: stage3_bimanual, frac: 0.20, skills: [reach_grasp, transport_place, bimanual]}
+    - {name: stage4_full_task, frac: 0.45, skills: [reach_grasp, transport_place, bimanual, full_task]}
+seed: 1000
+keep_checkpoints: 2          # older step checkpoints are deleted during the run (15 GB Drive); 0 = keep all

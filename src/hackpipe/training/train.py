@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -53,12 +54,12 @@ def set_config_steps(config_path: str | Path, steps: int) -> None:
     p.write_text(new)
 
 
-TOP_LEVEL = ("seed", "policy_name", "keep_checkpoints")
+TOP_LEVEL = ("seed", "policy_name", "keep_checkpoints", "trainer", "curriculum")
 
 
 def apply_overrides(cfg: dict[str, Any], overrides: dict[str, Any]) -> dict[str, Any]:
-    """`seed`, `policy_name` and `keep_checkpoints` are top-level config keys; everything else is a
-    lerobot-train arg."""
+    """`seed`, `policy_name`, `keep_checkpoints`, `trainer` and `curriculum` (the stage plan) are top-level config
+    keys; everything else is a trainer arg (lerobot-train: --key=value)."""
     cfg = {**cfg, "args": dict(cfg.get("args") or {})}
     for k, v in overrides.items():
         if k in TOP_LEVEL:
@@ -87,6 +88,16 @@ def training_input(manifest: dict[str, Any], dataset_root: str | None = None) ->
     root = str(resolve(src)) if src else dataset_root
     return {"repo_id": manifest["repo_id"], "root": root, "episodes": manifest["splits"]["train"],
             "data_only_sources": data_only}
+
+
+def is_curriculum(cfg: dict[str, Any]) -> bool:
+    return cfg.get("trainer") == "curriculum"
+
+
+def curriculum_command(dataset_version: str, config_json: Path, output_dir: Path, resume: bool = False) -> list[str]:
+    cmd = [sys.executable, "-m", "hackpipe.training.curriculum", "--dataset", dataset_version,
+           "--config", str(config_json), "--output_dir", str(output_dir)]
+    return cmd + ["--resume"] if resume else cmd
 
 
 def build_command(train_cfg: dict[str, Any], manifest: dict[str, Any], output_dir: Path, job_name: str,
@@ -164,25 +175,40 @@ def train(config_path: str, dataset_version: str, dry_run: bool = False, registr
     if manifest["status"] != "approved":
         raise RuntimeError(f"{dataset_version} is '{manifest['status']}'. Approve it first: "
                            f"hackpipe dataset approve {dataset_version}")
+    if config_path is None and resume_model:      # `--resume` alone (the Train page): the run's own config file
+        config_path = ((reg.get_model(resume_model) or {}).get("meta") or {}).get("train_config_file")
+    if config_path is None:
+        raise ValueError("a train config is required")
     cfg = apply_overrides(load_yaml(config_path), overrides or {})
     outputs = resolve(project_config()["project"]["outputs_dir"])
 
     if resume_model and overrides:
         raise ValueError("--set cannot be combined with --resume: lerobot-train resumes from the saved "
                          "train_config.json, so the overrides would be recorded but not applied.")
+    curriculum = None
     if resume_model:
         model = reg.get_model(resume_model)
         if model is None:
             raise KeyError(resume_model)
         version, output_dir = resume_model, Path(model["meta"]["output_dir"])
-        cmd = ["lerobot-train", "--resume=true",
-               f"--config_path={output_dir / 'checkpoints' / 'last' / 'pretrained_model' / 'train_config.json'}"]
+        if model["meta"].get("trainer") == "curriculum":      # resumes with the run's own saved config
+            cfg = json.loads((output_dir / "train_config.json").read_text())
+            cmd = curriculum_command(dataset_version, output_dir / "train_config.json", output_dir, resume=True)
+        else:
+            cmd = ["lerobot-train", "--resume=true",
+                   f"--config_path={output_dir / 'checkpoints' / 'last' / 'pretrained_model' / 'train_config.json'}"]
     else:
         version = next_version([m["version"] for m in reg.models()], "m")
         output_dir = outputs / "train" / version
-        root = project_config()["dataset"].get("root")
-        cmd = build_command(cfg, manifest, output_dir, f"{version}-{cfg.get('policy_name', 'policy')}",
-                            str(resolve(root)) if root else None)
+        if is_curriculum(cfg):
+            from hackpipe.training.curriculum import describe
+            curriculum = describe(cfg, manifest)          # fails early if the version has no sub-task labels
+            name = "train_config_dryrun.json" if dry_run else "train_config.json"
+            cmd = curriculum_command(dataset_version, outputs / "runs" / version / name, output_dir)
+        else:
+            root = project_config()["dataset"].get("root")
+            cmd = build_command(cfg, manifest, output_dir, f"{version}-{cfg.get('policy_name', 'policy')}",
+                                str(resolve(root)) if root else None)
 
     record = {
         "model_version": version,
@@ -196,12 +222,18 @@ def train(config_path: str, dataset_version: str, dry_run: bool = False, registr
         "output_dir": str(output_dir),
         "environment": environment(),
         "purpose": purpose,
+        "trainer": "curriculum" if is_curriculum(cfg) else "lerobot-train",
         "started_at": now_iso(),
         "dry_run": dry_run,
     }
+    if curriculum:
+        record["curriculum"] = curriculum
+        record["subtask_labels"] = manifest["subtasks"]["sha256"]
     run_dir = outputs / "runs" / version
     run_dir.mkdir(parents=True, exist_ok=True)
     record_path = run_dir / ("run_record_resume.json" if resume_model else "run_record.json")
+    if curriculum:                      # the resolved config the trainer reads (the file named in the command)
+        Path(cmd[cmd.index("--config") + 1]).write_text(json.dumps(cfg, indent=2))
 
     if dry_run:
         # Separate file so a dry run never looks like a real run record (the version is not registered).
@@ -218,7 +250,7 @@ def train(config_path: str, dataset_version: str, dry_run: bool = False, registr
     else:
         reg.add_model(version, dataset_version, cfg.get("policy_name", "policy"), "training", str(ckpt),
                       str(record_path), {"output_dir": str(output_dir), "train_config_file": str(config_path),
-                                         "purpose": purpose})
+                                         "purpose": purpose, "trainer": record["trainer"]})
     print(f"{version}: training started — resume after a crash with "
           f"`hackpipe train --dataset {dataset_version} --resume {version}`", flush=True)
     t0 = time.time()

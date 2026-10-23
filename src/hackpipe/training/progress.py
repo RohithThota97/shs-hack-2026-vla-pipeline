@@ -74,6 +74,22 @@ def train_frames(dataset_version: str, registry: Registry) -> int:
                if d["demo_id"] in ids and (not used or d["source"] in used))   # old manifests: no sources
 
 
+def curriculum_frames(dataset_version: str, registry: Registry, rate_hz: float) -> int:
+    """Sample rows the curriculum trainer reads: train demos of every labelled source on the rate_hz grid, flagged
+    episodes left out (each row is used for a sub-task and a complete-task sample)."""
+    import math
+    m = load_manifest(dataset_version, registry)
+    sub = (m.get("subtasks") or {}).get("sources") or {}
+    ids = set(m["demo_ids"]["train"])
+    total = 0
+    for d in registry.demos():
+        info = sub.get(d["source"])
+        if d["demo_id"] in ids and info and d["episode_index"] not in set(info["flagged"]):
+            stride = max(1, round(float(d["meta"].get("fps") or info["fps"]) / rate_hz))
+            total += math.ceil(int(d["meta"].get("n_frames", 0)) / stride)
+    return total
+
+
 def epochs(steps: int, batch_size: int, frames: int) -> float | None:
     return round(steps * batch_size / frames, 2) if frames else None
 

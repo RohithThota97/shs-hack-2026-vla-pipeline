@@ -49,3 +49,10 @@ the tunnel when done. On Colab the registry writer is `colab`.
 - Training command: a 2-step run of the exact command on the laptop CPU with the real ds-v1 data (LeRobot 0.6.1)
   finished with exit 0, loss logged, and a checkpoint with config, weights and normalizer saved.
 - The parser reads that real log (61 s/step on CPU), and the page shows those numbers.
+
+## Curriculum trainer (23 Oct)
+- Config `configs/train/smolvla_curriculum.yaml` (`trainer: curriculum`). The dataset needs sub-task labels: if it has none the page offers **Label <ds> and create the draft** (job `hackpipe subtasks label --base <ds> --create`) and training stays disabled; the draft is checked (review images, flagged episodes) and approved in Data → Versions.
+- **Curriculum plan** expander: stage table (share of steps, skills), new-skill share, baseline toggle (all skills mixed). Changes become `--set curriculum=…` / `--set no_curriculum=true` overrides (in the run record). Below it: steps and sample mix per stage, computed from the plan only.
+- Setup shows train samples at the policy rate (6 Hz) instead of frames; epochs use them.
+- Runs: validation per dataset × instruction (sub-task / complete) from `curriculum_log.json`, stage ends dotted.
+- The trainer logs lerobot-train-style lines (`step:… loss:… updt_s:… data_s:… mem_gb:…`), so timing run, budget and live progress work unchanged; resume needs no config (the run's saved one is used).
