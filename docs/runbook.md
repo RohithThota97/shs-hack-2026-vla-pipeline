@@ -103,3 +103,23 @@ hackpipe state import colab_state.zip --replace       # backs up the laptop regi
 ```
 
 Only one machine writes at a time: after exporting, don't change the laptop registry until you import Colab's back.
+
+## Remote GPU machine (a teammate's PC / lab server)
+Everything runs on the GPU machine (console, jobs, data, registry); the laptop is only a browser through an SSH
+tunnel. The registry moves with `hackpipe state` zips — one writer at a time.
+
+```bash
+# GPU machine, once (Linux + NVIDIA driver, Python 3.12, ffmpeg; repo access on GitHub):
+git clone https://github.com/RohithThota97/shs-hack-2026-vla-pipeline.git ~/shs-hack-2026-vla-pipeline
+cd ~/shs-hack-2026-vla-pipeline && ./scripts/remote/gpu.sh setup ~/hackpipe_data   # dataset zips from Drive
+# laptop (console stopped):
+./scripts/remote/laptop.sh send USER@HOST
+# GPU machine:
+./scripts/remote/gpu.sh console ~/hackpipe_state.zip            # add --public when the laptop can't SSH in
+# laptop:
+./scripts/remote/laptop.sh connect USER@HOST                    # opens http://localhost:8501/?token=…
+# when done — laptop (GPU machine stops writing):
+./scripts/remote/laptop.sh fetch USER@HOST
+```
+The console listens on 127.0.0.1 only and needs the token in `~/.hackpipe/console_token`. Training jobs keep
+running when the console (`gpu.sh stop`) or the tunnel closes. Checkpoints stay on the GPU machine.
