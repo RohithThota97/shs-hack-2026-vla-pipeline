@@ -5,7 +5,15 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from tests.test_state_offline import _table
+
+
+def _table(n=60, stride=1):                  # same frame table as test_state_offline._table
+    S = np.cumsum(np.full((n, 16), 0.01, np.float32), 0)
+    A = np.roll(S, -1, 0)
+    sub = np.array(["Pick" if i < n // 2 else "Place" for i in range(n)], object)
+    return {"name": "h", "stride": stride, "S": S, "A": A, "rows": np.arange(0, n, 2),
+            "sub_end": np.where(np.arange(n) < n // 2, n // 2, n), "ep_end": np.full(n, n),
+            "sub_text": sub, "full_text": np.full(n, "Do it", object), "ep": np.zeros(n, int)}
 
 
 def _oracle(tab, rows, mode, variant=None):
