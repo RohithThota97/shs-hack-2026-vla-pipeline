@@ -83,10 +83,15 @@ ds-v1's validated demos; nothing is checked twice; demos that already exist are 
 ## Sources with different fps (subtask data)
 `versions.allow_mixed_schemas: true` (configs/dataset.yaml) lets a version hold sources whose fps / schema differ —
 here the 6 fps cube-stacking subtask `fr3_duo_rand500` next to the 30 fps handover data. The manifest gets
-`mixed_schemas: true` and a per-source schema (also in the card); Versions shows "kept together as data".
-Such a version can't be merged (`dataset materialize`) or trained (`hackpipe train` refuses with the reason):
-LeRobot merges only equal fps. The flag is outside `splits`/`preprocessing`, so single-source fingerprints
-(ds-v1 `01a77eac94728a96`) don't change.
+`mixed_schemas: true` and a per-source schema (also in the card).
+- **Training uses the sources with the main dataset's schema** (`dataset.root` in project.yaml = handover); the
+  others are **data only** (`trainable_sources()`): not trained, not merged, not counted in the step budget. The
+  Versions tab, the card and the Train page say which. LeRobot merges only equal fps, so this is the only way a
+  mixed version trains.
+- Later versions (based on an approved mixed one) keep training on the main-schema sources; new main-task data
+  is merged with `dataset materialize` as before, the subtask stays out.
+- Seeds of a data-only source aren't compared with the test split's seeds (another task, own numbering).
+- The flag is outside `splits`/`preprocessing`, so single-source fingerprints (ds-v1 `01a77eac94728a96`) don't change.
 
 ## Empty / error states
 - No demos: the Add tab is open, with a one-line explanation.

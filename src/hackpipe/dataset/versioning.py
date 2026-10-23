@@ -79,8 +79,11 @@ def split_demos(demos: list[dict[str, Any]], cfg: dict[str, Any],
 
 
 def leakage_guard(splits: dict[str, list[dict[str, Any]]], group_key: str | None,
-                  leakage_keys: list[str] | None = None) -> None:
+                  leakage_keys: list[str] | None = None, other_task: set[str] | None = None) -> None:
+    """other_task: sources of another task / schema (data-only subtask) — their seeds etc. are numbered on their
+    own, so they aren't compared with the test split's (demo IDs still are)."""
     ids = {k: {d["demo_id"] for d in v} for k, v in splits.items()}
+    other_task = other_task or set()
     for a, b in (("train", "test"), ("val", "test"), ("train", "val")):
         overlap = ids[a] & ids[b]
         if overlap:
@@ -88,9 +91,54 @@ def leakage_guard(splits: dict[str, list[dict[str, Any]]], group_key: str | None
     for key in ([group_key] if group_key else []) + list(leakage_keys or []):
         test_vals = {str(_get(d["meta"], key)) for d in splits["test"] if _get(d["meta"], key) is not None}
         for k in ("train", "val"):
-            bad = test_vals & {str(_get(d["meta"], key)) for d in splits[k] if _get(d["meta"], key) is not None}
+            bad = test_vals & {str(_get(d["meta"], key)) for d in splits[k]
+                               if _get(d["meta"], key) is not None and d["source"] not in other_task}
             if bad:
                 raise LeakageError(f"test {key} values also in {k}: {sorted(bad)[:5]}")
+
+
+def _schema_key(schema: dict[str, Any]) -> str:
+    return json.dumps({k: v for k, v in schema.items() if k != "codebase_version"}, sort_keys=True)
+
+
+def schema_diff(schemas: dict[str, dict[str, Any]]) -> list[str]:
+    """Which schema parts differ between sources: e.g. ["fps", "state names"]."""
+    vals = list(schemas.values())
+    out = []
+    for part, label in (("fps", "fps"), ("cameras", "cameras")):
+        if len({json.dumps(v.get(part), sort_keys=True) for v in vals}) > 1:
+            out.append(label)
+    for part in ("state", "action"):
+        for sub in ("shape", "names"):
+            if len({json.dumps((v.get(part) or {}).get(sub)) for v in vals}) > 1:
+                out.append(f"{part} {sub}")
+    return out
+
+
+def primary_source(sources: list[str]) -> str:
+    """The source whose schema the version trains with: the project's dataset.root (handover) if it is in the
+    version, else the first source."""
+    root = project_config()["dataset"].get("root")
+    key = source_key(resolve(root)) if root else None
+    return key if key in sources else sources[0]
+
+
+def trainable_sources(manifest: dict[str, Any]) -> tuple[list[str], list[str]]:
+    """(sources training uses, data-only sources). A version mixing schemas (e.g. the 6 fps cube-stacking subtask
+    next to 30 fps handover) trains on the sources with the primary source's schema; the rest is kept as data.
+    Derived from the manifest, so versions created before this rule get it too."""
+    sources = manifest.get("sources") or [manifest["source"]]
+    per = (manifest.get("preprocessing") or {}).get("per_source_schema")
+    if not manifest.get("mixed_schemas") or not per:
+        return sources, []
+    want = _schema_key(per[primary_source(sources)])
+    train = [s for s in sources if _schema_key(per[s]) == want]
+    return train, [s for s in sources if s not in train]
+
+
+def needs_merge(manifest: dict[str, Any]) -> bool:
+    """Training needs one merged folder: more than one trainable source."""
+    return len(trainable_sources(manifest)[0]) > 1
 
 
 def demo_fingerprint_item(d: dict[str, Any]) -> str:
@@ -186,7 +234,6 @@ def create_dataset_version(registry: Registry | None = None, cfg: dict[str, Any]
                         "added_split": {k: sorted(d["demo_id"] for d in new[k]) for k in ("train", "val")}})
     else:
         splits = split_demos(pool, cfg, held_out)
-    leakage_guard(splits, cfg["splits"].get("group_key"), cfg["splits"].get("leakage_keys"))
     frozen = frozen_test_ids(reg)
     if cfg["splits"].get("freeze_test", True) and frozen and frozen[1] != sorted(d["demo_id"] for d in splits["test"]):
         raise LeakageError(f"The test split is frozen since {frozen[0]}; this version's test demos differ. "
@@ -197,12 +244,20 @@ def create_dataset_version(registry: Registry | None = None, cfg: dict[str, Any]
     schemas = {s: {k: v for k, v in r["schema"].items() if k != "codebase_version"} for s, r in records.items()}
     mixed = len({json.dumps(v, sort_keys=True) for v in schemas.values()}) > 1
     if mixed and not (cfg.get("versions") or {}).get("allow_mixed_schemas"):
-        raise RuntimeError(f"Sources have different schemas (fps / cameras / state / action): {sorted(schemas)}. "
-                           "To keep them in one version anyway (they can't be merged for training), set "
-                           "versions.allow_mixed_schemas: true in configs/dataset.yaml")
-    preprocessing = records[sources[0]]
-    if mixed:                       # recorded per source; part of the fingerprint
+        raise RuntimeError(f"Sources have different schemas ({', '.join(schema_diff(schemas))}): {sorted(schemas)}. "
+                           "To keep them in one version anyway (only the sources matching the main dataset are "
+                           "trained), set versions.allow_mixed_schemas: true in configs/dataset.yaml")
+    primary = primary_source(sources)
+    preprocessing = records[primary]   # the trained schema (single source: its only one, as before)
+    if mixed:                          # recorded per source; part of the fingerprint
         preprocessing["per_source_schema"] = schemas
+    other_task = {s for s in sources if _schema_key(schemas[s]) != _schema_key(schemas[primary])}
+    leakage_guard(splits, cfg["splits"].get("group_key"), cfg["splits"].get("leakage_keys"), other_task)
+    warnings = [f"test source {t} has another schema than the trained sources ({', '.join(d)})"
+                for t in test_sources
+                for d in [schema_diff({"a": schemas[primary],
+                                       "b": {k: v for k, v in preprocessing_record(t, cfg)["schema"].items()
+                                             if k != "codebase_version"}})] if d]
     if len(sources) > 1:            # single-source records stay as before, so fingerprints stay comparable
         preprocessing["normalisation_stats"]["per_source"] = {s: r["normalisation_stats"]["sha256"]
                                                               for s, r in records.items()}
@@ -224,8 +279,11 @@ def create_dataset_version(registry: Registry | None = None, cfg: dict[str, Any]
         "source": sources[0] if len(sources) == 1 else None,
         "sources": sources,
         "test_sources": test_sources,
-        "needs_materialize": len(sources) > 1,
-        "mixed_schemas": mixed,     # e.g. 30 fps + 6 fps: kept together as data, not trainable as one folder
+        "needs_materialize": len(sources) - len(other_task) > 1,
+        "mixed_schemas": mixed,     # e.g. 30 fps + 6 fps: trains on `train_sources`, the rest is data only
+        "train_sources": [x for x in sources if x not in other_task],
+        "data_only_sources": sorted(other_task),
+        "warnings": warnings,
         "repo_id": project_config()["dataset"]["repo_id"],
         "revision": project_config()["dataset"].get("revision"),
         # Episode indices per split: valid on `source` (train/val) and the test source; multi-source versions
@@ -306,10 +364,11 @@ def dataset_card(manifest: dict[str, Any], splits: dict[str, list[dict[str, Any]
         f"- Fingerprint: `{manifest['fingerprint']}`",
         f"- Created: {manifest['created_at']}",
         f"- Train/val source(s): {', '.join(f'`{x}`' for x in manifest.get('sources') or [manifest['source']])}"
-        + (" — sources differ in fps / schema: kept together as data, **not trainable as one folder** "
-           "(LeRobot merges only equal fps)" if manifest.get("mixed_schemas") else
-           " — several sources: train from the merged folder (`hackpipe dataset materialize`)"
-           if manifest.get("needs_materialize") else ""),
+        + (f" — sources differ ({', '.join(schema_diff(pre.get('per_source_schema') or {}))}): training uses "
+           f"{', '.join(f'`{x}`' for x in trainable_sources(manifest)[0])}; data only: "
+           f"{', '.join(f'`{x}`' for x in trainable_sources(manifest)[1])}" if manifest.get("mixed_schemas") else "")
+        + (" — several sources: train from the merged folder (`hackpipe dataset materialize`)"
+           if needs_merge(manifest) else ""),
         f"- Based on: {(manifest.get('lineage') or {}).get('base') or 'nothing (first version)'}",
         f"- Held-out test sources: {', '.join(f'`{t}`' for t in manifest.get('test_sources', [])) or 'none (ratio split)'}",
         f"- Dataset revision: {manifest.get('revision') or 'local folder, not published'}",
@@ -324,6 +383,8 @@ def dataset_card(manifest: dict[str, Any], splits: dict[str, list[dict[str, Any]
                         f"{sc['action']['shape']} |")
         at = lines.index("| Split | Episodes | Frames |")
         lines[at:at] = ["## Sources (different schemas)", "", *rows, ""]
+    for w in manifest.get("warnings") or []:
+        lines.insert(lines.index("| Split | Episodes | Frames |"), f"> ⚠ {w}\n")
     for k in ("train", "val", "test"):
         frames = sum(int(d["meta"].get("n_frames", 0)) for d in splits[k])
         lines.append(f"| {k} | {len(splits[k])} | {frames} |")

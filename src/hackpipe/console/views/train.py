@@ -14,6 +14,7 @@ from hackpipe.console.theme import TOKENS, badge
 from hackpipe.jobs import runner
 from hackpipe.jobs.estimates import fmt_duration
 from hackpipe.training import progress
+from hackpipe.dataset.versioning import load_manifest, trainable_sources
 from hackpipe.training.train import parse_overrides, set_config_steps, train
 
 reg = Registry()
@@ -51,6 +52,10 @@ if not approved:
 else:
     c1, c2 = st.columns(2)
     ds = c1.selectbox("Dataset (approved only)", approved)
+    _train_src, _data_only = trainable_sources(load_manifest(ds, reg))
+    if _data_only:
+        st.caption(f"{ds} trains on {', '.join(f'`{x}`' for x in _train_src)}; kept as data only (other "
+                   f"fps / schema, not trained): {', '.join(f'`{x}`' for x in _data_only)}.")
     cfg_path = c2.selectbox("Train config", configs,
                             index=configs.index("configs/train/smolvla_fr3_duo.yaml")
                             if "configs/train/smolvla_fr3_duo.yaml" in configs else 0)

@@ -12,7 +12,7 @@ from hackpipe.common.config import dataset_config, resolve
 from hackpipe.common.ids import demo_id, now_iso
 from hackpipe.common.lerobot_io import DatasetFolder
 from hackpipe.common.registry import Registry
-from hackpipe.dataset.versioning import load_manifest
+from hackpipe.dataset.versioning import load_manifest, needs_merge, trainable_sources
 
 
 class MaterializeError(RuntimeError):
@@ -23,13 +23,13 @@ def plan(version: str, registry: Registry | None = None) -> dict[str, Any]:
     """The merge command and the episode mapping (merge concatenates the sources in this order)."""
     reg = registry or Registry()
     m = load_manifest(version, reg)
-    sources = m.get("sources") or [m["source"]]
+    sources = trainable_sources(m)[0]          # data-only sources (another schema) are not merged
     out = Path("data") / "processed" / version
     offsets, total = {}, 0
     for s in sources:
         offsets[s] = total
         total += int(DatasetFolder(resolve(s)).info["total_episodes"])
-    splits = {k: sorted(offsets[s] + i for s, i in m["episodes"][k]) for k in ("train", "val")}
+    splits = {k: sorted(offsets[s] + i for s, i in m["episodes"][k] if s in offsets) for k in ("train", "val")}
     cmd = ["lerobot-edit-dataset", "--new_repo_id", f"local/{version}", "--new_root", str(resolve(out)),
            "--operation.type", "merge",
            "--operation.repo_ids", json.dumps([f"local/{Path(s).name}" for s in sources]),
@@ -50,7 +50,7 @@ def verify(p: dict[str, Any], manifest: dict[str, Any], registry: Registry) -> i
     hash_cols = [cols["frame"], cols["timestamp"], cols["state"], cols["action"]]
     n = 0
     for split in ("train", "val"):
-        for src, idx in manifest["episodes"][split]:
+        for src, idx in (e for e in manifest["episodes"][split] if e[0] in p["offsets"]):
             ep = df[df[cols["episode"]] == p["offsets"][src] + idx].sort_values(cols["frame"])
             want = registry.get_demo(demo_id(src, idx))["meta"]["content_sha256"]
             if _episode_checksum(ep, hash_cols) != want:
@@ -63,11 +63,11 @@ def verify(p: dict[str, Any], manifest: dict[str, Any], registry: Registry) -> i
 def materialize(version: str, registry: Registry | None = None, run: bool = True) -> dict[str, Any]:
     reg = registry or Registry()
     manifest = load_manifest(version, reg)
-    if not manifest.get("needs_materialize"):
-        return {"version": version, "needed": False, "reason": "single source: train directly from it"}
-    if manifest.get("mixed_schemas"):
-        raise MaterializeError(f"{version} mixes sources with different fps / schemas; LeRobot merges only equal "
-                               "fps (\"Same fps is expected\"). Kept as data only.")
+    if not needs_merge(manifest):
+        train, data_only = trainable_sources(manifest)
+        return {"version": version, "needed": False,
+                "reason": f"one trainable source ({train[0]}): train directly from it"
+                + (f"; data only, not merged: {', '.join(data_only)}" if data_only else "")}
     p = plan(version, reg)
     if not run:
         return p | {"needed": True, "ran": False}
