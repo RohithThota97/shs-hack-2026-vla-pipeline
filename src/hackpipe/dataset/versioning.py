@@ -20,6 +20,8 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
+import pandas as pd
+
 from hackpipe.common.config import dataset_config, project_config, resolve, source_key
 from hackpipe.common.ids import fingerprint, next_version, now_iso
 from hackpipe.common.lerobot_io import DatasetFolder
@@ -203,13 +205,37 @@ def _excluded_by_hand(d: dict[str, Any]) -> bool:
     return bool(d["meta"].get("excluded"))
 
 
+def _subtask_labels(directory: str | Path, episodes: dict[str, list[list[Any]]]) -> dict[str, Any]:
+    """Check sub-task labels (hackpipe subtasks label) cover every train/val episode of the version."""
+    d = resolve(directory)
+    index = json.loads((d / "labels.json").read_text())
+    want: dict[str, set[int]] = defaultdict(set)
+    for split in ("train", "val"):
+        for s, i in episodes[split]:
+            want[s].add(int(i))
+    missing = {}
+    for s, eps in want.items():
+        v = index["sources"].get(s)
+        have = set() if v is None else {int(e) for e in pd.read_csv(d / v["episodes_file"]).episode_index}
+        if eps - have:
+            missing[s] = len(eps - have)
+    if missing:
+        raise RuntimeError(f"Sub-task labels in {d} don't cover {missing} train/val episodes (source: count). "
+                           "Label this version's episodes: hackpipe subtasks label --base <version>")
+    return index
+
+
 def create_dataset_version(registry: Registry | None = None, cfg: dict[str, Any] | None = None,
-                           notes: str = "", base: str | None = None) -> dict[str, Any]:
+                           notes: str = "", base: str | None = None, subtasks: str | Path | None = None
+                           ) -> dict[str, Any]:
     """Create the next ds-vN (draft).
 
     Without base: split all VALID demos (fixed seed). With base (an approved version): keep the base's train/val
     assignment for demos that are still VALID, split only the added demos, keep the frozen test split, and
-    record inherited / added / removed. Demos excluded by hand (meta.excluded) and DUPLICATEs never enter."""
+    record inherited / added / removed. Demos excluded by hand (meta.excluded) and DUPLICATEs never enter.
+    subtasks: a labels folder from `hackpipe subtasks label` — copied into the version (part of its fingerprint) for
+    the curriculum trainer; with a base it is reason enough for a new version even if no demo changed. Without it,
+    the base's labels are kept if they still cover every train/val episode."""
     reg = registry or Registry()
     cfg = cfg or dataset_config()
     valid = [d for d in reg.demos(status=VALID) if not _excluded_by_hand(d)]
@@ -232,7 +258,7 @@ def create_dataset_version(registry: Registry | None = None, cfg: dict[str, Any]
         in_base = base_ids["train"] | base_ids["val"] | base_ids["test"]
         added = [d for d in pool if d["demo_id"] not in in_base]
         removed = sorted(i for i in base_ids["train"] | base_ids["val"] if i not in by_id)
-        if not added and not removed:
+        if not added and not removed and subtasks is None:
             raise NothingNewError(f"Nothing new since {base}: no added or removed demos, so no new version.")
         new_cfg = {**cfg, "splits": {**cfg["splits"], "test": 0.0, "test_episodes": []}}
         new = split_demos(added, new_cfg) if added else {"train": [], "val": [], "test": []}
@@ -278,6 +304,22 @@ def create_dataset_version(registry: Registry | None = None, cfg: dict[str, Any]
     if len(sources) > 1:            # single-source records stay as before, so fingerprints stay comparable
         preprocessing["normalisation_stats"]["per_source"] = {s: r["normalisation_stats"]["sha256"]
                                                               for s, r in records.items()}
+    episodes = {k: sorted([d["source"], d["episode_index"]] for d in v) for k, v in splits.items()}
+    labels_dir = subtasks
+    if labels_dir is None and base and (bm.get("subtasks") or {}).get("dir"):
+        try:                                   # keep the base's labels while they still fit
+            _subtask_labels(bm["subtasks"]["dir"], episodes)
+            labels_dir = bm["subtasks"]["dir"]
+        except RuntimeError:
+            warnings.append(f"sub-task labels of {base} dropped: they don't cover the added episodes "
+                            "(hackpipe subtasks label, then create again with --subtasks)")
+    labels = _subtask_labels(labels_dir, episodes) if labels_dir is not None else None
+    if (base and subtasks is not None and labels and not lineage.get("added") and not lineage.get("removed")
+            and labels["sha256"] == (bm.get("subtasks") or {}).get("sha256")):
+        raise NothingNewError(f"Nothing new since {base}: same demos and the same sub-task labels.")
+    if labels:                         # part of the fingerprint: other labels = another version
+        preprocessing["subtask_labels"] = {"sha256": labels["sha256"], "label_version": labels["label_version"],
+                                           "code_sha256": labels["code_sha256"]}
     used = splits["train"] + splits["val"] + splits["test"]
     fp = fingerprint([demo_fingerprint_item(d) for d in used], preprocessing)
     version = next_version([d["version"] for d in reg.datasets()], "ds")
@@ -306,7 +348,7 @@ def create_dataset_version(registry: Registry | None = None, cfg: dict[str, Any]
         # Episode indices per split: valid on `source` (train/val) and the test source; multi-source versions
         # are trained from a merged folder (`hackpipe dataset materialize`).
         "splits": {k: sorted(d["episode_index"] for d in v) for k, v in splits.items()},
-        "episodes": {k: sorted([d["source"], d["episode_index"]] for d in v) for k, v in splits.items()},
+        "episodes": episodes,
         "demo_ids": {k: sorted(d["demo_id"] for d in v) for k, v in splits.items()},
         "lineage": lineage,
         "excluded": excluded,
@@ -315,6 +357,14 @@ def create_dataset_version(registry: Registry | None = None, cfg: dict[str, Any]
     }
     out_dir = resolve(Path(project_config()["project"]["outputs_dir"]) / "datasets" / version)
     out_dir.mkdir(parents=True, exist_ok=True)
+    if labels:
+        shutil.rmtree(out_dir / "subtasks", ignore_errors=True)
+        shutil.copytree(resolve(labels_dir), out_dir / "subtasks")
+        rel = Path(project_config()["project"]["outputs_dir"]) / "datasets" / version / "subtasks"
+        manifest["subtasks"] = {"dir": rel.as_posix(), "sha256": labels["sha256"], "from": str(labels_dir),
+                                "label_version": labels["label_version"], "base": labels.get("base"),
+                                "sources": {s: {k: v[k] for k in ("kind", "fps", "flagged", "unlabelled")}
+                                            for s, v in labels["sources"].items()}}
     stats = DatasetFolder(resolve(primary)).stats_path()          # normalisation stats of the trained schema
     if stats.exists():
         shutil.copyfile(stats, out_dir / "stats.json")
@@ -446,6 +496,13 @@ def dataset_card(manifest: dict[str, Any], splits: dict[str, list[dict[str, Any]
               f"| Rename map | `{json.dumps(pre['preprocessing'].get('rename_map') or {})}` |",
               f"| Normalisation stats | `meta/stats.json` sha256 `{(pre.get('normalisation_stats') or {}).get('sha256')}` (copied as stats.json) |",
               f"| Leakage guard keys | {', '.join(pre['splits'].get('leakage_keys') or []) or 'demo IDs only'} — passed |"]
+    sub = manifest.get("subtasks")
+    if sub:
+        lines += ["", "## Sub-task labels (curriculum training)", "",
+                  f"Labels `{sub['sha256'][:12]}` (rules v{sub['label_version']}, from the robot signals), copied to "
+                  f"`{sub['dir']}`. Flagged episodes keep their split but the curriculum trainer leaves them out.", "",
+                  "| Source | Rules | Flagged episodes |", "|---|---|---|"]
+        lines += [f"| `{s}` | {v['kind']} | {v['flagged'] or 'none'} |" for s, v in sorted(sub["sources"].items())]
     lines += ["", f"## Excluded demos ({len(manifest['excluded'])})", ""]
     lines += [f"- `{e.get('source', '')}` episode {e['episode_index']}: {e['status']} — "
               f"{', '.join(e['reasons']) or 'no reason recorded'}" for e in manifest["excluded"][:50]] or ["- none"]

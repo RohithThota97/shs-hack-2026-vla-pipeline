@@ -15,11 +15,13 @@ from hackpipe.jobs import runner
 from hackpipe.jobs.estimates import fmt_duration
 from hackpipe.training import progress
 from hackpipe.dataset.versioning import load_manifest, trainable_sources
-from hackpipe.training.train import parse_overrides, set_config_steps, train
+from hackpipe.training import curriculum as cur
+from hackpipe.training.train import apply_overrides, is_curriculum, parse_overrides, set_config_steps, train
 
 reg = Registry()
 st.markdown("### Train")
-st.caption("03 Fine-Tune — SmolVLA on an approved dataset version. Every number here comes from a logged run.")
+st.caption("03 Fine-Tune — SmolVLA on an approved dataset version (lerobot-train, or the curriculum trainer on "
+           "sub-task labels). Every number here comes from a logged run.")
 
 gpus = machine_info()["gpus"]
 if not gpus:
@@ -52,15 +54,18 @@ if not approved:
 else:
     c1, c2 = st.columns(2)
     ds = c1.selectbox("Dataset (approved only)", approved)
-    _train_src, _data_only = trainable_sources(load_manifest(ds, reg))
-    if _data_only:
-        st.caption(f"{ds} trains on {', '.join(f'`{x}`' for x in _train_src)}; kept as data only (other "
-                   f"fps / schema, not trained): {', '.join(f'`{x}`' for x in _data_only)}.")
+    manifest = load_manifest(ds, reg)
     cfg_path = c2.selectbox("Train config", configs,
                             index=configs.index("configs/train/smolvla_fr3_duo.yaml")
                             if "configs/train/smolvla_fr3_duo.yaml" in configs else 0)
     cfg = load_yaml(cfg_path)
     args = cfg.get("args") or {}
+    curriculum = is_curriculum(cfg)
+    _train_src, _data_only = trainable_sources(manifest)
+    if _data_only and not curriculum:
+        st.caption(f"{ds} trains on {', '.join(f'`{x}`' for x in _train_src)}; kept as data only (other "
+                   f"fps / schema, not trained): {', '.join(f'`{x}`' for x in _data_only)}. The curriculum "
+                   "config (`smolvla_curriculum.yaml`) trains both at one rate.")
     ov_text = st.text_area("Overrides (`key=value`, one per line — stored in the run record)", height=68,
                            placeholder="batch_size=4")
     try:
@@ -68,29 +73,93 @@ else:
     except ValueError as e:
         st.error(str(e))
         overrides = {}
-    ov_list = [f"{k}={v}" for k, v in overrides.items()]
+
+    # ---------- curriculum: labels + stage plan ----------
+    blocked = ""                       # why training can't start with this dataset + config
+    plan_info = None
+    if curriculum:
+        if not manifest.get("subtasks"):
+            blocked = f"{ds} has no sub-task labels"
+            st.warning(f"The curriculum trainer needs sub-task labels, and **{ds}** has none. Label it: this "
+                       f"creates a draft **next version** with the same demos and split plus the labels, which "
+                       "you check (review images, flagged episodes) and approve in Data → Versions.")
+            ok_w, why_w = writer_ok()
+            if st.button(f"Label {ds} and create the draft", disabled=not ok_w, help=why_w or None):
+                jid = runner.submit("subtasks", runner.hackpipe_cmd("subtasks", "label", "--base", ds, "--create"),
+                                    needs="cpu", label=f"Sub-task labels · {ds}", registry=reg,
+                                    extra_meta={"dataset": ds})
+                st.success(f"Started {jid} (cube colours are read from the videos: a few minutes).")
+        else:
+            sub = manifest["subtasks"]
+            st.caption(f"Sub-task labels `{sub['sha256'][:12]}` · flagged episodes left out: "
+                       + "; ".join(f"`{s}` {v['flagged'] or 'none'}" for s, v in sorted(sub["sources"].items())))
+        with st.expander("Curriculum plan — changes are stored as overrides in the run record", expanded=not blocked):
+            base_plan = cfg.get("curriculum") or cur.DEFAULT_PLAN
+            norm = {"new_skill_weight": float(base_plan.get("new_skill_weight", 0.7)),
+                    "stages": [{"name": x["name"], "frac": float(x["frac"]), "skills": list(x["skills"])}
+                               for x in base_plan["stages"]]}
+            baseline = st.toggle("Baseline: all skills mixed from the start (no curriculum) — same data and steps, "
+                                 "to show whether the curriculum helps", value=bool(args.get("no_curriculum")))
+            nsw = st.slider("Share of a stage's samples from the skills it adds (the rest rehearses earlier skills)",
+                            0.3, 1.0, norm["new_skill_weight"], 0.05, disabled=baseline)
+            ed = st.data_editor(pd.DataFrame([{"stage": x["name"], "share of steps": x["frac"],
+                                               "skills": ", ".join(x["skills"])} for x in norm["stages"]]),
+                                num_rows="dynamic", hide_index=True, disabled=baseline, key=f"plan-{cfg_path}",
+                                use_container_width=True)
+            st.caption(f"Skills: {', '.join(f'`{k}`' for k in cur.SKILLS)}. Shares are normalised to 1.")
+            edited = {"new_skill_weight": float(nsw),
+                      "stages": [{"name": str(r["stage"]), "frac": float(r["share of steps"] or 0),
+                                  "skills": [k.strip() for k in str(r["skills"] or "").split(",") if k.strip()]}
+                                 for r in ed.to_dict("records") if str(r.get("stage") or "").strip()]}
+            if not baseline and edited != norm:
+                overrides["curriculum"] = edited
+            if baseline != bool(args.get("no_curriculum")):
+                overrides["no_curriculum"] = baseline
+            if not blocked:
+                try:
+                    plan_info = cur.describe(apply_overrides(cfg, overrides), manifest)
+                except (RuntimeError, ValueError, KeyError) as e:
+                    blocked = str(e)
+                    st.error(blocked)
+            if plan_info:
+                st.dataframe(pd.DataFrame([
+                    {"stage": x["name"], "steps": n,
+                     "sample mix": " · ".join(f"{g.split(':')[0].replace('fr3_duo_', '')} {g.split(':')[1]} {v:.0%}"
+                                              for g, v in mix.items())}
+                    for x, n, mix in zip(plan_info["plan"]["stages"], plan_info["stage_steps"],
+                                         plan_info["sample_mix"])]), hide_index=True, use_container_width=True)
+                st.caption(f"{plan_info['rate_hz']} Hz, {plan_info['chunk']} actions per prediction · train episodes "
+                           + ", ".join(f"`{s}` {n}" for s, n in plan_info["train_episodes"].items()))
+    ov_list = [f"{k}={json.dumps(v) if isinstance(v, (dict, list, bool)) else v}" for k, v in overrides.items()]
     batch = int(overrides.get("batch_size", args.get("batch_size", 8)))
     save_freq = int(overrides.get("save_freq", args.get("save_freq", 1000)))
     log_freq = int(overrides.get("log_freq", args.get("log_freq", 50)))
-    frames = progress.train_frames(ds, reg)
+    rate = float(overrides.get("rate_hz", args.get("rate_hz", cur.DEFAULTS["rate_hz"])))
+    frames = (progress.curriculum_frames(ds, reg, rate) if curriculum and manifest.get("subtasks")
+              else progress.train_frames(ds, reg))
 
     tabs = st.tabs(["Setup & dry run", "Timing run", "Step budget", "Full run", "Runs"])
 
     # ---------- Setup & dry run ----------
     with tabs[0]:
         m = st.columns(4)
-        m[0].metric("Train frames", f"{frames:,}")
+        m[0].metric(f"Train samples ({rate:g} Hz)" if curriculum else "Train frames", f"{frames:,}")
         m[1].metric("Batch size", batch)
         m[2].metric("Steps (config)", int(overrides.get("steps", args.get("steps", 0))))
         m[3].metric("Checkpoint every", save_freq)
         st.caption(f"Policy {args.get('policy.path', args.get('policy.type', '?'))} · seed {cfg.get('seed')} · "
                    f"{args.get('num_workers', '?')} data workers")
-        if st.button("Dry run — show the exact lerobot-train command"):
+        if st.button("Dry run — show the exact training command"):
             try:
                 rec = train(cfg_path, ds, dry_run=True, registry=reg, overrides=overrides)
                 st.code(" \\\n  ".join(rec["command"]), language="bash")
-                st.caption("Check: dataset root and episodes (train split only), rename map → camera1..3, policy "
-                           "path, batch size, steps, save frequency, seed, output dir, logging.")
+                if curriculum:
+                    st.caption("Check: dataset version with sub-task labels, stage plan and steps (above), "
+                               f"{rec['curriculum']['rate_hz']} Hz, batch size, steps, save frequency, seed, output "
+                               "dir. The resolved config is saved next to the dry-run record.")
+                else:
+                    st.caption("Check: dataset root and episodes (train split only), rename map → camera1..3, "
+                               "policy path, batch size, steps, save frequency, seed, output dir, logging.")
             except Exception as e:  # noqa: BLE001 — show any configuration error to the user
                 st.error(f"{type(e).__name__}: {e}")
 
@@ -100,11 +169,12 @@ else:
                     "share. Its model ID is labelled *timing run, not a result*.")
         tj = latest_job("train_timing")
         ok, why = writer_ok()
-        if st.button("Start timing run (200 steps)", type="primary", disabled=not (gpus and ok),
-                     help=why or (None if gpus else "needs a GPU")):
+        if st.button("Start timing run (200 steps)", type="primary", disabled=not (gpus and ok) or bool(blocked),
+                     help=why or blocked or (None if gpus else "needs a GPU")):
             jid = runner.submit("train_timing", runner.hackpipe_cmd(
                 "train", "--config", cfg_path, "--dataset", ds, "--purpose", "timing",
-                *set_args(ov_list + ["steps=200", "save_freq=200"])),
+                *set_args(ov_list + ["steps=200", "save_freq=200"]
+                          + (["stage_end_eval=false", "val_every=1000000"] if curriculum else []))),
                 needs="gpu", work_units=200, label=f"Timing run · {ds}", registry=reg,
                 extra_meta={"target_steps": 200, "dataset": ds, "config": cfg_path, "log_freq": log_freq})
             st.success(f"Started {jid}.")
@@ -164,8 +234,8 @@ else:
         st.markdown(f"**{target:,} steps** on {ds} · expected **{fmt_duration(est['seconds']) if est else 'n/a'}**"
                     + (f" ({est['basis']})" if est else " — run the timing run first"))
         ok, why = writer_ok()
-        if st.button("Start training", type="primary", disabled=not (gpus and ok and target > 0),
-                     help=why or (None if gpus else "needs a GPU")):
+        if st.button("Start training", type="primary", disabled=not (gpus and ok and target > 0) or bool(blocked),
+                     help=why or blocked or (None if gpus else "needs a GPU")):
             jid = runner.submit("train", runner.hackpipe_cmd("train", "--config", cfg_path, "--dataset", ds,
                                                              *set_args(ov_list)),
                                 needs="gpu", work_units=target, label=f"Training · {ds}", registry=reg,
@@ -227,6 +297,25 @@ else:
             else:
                 st.caption("No loss.csv yet: `python scripts/plot_loss.py --log <log> --model "
                            f"{pick}` after training.")
+            clog = Path(next(m for m in models if m["version"] == pick)["meta"].get("output_dir") or ".") \
+                / "curriculum_log.json"
+            if clog.is_file():
+                val = json.loads(clog.read_text()).get("val") or []
+                keys = sorted({k for v in val for k in v if "/" in k})
+                if val:
+                    fig = go.Figure([go.Scatter(x=[v["step"] for v in val if k in v],
+                                                y=[v[k]["l1_norm"] for v in val if k in v], name=k, mode="lines+markers")
+                                     for k in keys])
+                    for v in val:
+                        if v.get("end_of_stage"):
+                            fig.add_vline(x=v["step"], line_dash="dot", line_color=TOKENS["muted"],
+                                          annotation_text=v["stage"].split("_", 1)[0])
+                    fig.update_layout(height=320, margin={"l": 10, "r": 10, "t": 30, "b": 10}, xaxis_title="step",
+                                      yaxis_title="validation L1 (normalised)", plot_bgcolor="#fff",
+                                      font={"family": "Inter"}, legend={"orientation": "h"})
+                    st.markdown("**Validation per dataset × instruction** (sub-task / complete task; dotted: end "
+                                "of a stage)")
+                    st.plotly_chart(fig, use_container_width=True)
             if len(models) >= 2:
                 a, b = st.columns(2)
                 ma = a.selectbox("Compare run record", [m["version"] for m in models], index=0)

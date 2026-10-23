@@ -39,6 +39,8 @@ hackpipe dataset create                              # R3  versioned splits → 
 hackpipe dataset approve ds-v1 --by <name>           # R3  human approval (recorded)
 hackpipe auto    --root <folder>                     # R1–R3 in one go: new demos only → next draft version
 hackpipe train   --config configs/train/smolvla_fr3_duo.yaml --dataset ds-v1 [--set steps=200]   # R4
+hackpipe subtasks label --base ds-v2 --create      # sub-task labels → draft ds-v3 (approve it)
+hackpipe train   --config configs/train/smolvla_curriculum.yaml --dataset ds-v3   # curriculum, 6 Hz
 hackpipe publish --model <id> --repo <hf-user>/<name> [--dry-run]       # model + card → private HF repo
 hackpipe eval    --model m-v1 --suite configs/eval/test_suite_v1.yaml    # R5 (needs sim adapter)
 hackpipe gates   --eval <eval_id>                    # R6
