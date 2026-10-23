@@ -52,7 +52,7 @@ def find_roots(top: str | Path, max_depth: int = MAX_DEPTH) -> list[Path]:
 
 def dataset_name(path: str | Path) -> str:
     """Folder-safe name from a path, zip, repo ID or URL: fr3_duo_rand500/fr3_duo_rand500 → fr3_duo_rand500."""
-    s = str(path).rstrip("/")
+    s = re.sub(r"[?#].*$", "", str(path)).rstrip("/")          # URL query (?usp=drive_link) is not a name
     s = re.sub(r"(\.git|\.zip|\.tar\.gz|\.tgz)$", "", s)
     parts = [p for p in re.split(r"[/\\:]+", s) if p and p not in (".", "..")]
     name = parts[-1] if parts else "dataset"
@@ -170,22 +170,41 @@ def gdrive_id(src: str) -> tuple[str, str]:
     raise ValueError("not a Google Drive link or ID")
 
 
-def fetch_gdrive(src: str, dest: Path) -> None:
-    """Shared link ('anyone with the link'). A zip is extracted. A mounted Drive (Colab, Drive for desktop) is
-    a folder on this machine — use kind 'local' for it."""
+NO_ACCESS = ("Google Drive refused access to this link. Either share it as 'Anyone with the link' (Share → "
+             "General access), or — better for team-only data — install Google Drive for desktop and use "
+             "'This machine' with the folder's path (~/Library/CloudStorage/GoogleDrive-…/My Drive/…).")
+
+
+def fetch_gdrive(src: str, dest: Path) -> str:
+    """Shared link ('anyone with the link'). A zip is extracted. Returns the name on Drive (folder or zip
+    without .zip). A mounted Drive (Colab, Drive for desktop) is a folder on this machine — use kind 'local'."""
     try:
         import gdown
+        from gdown.exceptions import DownloadError, FileURLRetrievalError
     except ImportError as e:
         raise RuntimeError("Google Drive links need gdown: pip install -e '.[sources]'") from e
     kind, fid = gdrive_id(src)
     dest.mkdir(parents=True)
+    try:
+        if kind == "folder":
+            files = gdown.download_folder(id=fid, output=str(dest) + "/", quiet=False)
+        else:
+            out = gdown.download(id=fid, output=str(dest) + "/", quiet=False)
+    except DownloadError as e:      # a file without access → FileURLRetrievalError; a folder → "status code 401"
+        if isinstance(e, FileURLRetrievalError) or re.search(r"status code 40[13]", str(e)):
+            raise RuntimeError(NO_ACCESS) from e
+        raise
     if kind == "folder":
-        gdown.download_folder(id=fid, output=str(dest), quiet=False, remaining_ok=True)
-        return
-    out = gdown.download(id=fid, output=str(dest) + "/", quiet=False)
-    if out and out.endswith(".zip"):
+        if not files:
+            raise RuntimeError(NO_ACCESS)
+        kids = [p for p in dest.iterdir() if p.is_dir()]        # gdown puts the files in dest/<folder name>/
+        return kids[0].name if len(kids) == 1 else dataset_name(src)
+    if not out:
+        raise RuntimeError(NO_ACCESS)
+    if out.endswith(".zip"):
         extract_zip(out, dest)
         os.remove(out)
+    return dataset_name(out)
 
 
 def fetch_cloud(url: str, dest: Path) -> None:
@@ -219,6 +238,19 @@ def fetch_cloud(url: str, dest: Path) -> None:
             Path(key).unlink(missing_ok=True)
 
 
+NEEDS = {"hf": ["huggingface_hub"], "gdrive": ["gdown"], "cloud": ["fsspec"]}
+CLOUD_NEEDS = {"s3": "s3fs", "gs": "gcsfs", "az": "adlfs"}
+
+
+def missing_packages(kind: str, url: str = "") -> list[str]:
+    """Python packages this kind of fetch needs that aren't installed here."""
+    from importlib.util import find_spec
+    need = list(NEEDS.get(kind, []))
+    if kind == "cloud":
+        need.append(CLOUD_NEEDS.get(url.split("://", 1)[0], ""))
+    return [m for m in need if m and find_spec(m) is None]
+
+
 def fetch(kind: str, src: str, name: str | None = None, revision: str | None = None, subdir: str = "",
           copy: bool = False, base: Path = REPO_ROOT) -> list[Path]:
     """Fetch src into data/incoming/<name> and return the dataset folders found there.
@@ -231,14 +263,20 @@ def fetch(kind: str, src: str, name: str | None = None, revision: str | None = N
         homes = [(base / d).resolve() for d in SEARCH_DIRS]
         if p.is_dir() and any(p.resolve() == h or h in p.resolve().parents for h in homes):
             return _check(p)
-    dest = _dest(name or dataset_name(src), base)
+    auto_name = kind == "gdrive" and not name           # the link has no name in it: use the one on Drive
+    dest = _dest(name or (f"gdrive-{gdrive_id(src)[1][:10]}" if auto_name else dataset_name(src)), base)
     try:
-        {"local": lambda: fetch_local(src, dest, copy),
-         "hf": lambda: fetch_hf(src, dest, revision, subdir),
-         "github": lambda: fetch_github(src, dest, revision),
-         "gdrive": lambda: fetch_gdrive(src, dest),
-         "cloud": lambda: fetch_cloud(src, dest)}[kind]()
-        return _check(dest)
+        got = {"local": lambda: fetch_local(src, dest, copy),
+               "hf": lambda: fetch_hf(src, dest, revision, subdir),
+               "github": lambda: fetch_github(src, dest, revision),
+               "gdrive": lambda: fetch_gdrive(src, dest),
+               "cloud": lambda: fetch_cloud(src, dest)}[kind]()
+        roots = _check(dest)
+        if auto_name and got and got != dest.name and not (dest.parent / got).exists():
+            final = _dest(got, base)
+            dest.rename(final)
+            roots = _check(final)
+        return roots
     except BaseException:
         if dest.is_symlink():
             dest.unlink()

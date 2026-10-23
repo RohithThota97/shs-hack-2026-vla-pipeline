@@ -21,7 +21,7 @@ from hackpipe.dataset.versioning import approve, frozen_test_ids, set_excluded
 from hackpipe.jobs import runner
 from hackpipe.jobs.estimates import fmt_duration
 from hackpipe.pipeline.preview import candidate_folders, new_folders, preview
-from hackpipe.pipeline.sources import KEY_DIR, dataset_name
+from hackpipe.pipeline.sources import KEY_DIR, dataset_name, missing_packages
 from hackpipe.quality.report import report_name
 
 
@@ -135,8 +135,9 @@ def fetch_section(reg: Registry) -> None:
     elif kind == "gdrive":
         src = st.text_input("Share link (file or folder, 'anyone with the link')",
                             placeholder="https://drive.google.com/drive/folders/…")
-        st.caption("A zip is fastest (folder links download at most 50 files). Drive mounted on this machine "
-                   "(Colab, Drive for desktop)? Use 'This machine' with its path instead — private files work then.")
+        st.caption("Works only for links shared as 'Anyone with the link'. For team-only data install Google Drive "
+                   "for desktop and use 'This machine' with the folder's path (private files work then). A zip "
+                   "is fastest; a folder link may stop at 50 files.")
     elif kind == "cloud":
         prov = st.selectbox("Provider", ["Amazon S3 / R2 / MinIO", "Google Cloud Storage", "Azure Blob"])
         if prov.startswith("Amazon"):
@@ -161,15 +162,24 @@ def fetch_section(reg: Registry) -> None:
     env = {k: v for k, v in env.items() if v}
     if not src:
         return
-    name = st.text_input("Name under data/incoming", value=default_name or dataset_name(src),
+    auto = kind == "gdrive"
+    name = st.text_input("Name under data/incoming", value="" if auto else (default_name or dataset_name(src)),
+                         placeholder="empty = the folder / zip name on Drive" if auto else "",
                          help="Demo IDs depend on this path — use the same name on every machine.")
+    missing = missing_packages(kind, src)
+    if missing:
+        st.error(f"Needs {', '.join(missing)} on this machine: `uv pip install {' '.join(missing)}` "
+                 "(or `pip install -e '.[sources]'` / `'.[cloud]'`), then restart the console.")
     ok, why = writer_ok()
-    if st.button("Fetch and run pipeline", type="primary", disabled=not (ok and name.strip()), help=why or None):
+    if st.button("Fetch and run pipeline", type="primary", disabled=not (ok and (name.strip() or auto))
+                 or bool(missing), help=why or None):
         if env.get("GOOGLE_APPLICATION_CREDENTIALS", "").startswith("@"):
             env["GOOGLE_APPLICATION_CREDENTIALS"] = _private_file(st.session_state["k-gcs"].getvalue(),
                                                                   f"gcs-{secrets.token_hex(6)}.json")
-        argv = runner.hackpipe_cmd("fetch", "--from", kind, src, "--name", name.strip(), *args, "--auto")
-        jid = runner.submit("fetch", argv, label=f"Fetch · {name.strip()}", registry=reg, env=env)
+        argv = runner.hackpipe_cmd("fetch", "--from", kind, src, *(["--name", name.strip()] if name.strip() else []),
+                                   *args, "--auto")
+        jid = runner.submit("fetch", argv, label=f"Fetch · {name.strip() or dataset_name(src)}", registry=reg,
+                            env=env)
         st.success(f"Started {jid}: fetch → import → QC (new only) → draft version. Follow it in the jobs panel.")
 
 

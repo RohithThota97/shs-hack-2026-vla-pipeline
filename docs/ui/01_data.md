@@ -19,7 +19,7 @@ ds-v1's validated demos; nothing is checked twice; demos that already exist are 
   | Upload a zip | browser upload, up to 2 GB (Streamlit holds it in memory; bigger → copy to this machine / Drive) | — |
   | Hugging Face | dataset repo ID, revision, subfolder | `HF_TOKEN` |
   | GitHub | `owner/repo` or URL, branch; Git LFS pulled if installed | `GITHUB_TOKEN` (sent as a header) |
-  | Google Drive link | share link to a zip or folder (`gdown`, folders ≤ 50 files) | — (link sharing) |
+  | Google Drive link | link shared as "Anyone with the link" to a zip or folder (`gdown`); named after the file / folder on Drive. Private Drive → Drive for desktop + "This machine" | — |
   | Cloud bucket | `s3://` (also R2 / MinIO), `gs://`, `az://`, folder or `.zip` | AWS keys + endpoint, GCS service-account JSON, Azure connection string |
   Empty key fields fall back to this machine's environment. Extras: `pip install -e ".[sources]"` (HF, Drive),
   `".[cloud]"` (buckets).
