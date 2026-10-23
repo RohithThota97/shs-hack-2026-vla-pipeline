@@ -168,8 +168,10 @@ def preflight() -> None:
 
 def train(config_path: str, dataset_version: str, dry_run: bool = False, registry: Registry | None = None,
           resume_model: str | None = None, overrides: dict[str, Any] | None = None,
-          purpose: str = "model") -> dict[str, Any]:
-    """purpose: "model" or "timing" (a short run to measure speed — registered, but labelled as not a result)."""
+          purpose: str = "model", init_from: str | None = None) -> dict[str, Any]:
+    """purpose: "model" or "timing" (a short run to measure speed — registered, but labelled as not a result).
+    init_from: a trained model whose checkpoint is the starting point (fine-tune) instead of the config's
+    policy.path; the config defaults to that model's own, and its trainer must match."""
     reg = registry or Registry()
     manifest = load_manifest(dataset_version, reg)
     if manifest["status"] != "approved":
@@ -177,9 +179,30 @@ def train(config_path: str, dataset_version: str, dry_run: bool = False, registr
                            f"hackpipe dataset approve {dataset_version}")
     if config_path is None and resume_model:      # `--resume` alone (the Train page): the run's own config file
         config_path = ((reg.get_model(resume_model) or {}).get("meta") or {}).get("train_config_file")
+    init = None
+    if init_from:
+        if resume_model:
+            raise ValueError("--init-from starts a new model; it cannot be combined with --resume")
+        init = reg.get_model(init_from)
+        if init is None:
+            raise KeyError(f"Unknown model {init_from}")
+        if not (resolve(init["checkpoint_dir"] or ".") / "config.json").is_file():
+            raise FileNotFoundError(f"{init_from} has no checkpoint on this machine ({init['checkpoint_dir']})")
+        config_path = config_path or init["meta"].get("train_config_file")
     if config_path is None:
         raise ValueError("a train config is required")
     cfg = apply_overrides(load_yaml(config_path), overrides or {})
+    if init:
+        trainer = "curriculum" if is_curriculum(cfg) else "lerobot-train"
+        if init["meta"].get("trainer", "lerobot-train") != trainer:
+            raise ValueError(f"{init_from} was trained with {init['meta'].get('trainer', 'lerobot-train')}, "
+                             f"{config_path} uses {trainer}: rate and chunk differ, pick a matching config")
+        from hackpipe.training.ranking import init_leakage
+        leak = init_leakage(init, manifest, reg)
+        if leak:
+            raise RuntimeError(f"{init_from} was trained on {len(leak)} test episodes of {dataset_version} "
+                               f"(e.g. {leak[:3]}): its scores on this test split would not be honest")
+        cfg["args"]["policy.path"] = str(resolve(init["checkpoint_dir"]))
     outputs = resolve(project_config()["project"]["outputs_dir"])
 
     if resume_model and overrides:
@@ -221,6 +244,7 @@ def train(config_path: str, dataset_version: str, dry_run: bool = False, registr
         "train_config_file": str(config_path),
         "train_config": cfg,
         "overrides": overrides or {},
+        "init_from": init_from,
         "command": cmd,
         "output_dir": str(output_dir),
         "environment": environment(),
@@ -253,7 +277,8 @@ def train(config_path: str, dataset_version: str, dry_run: bool = False, registr
     else:
         reg.add_model(version, dataset_version, cfg.get("policy_name", "policy"), "training", str(ckpt),
                       str(record_path), {"output_dir": str(output_dir), "train_config_file": str(config_path),
-                                         "purpose": purpose, "trainer": record["trainer"]})
+                                         "purpose": purpose, "trainer": record["trainer"],
+                                         **({"init_from": init_from} if init_from else {})})
     print(f"{version}: training started — resume after a crash with "
           f"`hackpipe train --dataset {dataset_version} --resume {version}`", flush=True)
     t0 = time.time()

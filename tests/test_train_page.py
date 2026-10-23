@@ -90,7 +90,7 @@ def test_train_page_renders_with_timing_run(workspace, dataset, monkeypatch):
                            default_timeout=30)
     at.run()
     assert not at.exception, [e.message for e in at.exception]
-    assert [t.label for t in at.tabs] == ["Setup & dry run", "Timing run", "Step budget", "Full run", "Runs"]
+    assert [t.label for t in at.tabs] == ["Setup & dry run", "Timing run", "Step budget", "Progress & resume", "Runs"]
     labels = {m.label: m.value for m in at.metric}
     assert labels["Seconds / step"] == "0.5" and labels["Peak GPU memory"] == "9.5 GB"
     start = next(b for b in at.button if b.label == "Start timing run (200 steps)")

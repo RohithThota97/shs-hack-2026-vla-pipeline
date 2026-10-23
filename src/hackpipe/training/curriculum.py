@@ -386,6 +386,8 @@ def build_policy(cfg: dict[str, Any], s: dict[str, Any], stats: dict[str, Any], 
     from lerobot.configs.types import FeatureType, PolicyFeature
     from lerobot.policies.factory import get_policy_class, make_pre_post_processors
     base = s.get("policy.path") or BASES[cfg.get("policy", "smolvla")]
+    if checkpoint and Path(base).is_absolute() and not Path(base).exists():
+        base = str(checkpoint)          # fine-tune start point from another machine: resume has its own weights
     pc = PreTrainedConfig.from_pretrained(base)
     pc.input_features = {**{c: PolicyFeature(FeatureType.VISUAL, (3, 224, 224)) for c in cams},
                          "observation.state": PolicyFeature(FeatureType.STATE, (state_dim,))}

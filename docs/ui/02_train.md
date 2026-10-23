@@ -56,3 +56,19 @@ the tunnel when done. On Colab the registry writer is `colab`.
 - Setup shows train samples at the policy rate (6 Hz) instead of frames; epochs use them.
 - Runs: validation per dataset × instruction (sub-task / complete) from `curriculum_log.json`, stage ends dotted.
 - The trainer logs lerobot-train-style lines (`step:… loss:… updt_s:… data_s:… mem_gb:…`), so timing run, budget and live progress work unchanged; resume needs no config (the run's saved one is used).
+
+## Modes, already-trained and start bar (23 Oct)
+- **How to train** (top): *Choose a config* (start from the config's `policy.path`, normally `lerobot/smolvla_base`)
+  or *Automatic — fine-tune the best model*.
+- **Best model** (`training/ranking.py`, ranking table in an expander): sim task-success rate (latest non-fake eval)
+  → offline test arm error, only when it beats hold-still → final training loss (`loss.csv`; for curriculum runs
+  without one, the last validation L1). Never candidates: timing runs, unfinished / failed runs, models without a
+  checkpoint on this machine, externally registered models (no train config to repeat).
+- **Automatic** uses the best model's config (shown, locked) and prefills its overrides; the new run gets
+  `hackpipe train --init-from m-vN`: its checkpoint becomes `policy.path`, the trainer must match
+  (curriculum ↔ curriculum), and it refuses when the starting model was trained or validated on the target
+  version's test episodes. The run record and model meta keep `init_from`; Runs shows "started from".
+- **Already trained on <ds>**: the dataset's models (config, started from, status, steps, score). Configs that already
+  trained a model on it are marked in the picker; choosing one again shows a note (new model, same data + config).
+- **Start bar** above the tabs: steps, dataset, config, starting point, expected time, and the **Start training**
+  button (GPU only). The *Full run* tab is now *Progress & resume*.
