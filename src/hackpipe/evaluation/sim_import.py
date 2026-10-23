@@ -50,8 +50,17 @@ def to_episode(e: dict[str, Any], identity: dict[str, Any], scenario: dict[str, 
     )
 
 
+def replay_summary(replay_json: str | Path) -> dict[str, Any]:
+    """eval_isaac.py --mode replay: does the recorded demo itself succeed in this scene? If not, policy results in
+    the scene say more about the scene than about the model (verdict: sim unverified)."""
+    r = json.loads(Path(replay_json).read_text())
+    return {"success": bool(r.get("success")), "stage": r.get("stage"), "stage_name": r.get("stage_name"),
+            "max_lift_mm": r.get("max_lift_mm"), "joint_tracking_rad": r.get("joint_tracking_rad"),
+            "file": str(replay_json)}
+
+
 def import_results(model_version: str, suite_path: str, results_json: str | Path, gif_dir: str | Path | None = None,
-                   registry: Registry | None = None) -> dict[str, Any]:
+                   registry: Registry | None = None, replay: str | Path | None = None) -> dict[str, Any]:
     from hackpipe.evaluation.runner import new_eval, store_eval
     reg = registry or Registry()
     if reg.get_model(model_version) is None:
@@ -101,4 +110,5 @@ def import_results(model_version: str, suite_path: str, results_json: str | Path
     stages = [int(e.get("stage", 0)) for e in episodes]
     return store_eval(eval_id, out, model_version, suite, suite["env_version"], results, reg,
                       {"stage_counts_0to4": [stages.count(k) for k in range(5)], "imported_from": str(results_json),
-                       "policy": raw.get("policy"), "lighting_source": src})
+                       "policy": raw.get("policy"), "lighting_source": src,
+                       "replay": replay_summary(replay) if replay else None})

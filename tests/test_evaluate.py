@@ -1,0 +1,138 @@
+"""Offline metrics after the team's eval_offline.py, the post-training verdict and the Evaluate page."""
+import json
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+from tests.test_state_offline import _table
+
+
+def _oracle(tab, rows, mode, variant=None):
+    from hackpipe.training.curriculum import chunk_for
+    return np.stack([tab["A"][chunk_for(tab, r, 1 if mode == "full" else 0, 5, "mask")[0]] for r in rows])
+
+
+def _frozen(tab, rows, mode, variant=None):          # never moves: keeps the first frame's pose and grippers
+    return np.repeat(tab["S"][0][None, None], len(rows), 0).repeat(5, 1)
+
+
+def test_stream_metrics_oracle_vs_hold_still():
+    from hackpipe.evaluation.offline import ROBUSTNESS, score
+    t = _table(120)
+    t["S"][:, 7] = t["S"][:, 15] = np.where(np.arange(120) < 60, 1.0, 0.0)   # one gripper change per arm
+    t["A"] = np.roll(t["S"], -1, 0)
+    res = score([t], _oracle, chunk=5, every=1, batch=8, robust=ROBUSTNESS, robust_eps=1)
+    ex = res["executed"]
+    assert ex["arm_mean"] == 0 and ex["arm_p99"] == 0 and {s["dtw_rad"] for s in ex["per_subtask"]} == {0.0}
+    ge = res["gripper_events"]
+    assert ge["n"] == 2 and ge["hit_rate"] == 1.0 and ge["mean_abs_timing_error_s"] == 0
+    assert set(res["horizon_arm_rad"]) == {0.0} and len(res["horizon_arm_rad"]) == 5
+    assert set(res["robustness"]["variants"]) == set(ROBUSTNESS)
+    still = score([t], _frozen, chunk=5, every=1)
+    assert still["executed"]["arm_mean"] > 0 and still["gripper_events"]["hit_rate"] == 0.0
+    assert "robustness" not in still
+    with pytest.raises(ValueError, match="gaps"):
+        score([t], _oracle, chunk=5, every=6)
+
+
+def test_dtw():
+    from hackpipe.evaluation.offline import dtw
+    a = np.linspace(0, 1, 30)[:, None].repeat(3, 1)
+    assert dtw(a, a) == 0
+    assert dtw(a, np.roll(a, 2, 0)) < np.abs(a - np.roll(a, 2, 0)).mean()      # tolerant to a time shift
+
+
+def _models(workspace, dataset):
+    from hackpipe.dataset.versioning import approve, create_dataset_version
+    from hackpipe.ingest.importer import ingest
+    from hackpipe.quality.report import run_qc
+    tmp, reg = workspace
+    ingest(dataset, reg)
+    run_qc(dataset, reg)
+    create_dataset_version(reg)
+    approve("ds-v1", reg, by="t")
+    for v in ("m-v1", "m-v2"):
+        ck = tmp / "ck" / v
+        ck.mkdir(parents=True)
+        (ck / "config.json").write_text("{}")
+        reg.add_model(v, "ds-v1", "smolvla", "trained", str(ck), None, {"output_dir": str(tmp / v)})
+    return tmp, reg
+
+
+def _offline(v, arm=0.01, hit=1.0, rob=1.1, rows=None):
+    from hackpipe.common.config import project_config, resolve
+    d = resolve(project_config()["project"]["outputs_dir"]) / "runs" / v
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "offline_eval_test.json").write_text(json.dumps({
+        "model": v, "rows": rows or [{"instruction": "full", "subtask": "h · all", "n": 3, "first_arm_rad": arm,
+                                      "chunk_arm_rad": arm, "gripper": 0.1, "hold_still_arm_rad": 0.05}],
+        "executed": {"arm_mean": arm, "arm_p99": arm * 3, "per_subtask": [{"subtask": "h · Pick", "arm_rad": arm}]},
+        "gripper_events": {"n": 4, "hit_rate": hit, "mean_abs_timing_error_s": 0.1, "events": []},
+        "robustness": {"episodes_per_source": 3, "baseline_chunk_arm_rad": arm,
+                       "variants": {k: {"ratio": rob} for k in ("images_darker_x0.6", "images_brighter_x1.4",
+                                                                 "state_noise_0.01rad", "reworded_instruction")}},
+        "latency_ms": {"replan_median": 90.0}, "smoothness": {"at_replan_p95": 0.01, "demo_p95": 0.01}}))
+
+
+def _sim(reg, tmp, v, rate, replay_ok=True):
+    reg.add_eval(f"ev-{v}-{rate}-{replay_ok}-{len(reg.evals())}", v, "sim-handover-v1", "isaac", str(tmp), {
+        "task_success": {"rate": rate, "successes": int(rate * 10), "n": 10, "ci95": [0, 1]},
+        "stage_counts_0to4": [0, 0, 0, 10 - int(rate * 10), int(rate * 10)],
+        "replay": {"success": replay_ok}})
+
+
+def test_verdicts(workspace, dataset):
+    from hackpipe.evaluation.offline import pending
+    from hackpipe.gates.verdict import verdict
+    tmp, reg = _models(workspace, dataset)
+    assert verdict("m-v1", reg)["verdict"] == "NOT EVALUATED" and pending(reg) == ["m-v1", "m-v2"]
+    _offline("m-v1")
+    assert pending(reg) == ["m-v2"]
+    v = verdict("m-v1", reg)
+    assert v["verdict"] == "HOLD: SIM UNVERIFIED" and v["online_state"] == "skipped"
+    _sim(reg, tmp, "m-v1", 0.9, replay_ok=False)
+    assert verdict("m-v1", reg)["online_state"] == "unverified"         # demo replay failed: scene, not model
+    _sim(reg, tmp, "m-v1", 0.9)
+    v = verdict("m-v1", reg)
+    assert v["verdict"] == "DEPLOY" and Path(v["offline_file"]).name == "offline_eval_test.json"
+    _sim(reg, tmp, "m-v1", 0.5)
+    assert verdict("m-v1", reg)["verdict"] == "MORE TRAINING"            # verified sim fails
+    _offline("m-v2", arm=0.03, hit=0.5, rob=2.0)
+    v = verdict("m-v2", reg)
+    failed = {r["gate"].split(":")[0] for r in v["offline_gates"] if not r["pass"]}
+    assert v["verdict"] == "MORE TRAINING" and {"arm error, mean (rad)", "robustness",
+                                                "gripper events caught within 1 s"} <= failed
+    assert any("image_aug" in t for t in v["todo"])
+    reg.add_deployment("dep-1", "m-v1", "deployed", {})                   # regression vs the deployed model
+    assert any(r["gate"].startswith("vs deployed m-v1") and not r["pass"] for r in verdict("m-v2", reg)["offline_gates"])
+
+
+def test_then_eval(workspace, dataset, monkeypatch):
+    from hackpipe.cli import main
+    tmp, reg = _models(workspace, dataset)
+    calls = []
+    monkeypatch.setattr("hackpipe.training.train.train", lambda *a, **k: {"model_version": "m-v3", "exit_code": 0})
+    monkeypatch.setattr("hackpipe.evaluation.offline.offline_eval",
+                        lambda mv, r, *a, **k: calls.append(mv) or {"file": "x", "executed": {"arm_mean": 0.1}})
+    main(["train", "--config", "configs/train/smolvla_fr3_duo.yaml", "--dataset", "ds-v1", "--then-eval"])
+    main(["train", "--config", "configs/train/smolvla_fr3_duo.yaml", "--dataset", "ds-v1"])
+    assert calls == ["m-v3"]
+
+
+def test_evaluate_page(workspace, dataset, monkeypatch):
+    from streamlit.testing.v1 import AppTest
+    monkeypatch.setenv("HACKPIPE_MACHINE", "laptop-test")
+    tmp, reg = _models(workspace, dataset)
+    _offline("m-v1")
+    _sim(reg, tmp, "m-v1", 0.9)
+    at = AppTest.from_file(str(Path(__file__).resolve().parents[1] / "src/hackpipe/console/views/evaluate.py"),
+                           default_timeout=30)
+    at.run()
+    assert not at.exception, [e.message for e in at.exception]
+    assert [t.label for t in at.tabs] == ["Offline (test split)", "Isaac Sim", "Compare models"]
+    assert any("Evaluate all pending (1)" == b.label for b in at.button)
+    at.selectbox[0].select_index(1).run()                                     # newest first: m-v2, m-v1
+    assert not at.exception, [e.message for e in at.exception]
+    assert any("DEPLOY" in m.value for m in at.markdown)
+    assert {m.label for m in at.metric} >= {"Arm error, executed", "Gripper events caught", "Re-plan latency"}
