@@ -71,7 +71,7 @@ def train_frames(dataset_version: str, registry: Registry) -> int:
     m = load_manifest(dataset_version, registry)
     ids, used = set(m["demo_ids"]["train"]), set(trainable_sources(m)[0])
     return sum(int(d["meta"].get("n_frames", 0)) for d in registry.demos()
-               if d["demo_id"] in ids and d["source"] in used)
+               if d["demo_id"] in ids and (not used or d["source"] in used))   # old manifests: no sources
 
 
 def epochs(steps: int, batch_size: int, frames: int) -> float | None:
