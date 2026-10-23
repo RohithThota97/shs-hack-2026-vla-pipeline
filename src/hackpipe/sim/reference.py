@@ -44,6 +44,8 @@ def build_reference(dataset_version: str, suite: dict[str, Any], registry: Regis
     if not mine:
         raise RuntimeError(f"{dataset_version} has no train/val episodes of the main source {main}")
     train_eps = sorted(i for (s, i), k in split_of.items() if s == main and k == "train")
+    if demo_episode is None and not train_eps:
+        raise RuntimeError(f"{dataset_version} has no train episodes of {main}: pass --demo-episode")
     demo = int(demo_episode if demo_episode is not None else train_eps[0])
     if split_of.get((main, demo)) is None:
         raise ValueError(f"demo episode {demo} is not a train/val episode of {main} in {dataset_version}")
@@ -61,6 +63,9 @@ def build_reference(dataset_version: str, suite: dict[str, Any], registry: Regis
                          f"({m.get('test_sources')}): the eval lighting must come from unseen episodes")
     t_extra = DatasetFolder(resolve(test_key)).episode_extras()
     test_eps = sorted(int(i) for s, i in m["episodes"]["test"] if s == test_key)
+    if not test_eps:
+        raise RuntimeError(f"{dataset_version}'s test split has no {test_key} episodes: no held-out lighting to "
+                           "evaluate with")
     return {
         "task": conv["dataset_cfg"]["task"],
         "fps": int(ds.fps),

@@ -80,6 +80,9 @@ def curriculum_frames(dataset_version: str, registry: Registry, rate_hz: float,
     names) on the rate_hz grid, flagged episodes left out (each row is used for a sub-task and a complete-task
     sample)."""
     import math
+
+    from hackpipe.training.curriculum import source_names
+    sources = source_names(sources)
     m = load_manifest(dataset_version, registry)
     sub = (m.get("subtasks") or {}).get("sources") or {}
     ids = set(m["demo_ids"]["train"])

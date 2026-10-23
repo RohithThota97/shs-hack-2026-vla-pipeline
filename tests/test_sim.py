@@ -212,3 +212,49 @@ def test_augment_keeps_shape_and_range():
     img = torch.rand(3, 224, 224)
     out = augment(img)
     assert out.shape == img.shape and float(out.min()) >= 0 and float(out.max()) <= 1 and not torch.equal(out, img)
+
+
+def test_import_refuses_short_or_repeated_runs(sim_setup):
+    from hackpipe.evaluation.sim_import import ImportRefused, import_results
+    from hackpipe.training.train import register_external
+    tmp, reg, main, test, suite, ver = sim_setup
+    m = register_external(str(tmp / "ckpt"), ver, "smolvla_team", reg)
+    p = tmp / "results.json"
+    p.write_text(json.dumps(_results([0, 1, 2], stages=(4, 1, 0))))
+    with pytest.raises(ImportRefused, match="3 episodes, the suite has 4"):
+        import_results(m, str(suite), p, None, reg)
+    p.write_text(json.dumps(_results([0, 1, 1, 3])))
+    with pytest.raises(ImportRefused, match="repeat"):
+        import_results(m, str(suite), p, None, reg)
+
+
+def test_train_sources_as_a_single_name():
+    from hackpipe.training import curriculum as cur
+    assert cur.settings({"args": {"train_sources": "fr3_duo_handover_84"}})["train_sources"] == ["fr3_duo_handover_84"]
+    assert cur.source_names(["data/raw/a", "b"]) == ["a", "b"] and cur.source_names(None) is None
+
+
+def _copies(tmp, name, src, picks, seed0):
+    from hackpipe.common.config import source_key
+    d = make_dataset(tmp / name, n_episodes=len(picks), frames=32)     # other content: a copy, not a duplicate
+    (d / "meta" / "fr3_episodes_extra.jsonl").write_text("".join(json.dumps(
+        {"episode_index": i, "seed": seed0 + i, "derived_from": {"source": source_key(src), "episode_index": e}}) + "\n"
+        for i, e in enumerate(picks)))
+    return d
+
+
+def test_copies_follow_originals_without_a_base_and_when_added_together(workspace):
+    from hackpipe.common.config import source_key
+    from hackpipe.dataset.versioning import create_dataset_version
+    from hackpipe.pipeline.auto import _import_and_check
+    tmp, reg = workspace
+    src = make_dataset(tmp / "src", n_episodes=20, frames=30)
+    cp = _copies(tmp, "cp", src, list(range(20)), 500)
+    _import_and_check(str(src), reg)
+    _import_and_check(str(cp), reg)
+    m = create_dataset_version(reg)                      # no base: originals + copies split together
+    orig = {d["episode_index"]: d["demo_id"] for d in reg.demos(source=source_key(src))}
+    copy = {d["episode_index"]: d["demo_id"] for d in reg.demos(source=source_key(cp))}
+    where = {i: k for k in ("train", "val", "test") for i in m["demo_ids"][k]}
+    assert all(where[orig[e]] == where[copy[e]] for e in range(20))
+    assert len({where[orig[e]] for e in range(20)}) > 1          # still a real split

@@ -41,8 +41,8 @@ def camera_gap(snapshots: str | Path, source: str | Path, out_png: str | Path | 
         sim = [np.asarray(Image.open(snap / str(ep) / f"{c}.png").convert("RGB")) for c in CAMS]
         rows.append({"episode": ep, **{c: _mad(s, t) for c, s, t in zip(CAMS, sim, train)}})
         sheet.append(np.concatenate([np.concatenate(train, 1), np.concatenate(sim, 1)], 0))
-    others = sorted(set(int(i) for i in ds.episode_extras()) - set(eps))[:1] or eps[:1]
-    a, b = eps[0], others[0]
+    others = sorted(set(int(i) for i in ds.episode_extras()) - set(eps)) or eps[1:]   # any other episode
+    a, b = eps[0], (others[0] if others else eps[0])
     baseline = {c: _mad(v.frames(a, c, [0])[0], v.frames(b, c, [0])[0]) for c in CAMS} if a != b else None
     mean = {c: round(float(np.mean([r[c] for r in rows])), 2) for c in CAMS}
     verdict = {c: (None if not baseline else

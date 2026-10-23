@@ -46,6 +46,10 @@ ap.add_argument("--noise_theta", type=float, default=0.05, help="dart: OU mean r
 ap.add_argument("--jpeg_quality", type=int, default=95)
 ap.add_argument("--gripper_drive", choices=["recorded", "usd"], default="recorded")
 ap.add_argument("--no_tray_collider", dest="tray_collider", action="store_false")
+ap.add_argument("--render_updates", type=int, default=2,
+                help="renders before reading the cameras each frame (the annotators can return the previous frame)")
+ap.add_argument("--no_tilt", dest="tilt", action="store_false",
+                help="don't apply the episode's rect_tilt_deg to the rect light (eval_isaac.py doesn't)")
 ap.add_argument("--headless", default="true")
 args = ap.parse_args()
 
@@ -155,12 +159,28 @@ def prepare_stage():
         cam.GetVerticalApertureAttr().Set(p["vertical_aperture"])
 
 
+TILT_OP = None
+
+
 def set_lighting(cfg):
+    """Intensity and colour temperature as eval_isaac.py, plus the episode's rect light tilt (rect_tilt_deg, x/y
+    degrees on top of the light's own orientation) — check with --mode snapshot + `hackpipe sim camera-gap`."""
+    global TILT_OP
     rect, dome = UsdLux.RectLight(stage.GetPrimAtPath("/World/RectLight")), UsdLux.DomeLight(stage.GetPrimAtPath("/World/DomeLight"))
     for light, c in [(rect, cfg["rect"]), (dome, cfg["dome"])]:
         light.GetIntensityAttr().Set(float(c["intensity_to"]))
         light.CreateEnableColorTemperatureAttr().Set(True)
         light.CreateColorTemperatureAttr().Set(float(c["color_temperature_K"]))
+    tilt = cfg.get("rect_tilt_deg")
+    if args.tilt and tilt is not None:
+        if TILT_OP is None:
+            TILT_OP = UsdGeom.Xformable(rect.GetPrim()).AddRotateXYOp(opSuffix="hackpipeTilt")
+        TILT_OP.Set(Gf.Vec2f(float(tilt[0]), float(tilt[1])))
+
+
+def render():
+    for _ in range(max(1, args.render_updates)):
+        world.render()
 
 
 prepare_stage()
@@ -253,8 +273,7 @@ print(f"{args.mode}: {len(episodes)} episodes x {args.repeats if args.mode == 'd
 for ep in episodes:
     if args.mode == "snapshot":
         begin(ep, init0)
-        world.render()
-        world.render()
+        render()
         d = OUT / "snapshots" / str(ep["episode_index"])
         d.mkdir(parents=True, exist_ok=True)
         for key, img in images().items():
@@ -279,7 +298,7 @@ for ep in episodes:
         sigma = args.noise_std * np.sqrt(2 * args.noise_theta)          # stationary std = noise_std
         max_lift = 0.0
         for k in range(len(A)):
-            world.render()
+            render()
             for key, img in images().items():
                 Image.fromarray(img).save(cam_dirs[key] / f"{k:06d}.jpg", quality=args.jpeg_quality)
             S.append(read_state())
@@ -300,6 +319,7 @@ for ep in episodes:
                 "split_of_source": ep["split"], "seed": ep["seed"], "light": ep["light"], "success": ok,
                 "stage": 4 if ok else (1 if max_lift > 0.03 else 0), "final_box_pose": [*p.round(5).tolist(), *q.round(5).tolist()],
                 "box_tilt_deg": round(box_tilt_deg(q), 2), "max_lift_mm": round(max_lift * 1000, 1),
+                "light_tilt_applied": bool(args.tilt and ep["light"].get("rect_tilt_deg") is not None),
                 "noise": {"start": args.start_noise, "std": args.noise_std, "theta": args.noise_theta, "rep": rep,
                           "seed": args.seed} if args.mode == "dart" else None,
                 "recorder": "scripts/isaac/record_demos.py", "usd": Path(args.usd).name,

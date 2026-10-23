@@ -57,9 +57,18 @@ BASES = {"smolvla": "lerobot/smolvla_base", "pi0": "lerobot/pi0_base", "pi05": "
 
 
 # ------------------------------------------------------------------ plan
+def source_names(v: Any) -> list[str] | None:
+    """train_sources as a list of folder names: `--set train_sources=a` gives a str, `[a, b]` a list."""
+    if v is None:
+        return None
+    return [Path(x).name for x in ([v] if isinstance(v, str) else v)]
+
+
 def settings(cfg: dict[str, Any]) -> dict[str, Any]:
     """Train-config `args` with defaults filled in."""
-    return {**DEFAULTS, **(cfg.get("args") or {})}
+    s = {**DEFAULTS, **(cfg.get("args") or {})}
+    s["train_sources"] = source_names(s["train_sources"])
+    return s
 
 
 def plan_of(cfg: dict[str, Any]) -> dict[str, Any]:

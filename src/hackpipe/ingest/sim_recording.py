@@ -119,7 +119,9 @@ def convert(rec_dir: str | Path, out_root: str | Path, template: str | Path | No
         extras.append({"episode_index": e, "name": f"{meta.get('mode', 'sim')}_{meta.get('name')}",
                        "seed": meta.get("seed"), "status": "PASS" if meta.get("success") else "FAIL",
                        "success": bool(meta.get("success")), "failure": None if meta.get("success") else "sim",
-                       "randomization": {"applied": {"light": meta.get("light") or {}}},
+                       "randomization": {"applied": {"light": {   # only what was actually rendered
+                           k: v for k, v in (meta.get("light") or {}).items()
+                           if k != "rect_tilt_deg" or meta.get("light_tilt_applied")}}},
                        "final_box_pose": meta.get("final_box_pose"),
                        "final_metrics": {"at_rest": bool(meta.get("success")), "tilt_deg": meta.get("box_tilt_deg")},
                        "derived_from": {"source": source_key(resolve(src)) if src else None,

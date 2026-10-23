@@ -15,11 +15,9 @@ import shutil
 from pathlib import Path
 from typing import Any
 
-from hackpipe.common.config import load_yaml, project_config, resolve, source_key
-from hackpipe.common.ids import now_iso
+from hackpipe.common.config import load_yaml, resolve, source_key
 from hackpipe.common.lerobot_io import DatasetFolder
 from hackpipe.common.registry import Registry
-from hackpipe.evaluation.metrics import compute_metrics
 from hackpipe.evaluation.schema import EpisodeResult
 
 # failure stage (EpisodeResult vocabulary) by the furthest eval_isaac stage reached
@@ -54,9 +52,9 @@ def to_episode(e: dict[str, Any], identity: dict[str, Any], scenario: dict[str, 
 
 def import_results(model_version: str, suite_path: str, results_json: str | Path, gif_dir: str | Path | None = None,
                    registry: Registry | None = None) -> dict[str, Any]:
+    from hackpipe.evaluation.runner import new_eval, store_eval
     reg = registry or Registry()
-    model = reg.get_model(model_version)
-    if model is None:
+    if reg.get_model(model_version) is None:
         raise KeyError(f"Unknown model {model_version}")
     suite = load_yaml(suite_path)
     sim = suite.get("sim") or {}
@@ -73,6 +71,12 @@ def import_results(model_version: str, suite_path: str, results_json: str | Path
     if not set(used) <= allowed:
         raise ImportRefused(f"episodes lit like {sorted(set(used) - allowed)}, which are not {src} episodes — run "
                             "eval_isaac.py with --ref from `hackpipe sim reference` (held-out lighting)")
+    if len(set(used)) != len(used):
+        raise ImportRefused(f"lighting episodes repeat ({sorted(used)}): each episode of the suite is one lighting")
+    n_runs = int(scenario.get("n_runs", len(episodes)))
+    if len(episodes) != n_runs:
+        raise ImportRefused(f"{len(episodes)} episodes, the suite has {n_runs} (eval_isaac.py --episodes {n_runs}); "
+                            "a short or crashed run isn't comparable with full ones")
     want = sim.get("n_action_steps")
     got = (raw.get("policy") or {}).get("n_action_steps")
     if want is not None and got is not None and int(got) != int(want):
@@ -80,12 +84,8 @@ def import_results(model_version: str, suite_path: str, results_json: str | Path
                             f"(serve_policy.py --n_action_steps {want}) — or create a new suite version")
     if want is not None and got is None:
         raise ImportRefused("results.json doesn't say how many actions per prediction the policy executed")
-    eval_id = f"eval-{model_version}-{suite['version']}-{now_iso().replace(':', '').replace('-', '')}"
-    out = resolve(Path(project_config()["project"]["outputs_dir"]) / "eval" / eval_id)
-    out.mkdir(parents=True, exist_ok=True)
+    eval_id, out, identity = new_eval(model_version, suite, suite["env_version"], reg)
     shutil.copyfile(results_json, out / "results_eval_isaac.json")
-    identity = {"eval_id": eval_id, "model_version": model_version, "dataset_version": model["dataset_version"],
-                "test_suite": suite["version"], "env_version": suite["env_version"]}
     results = []
     for e in episodes:
         gif = None
@@ -98,12 +98,7 @@ def import_results(model_version: str, suite_path: str, results_json: str | Path
     with open(out / "episodes.jsonl", "w", encoding="utf-8") as f:
         for r in results:
             f.write(json.dumps(r.to_dict()) + "\n")
-    metrics = compute_metrics(results)
     stages = [int(e.get("stage", 0)) for e in episodes]
-    metrics.update({"suite_version": suite["version"], "env_version": suite["env_version"],
-                    "stage_counts_0to4": [stages.count(k) for k in range(5)], "imported_from": str(results_json),
-                    "policy": raw.get("policy"), "lighting_source": src})
-    (out / "metrics.json").write_text(json.dumps(metrics, indent=2))
-    reg.add_eval(eval_id, model_version, suite["version"], suite["env_version"], str(out), metrics)
-    reg.set_model_status(model_version, "evaluated")
-    return {"eval_id": eval_id, "results_dir": str(out), "metrics": metrics}
+    return store_eval(eval_id, out, model_version, suite, suite["env_version"], results, reg,
+                      {"stage_counts_0to4": [stages.count(k) for k in range(5)], "imported_from": str(results_json),
+                       "policy": raw.get("policy"), "lighting_source": src})
