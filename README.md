@@ -42,6 +42,92 @@ hackpipe deploy  --model m-v1                        # R10 gated deployment reco
 streamlit run dashboard/app.py                       # R9  dashboard
 ```
 
+## R1–R3 data integrity and readiness
+
+This branch adds data-integrity checks around LeRobot v3 ingestion and quality control. The changes cover
+R1 ingestion, R2 quality/readiness reporting, and the R3 guard that prevents dataset-version creation from
+using missing, stale, inconclusive, or blocking QC evidence. They do not replace the existing split policy
+or constitute a general R3 versioning redesign.
+
+### Ingestion (R1)
+
+- Validate `info.json`, required state/action feature declarations, episode metadata, data references, and
+  declared camera references.
+- Compute content hashes from source content rather than trusting a path or stale cache. Imports with
+  identical content from different source paths are reported as potential duplicate imports.
+- Isolate malformed episode records where possible and report the episode and failure reasons instead of
+  silently treating them as successful imports.
+
+### Quality and camera evidence (R2)
+
+- Check finite, ordered timestamps and numeric state/action integrity; validate success labels when the
+  selected dataset configuration declares one.
+- Report missing camera references and decode outcomes explicitly. A file-open test is not considered a
+  full decode.
+- The QC command can consume a full-decode FFmpeg report with `--camera-report` when PyAV is unavailable.
+  It checks the report schema and decode method, dataset root and metadata identity, exact episode/camera
+  inventory, and a freshly computed SHA-256 for every referenced video. Missing, stale, incomplete, or
+  mismatched evidence cannot satisfy the camera check. Without usable decoder evidence, camera validation
+  remains inconclusive and readiness cannot be READY.
+- Exact numeric state/action trajectory matches are reported as *potential* duplicates or leakage risks.
+  Matching numeric values do not prove the camera demonstrations are visually identical.
+- Dataset readiness is reported separately from per-episode quality. Video decode success alone does not
+  make a dataset ready; other blockers and review findings remain in effect.
+
+Example PowerShell commands for the three external datasets (the source folders remain in place):
+
+```powershell
+& .\.venv-r1r2\Scripts\hackpipe.exe qc `
+  --root 'D:\Hackathon Challenges\C2_Teach-the-robot_VLA\Datasets\fr3_duo_rand500\fr3_duo_rand500' `
+  --camera-report '.venv-r1r2\camera-verification\cube_stack490.json'
+
+& .\.venv-r1r2\Scripts\hackpipe.exe qc `
+  --root 'D:\Hackathon Challenges\C2_Teach-the-robot_VLA\Datasets\fr3_duo_handover_84_ep\fr3_duo_handover_v9_night_84' `
+  --camera-report '.venv-r1r2\camera-verification\handover84.json'
+
+& .\.venv-r1r2\Scripts\hackpipe.exe qc `
+  --root 'D:\Hackathon Challenges\C2_Teach-the-robot_VLA\Datasets\FR3Duo_Handover_Dataset_lerobot3' `
+  --camera-report '.venv-r1r2\camera-verification\handover10.json'
+```
+
+The report files shown above are local ignored audit artifacts and are not included in Git. Use a report
+produced by the full-decode scanner for the exact current dataset contents; if the dataset changes, rerun
+the scan. The pipeline validates the video hashes and metadata before consuming the evidence. If the
+reports are unavailable, install/use a supported decoder only through the project's separately managed
+environment, or accept that camera QC is inconclusive. Do not copy a PASS field into a report manually.
+
+### Verification snapshot
+
+The read-only full scan recorded 584 episodes and 261 unique referenced video files across the three
+datasets; every discovered file completed a full FFmpeg decode with no reported frame-count, duration, FPS,
+resolution, or timing discrepancies. Main-pipeline QC subsequently validated current video hashes against
+those reports:
+
+| Dataset | Episodes | Unique videos validated | QC readiness | Additional finding |
+|---|---:|---:|---|---|
+| Cube stacking (`fr3_duo_rand500`) | 490 | 120 | READY at scan time | Separate task; do not combine with handover |
+| Handover (`fr3_duo_handover_v9_night_84`) | 84 | 126 | REVIEW | Exact numeric state/action duplicates; independence is unproven |
+| Handover (`FR3Duo_Handover_Dataset_lerobot3`) | 10 | 15 | REVIEW | Exact numeric state/action duplicates; independence is unproven |
+
+The handover duplicate groups remain REVIEW even though the videos decoded successfully. These outcomes are
+a snapshot, not a promise that data remains unchanged; report validation re-hashes videos on each QC run.
+The simulation-derived provenance indicated by handover metadata is not a verified real-world provenance
+claim. The existing `ds-v1` manifest and draft registry entry were preserved and were not approved by this
+work.
+
+### Focused tests
+
+Run the ingestion, QC, readiness-gate, and common tests in the isolated R1–R2 environment:
+
+```powershell
+& .\.venv-r1r2\Scripts\python.exe -m pytest -p no:cacheprovider `
+  tests/test_data_pipeline.py tests/test_common.py -q
+```
+
+The tests use temporary synthetic datasets for malformed metadata, duplicate imports, numeric trajectory
+matches, camera decode/evidence failures, stale hashes, and version-creation safeguards. They do not alter
+the three source datasets.
+
 ## Folder map and owners
 
 | Folder | Task | Owner | Status |

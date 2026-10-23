@@ -21,6 +21,7 @@ def main(argv: list[str] | None = None) -> None:
 
     s = sub.add_parser("qc", help="R2 data quality checks + report")
     s.add_argument("--root", required=True)
+    s.add_argument("--camera-report", help="validated per-dataset full-decode FFmpeg report")
 
     s = sub.add_parser("dataset", help="R3 versioned datasets")
     ds_sub = s.add_subparsers(dest="action", required=True)
@@ -62,15 +63,19 @@ def main(argv: list[str] | None = None) -> None:
     reg = Registry()
 
     if args.cmd == "ingest":
-        from hackpipe.ingest.importer import ingest, watch
+        from hackpipe.ingest.importer import ingest_report, watch
         if args.watch:
             watch(args.root, args.interval, reg)
         else:
-            print(f"Imported {ingest(args.root, reg)} demos")
+            r = ingest_report(args.root, reg)
+            print(f"Imported {r['imported']} demos")
+            if r["failed"] or r["duplicates"]:
+                _print({"failed": r["failed"], "potential_duplicate_imports": r["duplicates"]})
     elif args.cmd == "qc":
         from hackpipe.quality.report import run_qc
-        r = run_qc(args.root, reg)
-        _print({k: r[k] for k in ("n_episodes", "status_counts", "reason_counts", "dataset_issues", "paths")})
+        r = run_qc(args.root, reg, camera_report=args.camera_report)
+        _print({k: r[k] for k in ("n_episodes", "status_counts", "reason_counts", "dataset_issues",
+                                  "readiness", "potential_duplicate_trajectories", "videos", "paths")})
     elif args.cmd == "dataset":
         from hackpipe.dataset import versioning as v
         if args.action == "create":

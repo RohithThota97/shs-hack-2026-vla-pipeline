@@ -11,21 +11,54 @@ import numpy as np
 from hackpipe.common.config import dataset_config, project_config, resolve
 from hackpipe.common.ids import demo_id, now_iso
 from hackpipe.common.registry import Registry
+from hackpipe.ingest.importer import build_demo_records
 from hackpipe.quality.checks import INVALID, REVIEW, VALID, check_dataset
 
 
-def run_qc(root: str | Path, registry: Registry | None = None, out_dir: str | Path | None = None) -> dict[str, Any]:
+def run_qc(root: str | Path, registry: Registry | None = None, out_dir: str | Path | None = None,
+           camera_report: str | Path | None = None) -> dict[str, Any]:
     reg = registry or Registry()
-    result = check_dataset(root)
+    source_before = build_demo_records(root)
+    result = check_dataset(root) if camera_report is None else check_dataset(root, camera_report=camera_report)
     source = result["root"]
+    current_records = build_demo_records(root)
+    def signatures(records):
+        return {record["episode_index"]: (record["status"], record["meta"].get("content_sha256"),
+                tuple(record["meta"].get("ingest_errors", []))) for record in records}
+    source_changed_during_qc = signatures(source_before) != signatures(current_records)
+    if source_changed_during_qc:
+        issue = "source content changed while QC was running"
+        result["dataset_issues"].append(issue)
+        result["blocking_issues"].append(issue)
+        blockers = result["blocking_issues"]
+        result["readiness"] = {"status": "BLOCKED", "ready_for_training": False,
+                                "blocking_issues": blockers}
+        for episode in result["episodes"]:
+            episode.hard.append(f"dataset_blocked: {issue}")
+            episode.finalize()
+    current_hashes = {record["episode_index"]: record["meta"].get("content_sha256")
+                      for record in current_records if record["status"] != "FAILED"}
     accept_review = dataset_config()["quality"].get("accept_review_as_valid", False)
+    readiness = result["readiness"]
     for e in result["episodes"]:
         did = demo_id(source, e.episode_index)
         if reg.get_demo(did) is None:
             continue  # run `hackpipe ingest` first
-        status = VALID if (e.status == REVIEW and accept_review) else e.status
+        status = INVALID if readiness["status"] == "BLOCKED" else e.status
+        unresolved_video = (bool(result["videos"].get("declared_keys")) and
+                            result["videos"].get("decode_check", "").startswith("skipped"))
+        if readiness["status"] == "REVIEW" and unresolved_video:
+            status = REVIEW
+        duplicate_numeric = any("potential_duplicate_numeric_trajectory" in reason for reason in e.soft)
+        if (e.status == REVIEW and accept_review and readiness["status"] != "BLOCKED" and
+                not unresolved_video and not duplicate_numeric):
+            status = VALID
         reg.set_demo_status(did, status, {"qc": {"status": e.status, "hard": e.hard, "soft": e.soft,
-                                                 "stats": e.stats, "checked_at": now_iso()}})
+                                                 "stats": e.stats, "checked_at": now_iso(),
+                                                 "dataset_readiness": readiness,
+                                                 "content_sha256": current_hashes.get(e.episode_index),
+                                                 "videos": result["videos"],
+                                                 "video_check_inconclusive": unresolved_video}})
     report = summarize(result)
     out = resolve(out_dir or Path(project_config()["project"]["outputs_dir"]) / "qc")
     out.mkdir(parents=True, exist_ok=True)
@@ -51,6 +84,8 @@ def summarize(result: dict[str, Any]) -> dict[str, Any]:
         "episode_frames": {"min": int(lengths.min()), "median": float(np.median(lengths)),
                            "max": int(lengths.max())},
         "dataset_issues": result["dataset_issues"],
+        "readiness": result["readiness"],
+        "potential_duplicate_trajectories": result["potential_duplicate_trajectories"],
         "videos": result["videos"],
         "episodes": [{"episode_index": e.episode_index, "status": e.status, "hard": e.hard, "soft": e.soft}
                      for e in eps],
@@ -63,6 +98,7 @@ def to_markdown(r: dict[str, Any]) -> str:
         f"- Generated: {r['generated_at']}",
         f"- Source: `{r['root']}`",
         f"- Episodes: {r['n_episodes']} · Frames: {r['n_frames']} · FPS: {r['fps']}",
+        f"- Readiness: **{r['readiness']['status']}** (ready for training: {r['readiness']['ready_for_training']})",
         f"- Episode length (frames): min {r['episode_frames']['min']}, median {r['episode_frames']['median']:.0f}, "
         f"max {r['episode_frames']['max']}", "",
         "| Status | Episodes |", "|---|---|",

@@ -1,5 +1,7 @@
 # FR3 Duo data preparation
 
+> **Current trainer handoff:** use [`HANDOFF.md`](HANDOFF.md) and regenerate the source-bound artifacts with `python prepare_handoff.py`. This README records an earlier preparation run; its snapshot paths, split assignments, and runtime details are historical and are not the current handoff. The current handover manifests intentionally have no train/validation/test episodes because exact numeric trajectory checks found only one group in each handover source.
+
 Prepared for the Robotics & AI Hackathon on 22 October 2026. Scope: R1 ingestion, R2 quality checks, R3 versioning and splits. The source folders were not modified. No data was uploaded and no training job was launched.
 
 The subsequently supplied `isaac_sim_hackathon_environment.md` has also been inspected. See [the environment evidence review](reports/ENVIRONMENT_REVIEW.md). It supports the handover control convention but describes a different ten-episode dataset and contains no numerical joint limits or stacking-specific mapping. The handover order/units/absolute-target convention was cross-checked against the actual 84-episode converter metadata; no episode status changed. Reattach these report annotations after rebuilding with `python review_environment_document.py`.
