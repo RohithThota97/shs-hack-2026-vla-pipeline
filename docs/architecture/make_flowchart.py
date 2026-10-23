@@ -11,6 +11,7 @@
 Shapes: pill = start / end, box = step, diamond = decision, cylinder = stored data, [ bracket ] = note.
 """
 import sys
+import textwrap
 from html import escape as e
 from pathlib import Path
 
@@ -34,9 +35,9 @@ NODES = {
     "deploy":   ("box",      790, 760, 190, 84, "R10 · Deploy"),
     "out":      ("pill",     500, 760, 200, 70, "Deployed policy"),
     "improve":  ("box",     1130, 960, 190, 84, "R11 · Improve"),
-    "excluded": ("box",     1170, 520, 170, 64, "Excluded / manual review"),
-    "drive":    ("cylinder", 400, 100, 170, 110, "Google Drive\n15 GB"),
-    "registry": ("cylinder", 660, 540, 170, 120, "Registry (SQLite)"),
+    "excluded": ("box",     1170, 520, 190, 64, "Manual review"),
+    "drive":    ("cylinder", 400, 100, 190, 110, "Google Drive\n15 GB"),
+    "registry": ("cylinder", 660, 540, 190, 120, "Registry (SQLite)"),
     "suite":    ("cylinder", 1430, 540, 170, 120, "Frozen test suite"),
     "hub":      ("cylinder", 790, 960, 170, 110, "Hugging Face Hub"),
 }
@@ -47,8 +48,9 @@ EDGES = [
     ("fetch", "right", "ingest", "left", "", "main", []),
     ("ingest", "right", "qc", "left", "", "main", []),
     ("qc", "right", "valid", "left", "", "main", []),
-    ("valid", "right", "version", "left", "VALID", "main", []),
-    ("valid", "bottom", "excluded", "top", "REVIEW / INVALID", "thin", []),
+    ("valid", "right", "version", "left", "yes", "main", []),
+    ("valid", "bottom", "excluded", "top", "no", "thin", []),
+    ("excluded", "right", "version", "left@0.7", "accepted", "thin", [(1300, 520), (1300, 316.8)]),
     ("version", "right", "approved", "left", "", "main", []),
     ("approved", "bottom", "train", "top", "yes", "main", []),
     ("train", "left", "eval", "right", "", "main", []),
@@ -63,18 +65,19 @@ EDGES = [
     ("registry", "top@0.65", "ingest", "bottom@0.65", "", "thin", []),
     ("version", "bottom", "suite", "top", "freeze test split", "thin", []),
     ("suite", "bottom", "eval", "top", "same suite for every model", "thin", []),
-    ("deploy", "bottom", "hub", "top", "publish model + card", "dashed", []),
+    ("deploy", "bottom", "hub", "top", "manual publish: model + R7 card", "dashed", []),
 ]
 
 # (text, centre x, centre y, leader to (x, y) or None)
 NOTES = [
-    ("zip ≤ 5 GB · Drive · HF · GitHub · S3 / GCS / Azure", 400, 430, (400, 342)),
+    ("Drive · HF · GitHub · S3 / GCS / Azure · zip upload ≤ 5 GB", 400, 430, (400, 342)),
     ("stable demo IDs · checksums", 660, 190, (660, 258)),
-    ("NaN · gaps · video · length ≥ 50 s", 920, 140, (920, 258)),
+    ("NaN · gaps · video · length 50–83 s", 920, 140, (920, 258)),
     ("split by episode · leakage guard", 1430, 190, (1430, 258)),
     ("no → stays draft", 1720, 150, (1720, 235)),
-    ("records every step", 950, 560, (745, 560)),
-    ("SmolVLA · Colab T4 · run record", 1745, 870, (1720, 802)),
+    ("records every step", 950, 560, (755, 560)),
+    ("INVALID / DUPLICATE → excluded", 1170, 630, (1170, 552)),
+    ("SmolVLA · Colab T4 · run record", 1720, 870, (1720, 802)),
     ("simulator · 95% CI · success judge", 1430, 870, (1430, 802)),
     ("smoke test · rollback", 790, 650, (790, 718)),
     ("weak scenarios → targeted demos → ds-v(N+1)", 1450, 990, (1225, 960)),
@@ -91,7 +94,7 @@ def port(nid, spec):
 
 
 def text_w(s, size):
-    return len(s) * size * 0.5
+    return len(s) * size * 0.53
 
 
 # ---------- SVG ----------
@@ -154,16 +157,7 @@ def svg():
 
 
 def wrap(s, n):
-    if "\n" in s:
-        return [ln for part in s.split("\n") for ln in wrap(part, n)]
-    words, lines, cur = s.split(), [], ""
-    for wd in words:
-        if cur and len(cur) + 1 + len(wd) > n:
-            lines.append(cur)
-            cur = wd
-        else:
-            cur = f"{cur} {wd}".strip()
-    return lines + [cur]
+    return [ln for part in s.split("\n") for ln in textwrap.wrap(part, n)]
 
 
 # ---------- draw.io ----------
@@ -182,22 +176,27 @@ EDGE_STYLE = {
 BASE = "fillColor=#ffffff;strokeColor=#222222;fontColor=#222222;fontFamily=Helvetica;"
 
 
+def html_value(text):
+    """draw.io html=1 labels are HTML inside an XML attribute: escape for HTML, then for XML."""
+    return e(e(text).replace("\n", "<br>"))
+
+
 def drawio():
     cells = ['<mxCell id="0"/>', '<mxCell id="1" parent="0"/>']
     for nid, (kind, cx, cy, w, h, label) in NODES.items():
-        cells.append(f'<mxCell id="{nid}" value="{e(label).replace(chr(10), "&lt;br&gt;")}" style="{STYLE[kind]}{BASE}" vertex="1" parent="1">'
+        cells.append(f'<mxCell id="{nid}" value="{html_value(label)}" style="{STYLE[kind]}{BASE}" vertex="1" parent="1">'
                      f'<mxGeometry x="{cx - w / 2}" y="{cy - h / 2}" width="{w}" height="{h}" as="geometry"/></mxCell>')
     for i, (a, sa, b, sb, label, style, via) in enumerate(EDGES):
         *_, ex, ey = port(a, sa)
         *_, nx, ny = port(b, sb)
         pts = "".join(f'<mxPoint x="{x}" y="{y}"/>' for x, y in via)
-        cells.append(f'<mxCell id="e{i}" value="{e(label)}" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;'
+        cells.append(f'<mxCell id="e{i}" value="{html_value(label)}" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;'
                      f'exitX={ex};exitY={ey};entryX={nx};entryY={ny};{EDGE_STYLE[style]}{BASE}fontSize=14;'
                      f'labelBackgroundColor=#ffffff;" edge="1" parent="1" source="{a}" target="{b}">'
                      f'<mxGeometry relative="1" as="geometry"><Array as="points">{pts}</Array></mxGeometry></mxCell>')
     for i, (text, cx, cy, lead) in enumerate(NOTES):
         tw = text_w(text, 15.5) + 28
-        cells.append(f'<mxCell id="n{i}" value="{e(text)}" style="shape=partialRectangle;top=0;bottom=0;'
+        cells.append(f'<mxCell id="n{i}" value="{html_value(text)}" style="shape=partialRectangle;top=0;bottom=0;'
                      f'whiteSpace=wrap;html=1;strokeWidth=1.5;fontSize=14;{BASE}" vertex="1" parent="1">'
                      f'<mxGeometry x="{cx - tw / 2}" y="{cy - 16}" width="{tw}" height="32" as="geometry"/></mxCell>')
         if lead:

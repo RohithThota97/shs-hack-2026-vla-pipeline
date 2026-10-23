@@ -88,7 +88,8 @@ updates that file.
 
 ## Docs
 
-- [`docs/architecture/pipeline_architecture.png`](docs/architecture/pipeline_architecture.png) — pipeline architecture diagram for slides and black-and-white flowchart [`pipeline_flowchart.png`](docs/architecture/pipeline_flowchart.png) (editable `pipeline_flowchart.drawio`; SVGs and the scripts in the same folder)
+- [`docs/architecture/pipeline_architecture.png`](docs/architecture/pipeline_architecture.png) — colour architecture diagram for slides (SVG and `make_diagram.py` in the same folder)
+- [`docs/architecture/pipeline_flowchart.png`](docs/architecture/pipeline_flowchart.png) — black-and-white flowchart; edit `pipeline_flowchart.drawio` in draw.io (SVG and `make_flowchart.py` in the same folder)
 - [`docs/plan.md`](docs/plan.md) — goal, scope, model strategy, day plan, GPU schedule
 - [`docs/roles.md`](docs/roles.md) — who owns what
 - [`docs/interfaces.md`](docs/interfaces.md) — data contracts
