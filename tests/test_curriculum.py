@@ -123,6 +123,8 @@ def test_labels_make_a_new_version_with_the_same_split(approved):
     approve("ds-v2", reg, by="t")
     with pytest.raises(NothingNewError):                     # labels alone don't repeat: nothing new now
         create_dataset_version(reg, base="ds-v2")
+    with pytest.raises(NothingNewError, match="same sub-task labels"):   # the very same labels again
+        create_dataset_version(reg, base="ds-v2", subtasks=labels)
 
 
 def test_labels_must_cover_every_train_val_episode(approved):
@@ -155,8 +157,15 @@ def test_weights_balance_datasets_and_rehearse():
     w = cur.weights(groups, ["reach_grasp", "transport_place"], ["transport_place"], 0.7)
     assert w[groups == "h:transport_place"].sum() == pytest.approx(0.35)       # new skill: 70% over 2 datasets
     assert w[groups == "c:reach_grasp"].sum() == pytest.approx(0.15)           # rehearsal: 30% over 2 datasets
-    mix = cur.group_mix(["h:reach_grasp", "h:transport_place", "h:full_task"], cur.plan_of({}))
+    mix, warn = cur.group_mix(["h:reach_grasp", "h:transport_place", "h:full_task"], cur.plan_of({}))
     assert mix[0] == {"h:reach_grasp": 1.0} and mix[3]["h:full_task"] == pytest.approx(0.7)
+    assert warn == ["stage stage3_bimanual: no train source has ['bimanual'] — it only rehearses earlier skills"]
+    assert sum(mix[2].values()) == pytest.approx(1.0)                         # renormalised, as drawn
+    only = {"stages": [{"name": "s", "frac": 1, "skills": ["bimanual"]}]}
+    with pytest.raises(ValueError, match="no train source"):
+        cur.group_mix(["c:reach_grasp", "c:full_task"], only)
+    with pytest.raises(ValueError, match="needs known skills"):
+        cur.plan_of({"curriculum": {"stages": [{"name": "x", "frac": 1, "skills": []}]}})
 
 
 def test_draws_are_seeded_and_resume_exactly():
@@ -278,3 +287,19 @@ def test_train_page_curriculum_config(approved, monkeypatch):
     assert {m.label for m in at.metric} >= {"Train samples (6 Hz)"}
     at.toggle[0].set_value(True).run()                                            # baseline: one mixed stage
     assert not at.exception and list(plan_table()["stage"]) == ["all_skills_mixed"]
+
+
+def test_resume_refuses_another_dataset(approved):
+    from hackpipe.training.train import train
+    tmp, reg = approved
+    out = tmp / "outputs" / "train" / "m-v1"
+    reg.add_model("m-v1", "ds-v0", "smolvla", "failed", str(out), "", {"output_dir": str(out),
+                  "train_config_file": "configs/train/smolvla_fr3_duo.yaml"})
+    with pytest.raises(ValueError, match="was trained on ds-v0"):
+        train(None, "ds-v1", dry_run=True, registry=reg, resume_model="m-v1")
+
+
+def test_stats_refuse_a_source_without_samples():
+    t = {"name": "x", "rows": np.array([], int), "S": np.zeros((3, 2)), "A": np.zeros((3, 2))}
+    with pytest.raises(ValueError, match="no train samples from"):
+        cur.norm_stats([t], 0)

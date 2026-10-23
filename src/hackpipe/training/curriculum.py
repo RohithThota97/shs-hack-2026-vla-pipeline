@@ -48,6 +48,7 @@ DEFAULT_PLAN = {
 DEFAULTS = {"chunk": 20, "rate_hz": 6, "batch_size": 8, "steps": 20000, "save_freq": 1000, "log_freq": 50,
             "val_every": 1000, "val_batches": 4, "num_workers": 2, "subtask_tail": "hold", "paraphrase_prob": 0.3,
             "gripper_lag_fix": True, "bf16": False, "no_curriculum": False, "keep_stage_checkpoints": False,
+            "stage_end_eval": True,      # validate + checkpoint at each stage end (off for timing runs)
             "lr": None, "policy_overrides": {}}
 BASES = {"smolvla": "lerobot/smolvla_base", "pi0": "lerobot/pi0_base", "pi05": "lerobot/pi05_base"}
 
@@ -64,8 +65,8 @@ def plan_of(cfg: dict[str, Any]) -> dict[str, Any]:
     plan = cfg.get("curriculum") or DEFAULT_PLAN
     for s in plan["stages"]:
         bad = [k for k in s["skills"] if k not in SKILLS]
-        if bad or s["frac"] <= 0:
-            raise ValueError(f"curriculum stage {s.get('name')}: unknown skills {bad} or frac <= 0")
+        if bad or not s["skills"] or s["frac"] <= 0:
+            raise ValueError(f"curriculum stage {s.get('name')}: needs known skills (got {s['skills']}) and frac > 0")
     return plan
 
 
@@ -101,16 +102,23 @@ def weights(groups: np.ndarray, skills: list[str], new_skills: list[str], new_we
     return w
 
 
-def group_mix(groups: list[str], plan: dict[str, Any]) -> list[dict[str, float]]:
-    """Share of each (dataset, skill) group per stage — weights() summed per group, without loading any data."""
+def group_mix(groups: list[str], plan: dict[str, Any]) -> tuple[list[dict[str, float]], list[str]]:
+    """Share of each (dataset, skill) group per stage — weights() summed per group, without loading any data — and
+    warnings. Raises if a stage has nothing to draw from (no train source has any of its skills)."""
     g = np.array(groups)
-    out, seen = [], []
+    have = {x.split(":", 1)[1] for x in groups}
+    out, warn, seen = [], [], []
     for s in plan["stages"]:
         new = [k for k in s["skills"] if k not in seen]
         seen += new
+        if not set(s["skills"]) & have:
+            raise ValueError(f"stage {s['name']}: no train source has any of its skills {s['skills']}")
+        missing = [k for k in new if k not in have]
+        if missing:
+            warn.append(f"stage {s['name']}: no train source has {missing} — it only rehearses earlier skills")
         w = weights(g, s["skills"], new, plan.get("new_skill_weight", 0.7))
-        out.append({x: round(float(w[g == x].sum()), 3) for x in groups if w[g == x].sum() > 0})
-    return out
+        out.append({x: round(float(w[g == x].sum() / w.sum()), 3) for x in groups if w[g == x].sum() > 0})
+    return out, warn
 
 
 def stage_draws(w: np.ndarray, n: int, seed: int, stage: int, paraphrase_prob: float, skip: int = 0) -> np.ndarray:
@@ -140,8 +148,12 @@ def describe(cfg: dict[str, Any], manifest: dict[str, Any]) -> dict[str, Any]:
         name = Path(src).name
         groups += [f"{name}:{k}" for k in dict.fromkeys(SOURCE_SKILLS[info["kind"]])] + [f"{name}:full_task"]
     steps = stage_steps(plan, int(s["steps"]))
-    mix = group_mix(groups, plan)
-    return {"plan": plan, "stage_steps": steps, "sample_mix": mix, "rate_hz": s["rate_hz"], "chunk": s["chunk"],
+    mix, warn = group_mix(groups, plan)
+    empty = [x for x, e in train_eps.items() if not set(e) - set(sub["sources"][x]["flagged"])]
+    if empty:
+        raise RuntimeError(f"every train episode of {empty} is flagged: nothing to train on from it")
+    return {"plan": plan, "stage_steps": steps, "sample_mix": mix, "warnings": warn, "rate_hz": s["rate_hz"],
+            "chunk": s["chunk"],
             "sources": sorted(train_eps), "no_curriculum": bool(s["no_curriculum"]),
             "train_episodes": {x: len(e) - len(set(e) & set(sub["sources"][x]["flagged"]))
                                for x, e in train_eps.items()},
@@ -218,7 +230,7 @@ def build_table(source: str, episodes: list[int], labels: dict[str, Any], s: dic
         raise ValueError(f"{source}: {ds.fps:g} fps is not a multiple of rate_hz {s['rate_hz']}")
     stride = int(round(stride))
     df = ds.frames()[["index", cols["episode"], cols["frame"], cols["state"], cols["action"]]]
-    df = df.sort_values("index").reset_index(drop=True)
+    df = df[df[cols["episode"]].isin(episodes)].sort_values("index").reset_index(drop=True)
     seg, eps_tab = labels["segments"], labels["episodes"].set_index("episode_index")
     flagged = set(labels["flagged"])
     S, A = np.stack(df[cols["state"]]).astype(np.float32), np.stack(df[cols["action"]]).astype(np.float32)
@@ -246,6 +258,12 @@ def build_table(source: str, episodes: list[int], labels: dict[str, Any], s: dic
             "abs_index": df["index"].to_numpy(), "ep": ep, "ep_end": ep_end, "sub_end": sub_end, "sub_text": sub_text,
             "full_text": full_text, "skill": skill, "rows": np.flatnonzero(keep),
             "flagged": sorted(flagged & set(episodes)), "gripper_shifts": shifts}
+
+
+def subset(t: dict[str, Any], episodes: list[int]) -> dict[str, Any]:
+    """The same table with only the sample rows of these episodes (train or val)."""
+    rows = t["rows"][np.isin(t["ep"][t["rows"]], episodes)]
+    return {**t, "rows": rows, "flagged": sorted(set(t["flagged"]) & set(episodes))}
 
 
 def item_groups(tables: list[dict[str, Any]]) -> tuple[np.ndarray, np.ndarray]:
@@ -278,6 +296,9 @@ def norm_stats(tables: list[dict[str, Any]], seed: int) -> dict[str, dict[str, n
     """Equal-weight pooled stats over the train rows of each source (mean/std/min/max + quantiles for pi0.5)."""
     rng = np.random.default_rng(seed)
     out = {}
+    empty = [t["name"] for t in tables if not len(t["rows"])]
+    if empty:
+        raise ValueError(f"no train samples from {empty} (all flagged or unlabelled): stats would be empty")
     n = min(len(t["rows"]) for t in tables)
     for key, arr in (("observation.state", "S"), ("action", "A")):
         pooled = np.concatenate([t[arr][rng.choice(t["rows"], n, replace=False)] for t in tables]).astype(np.float64)
@@ -416,14 +437,19 @@ def run(dataset_version: str, cfg: dict[str, Any], out: Path, resume: bool = Fal
         if sorted(sc["cameras"]) != cams:
             raise RuntimeError(f"{src} has other cameras than {cams}: one policy needs the same cameras")
 
-    def tables(split: str) -> list[dict[str, Any]]:
-        eps = split_episodes(m, split)
-        return [build_table(src, e, {**lab[src], "kind": lab["index"]["sources"][src]["kind"],
-                                     "flagged": lab["index"]["sources"][src]["flagged"]}, s, grip)
-                for src, e in sorted(eps.items())]
-
     _log("loading tables …")
-    train_t, val_t = tables("train"), tables("val")
+    tr_eps, va_eps = split_episodes(m, "train"), split_episodes(m, "val")
+    train_t, val_t = [], []
+    for src in sorted(set(tr_eps) | set(va_eps)):           # each source read once, its train + val episodes only
+        t = build_table(src, tr_eps.get(src, []) + va_eps.get(src, []),
+                        {**lab[src], "kind": lab["index"]["sources"][src]["kind"],
+                         "flagged": lab["index"]["sources"][src]["flagged"]}, s, grip)
+        for eps, dest in ((tr_eps.get(src), train_t), (va_eps.get(src), val_t)):
+            if eps:
+                dest.append(subset(t, eps))
+    for si, st_ in enumerate(plan["stages"]):                # fail before loading the policy, not mid-run
+        group_mix([g for t in train_t for g in {f"{t['name']}:{k}" for k in t["skill"][t["rows"]]}]
+                  + [f"{t['name']}:full_task" for t in train_t], {**plan, "stages": plan["stages"][:si + 1]})
     for t in train_t:
         _log(f"  {t['name']}: {len(t['rows'])} train samples @ {s['rate_hz']} Hz, flagged left out {t['flagged']}"
              + (f", gripper flips moved earlier: {len(t['gripper_shifts'])}" if t["gripper_shifts"] else ""))
@@ -504,21 +530,18 @@ def run(dataset_version: str, cfg: dict[str, Any], out: Path, resume: bool = Fal
                 _log(f"INFO stage:{si + 1} step:{step} loss:{loss.item():.4f} grdn:{float(gn):.3f} "
                      f"lr:{optim.param_groups[0]['lr']:.1e} updt_s:{time.time() - t_upd:.3f} data_s:{data_s:.3f} "
                      f"mem_gb:{mem:.2f}")
-            if step % s["val_every"] == 0:
+            stage_end = step == sum(per_stage[:si + 1])
+            if step % s["val_every"] == 0 or stage_end and s["stage_end_eval"]:
                 v = validate(policy, pre, post, vsets, arm)
-                log["val"].append({"step": step, "stage": stage["name"], **v})
-                _log("VAL " + " | ".join(f"{k} l1={x['l1_norm']} arm={x['arm_rad']}rad" for k, x in v.items()))
-            if step % s["save_freq"] == 0:
-                save_checkpoint(out, step, policy, pre, post, optim, sched, log)
+                log["val"].append({"step": step, "stage": stage["name"], "end_of_stage": stage_end, **v})
+                _log(("VAL end of " + stage["name"] + ": " if stage_end else "VAL ")
+                     + " | ".join(f"{k} l1={x['l1_norm']} arm={x['arm_rad']}rad" for k, x in v.items()))
+            if step % s["save_freq"] == 0 or stage_end and (s["stage_end_eval"] or step == s["steps"]):
+                ck = save_checkpoint(out, step, policy, pre, post, optim, sched, log)
+                if stage_end and s["keep_stage_checkpoints"]:
+                    import shutil
+                    shutil.copytree(ck / "pretrained_model", out / "stages" / stage["name"], dirs_exist_ok=True)
             t_data = time.time()
-        v = validate(policy, pre, post, vsets, arm)
-        log["val"].append({"step": step, "stage": stage["name"], "end_of_stage": True, **v})
-        _log(f"VAL end of {stage['name']}: " + " | ".join(f"{k} l1={x['l1_norm']} arm={x['arm_rad']}rad"
-                                                          for k, x in v.items()))
-        ck = save_checkpoint(out, step, policy, pre, post, optim, sched, log)
-        if s["keep_stage_checkpoints"]:
-            import shutil
-            shutil.copytree(ck / "pretrained_model", out / "stages" / stage["name"], dirs_exist_ok=True)
     _log(f"done: {step} steps in {(time.time() - t0) / 60:.1f} min")
 
 

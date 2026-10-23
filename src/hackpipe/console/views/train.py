@@ -173,7 +173,8 @@ else:
                      help=why or blocked or (None if gpus else "needs a GPU")):
             jid = runner.submit("train_timing", runner.hackpipe_cmd(
                 "train", "--config", cfg_path, "--dataset", ds, "--purpose", "timing",
-                *set_args(ov_list + ["steps=200", "save_freq=200"])),
+                *set_args(ov_list + ["steps=200", "save_freq=200"]
+                          + (["stage_end_eval=false", "val_every=1000000"] if curriculum else []))),
                 needs="gpu", work_units=200, label=f"Timing run · {ds}", registry=reg,
                 extra_meta={"target_steps": 200, "dataset": ds, "config": cfg_path, "log_freq": log_freq})
             st.success(f"Started {jid}.")

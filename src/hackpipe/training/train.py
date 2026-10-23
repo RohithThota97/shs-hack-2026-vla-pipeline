@@ -190,6 +190,9 @@ def train(config_path: str, dataset_version: str, dry_run: bool = False, registr
         model = reg.get_model(resume_model)
         if model is None:
             raise KeyError(resume_model)
+        if model["dataset_version"] != dataset_version:
+            raise ValueError(f"{resume_model} was trained on {model['dataset_version']}, not {dataset_version}: "
+                             f"resume with --dataset {model['dataset_version']}")
         version, output_dir = resume_model, Path(model["meta"]["output_dir"])
         if model["meta"].get("trainer") == "curriculum":      # resumes with the run's own saved config
             cfg = json.loads((output_dir / "train_config.json").read_text())

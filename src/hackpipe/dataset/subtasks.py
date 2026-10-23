@@ -207,11 +207,6 @@ def _hue(rgb: Any) -> float:
     return colorsys.rgb_to_hsv(r, g, b)[0] * 360
 
 
-def _hue_dist(a: float, b: float) -> float:
-    d = abs(a - b) % 360
-    return min(d, 360 - d)
-
-
 class Videos:
     """Decode single frames of one episode (LeRobot v3: many episodes per mp4, offset by from_timestamp)."""
 
@@ -240,6 +235,19 @@ class Videos:
         return out
 
 
+def _rgb_to_hsv(rgb: np.ndarray) -> np.ndarray:
+    """colorsys.rgb_to_hsv for an (N, 3) array in 0..1 — same results, without a Python call per pixel."""
+    r, g, b = rgb[:, 0], rgb[:, 1], rgb[:, 2]
+    mx, mn = rgb.max(1), rgb.min(1)
+    d = mx - mn
+    safe = np.where(d == 0, 1, d)
+    rc, gc, bc = (mx - r) / safe, (mx - g) / safe, (mx - b) / safe
+    h = np.where(r == mx, bc - gc, np.where(g == mx, 2.0 + rc - bc, 4.0 + gc - rc))
+    h = np.where(d == 0, 0.0, (h / 6.0) % 1.0)
+    s = np.where(d == 0, 0.0, d / np.where(mx == 0, 1, mx))
+    return np.stack([h, s, mx], 1)
+
+
 def _held_cube_rgb(img: np.ndarray) -> np.ndarray:
     """Median colour between the fingers (bottom-centre of the wrist image)."""
     return np.median(img[150:205, 95:130].reshape(-1, 3), 0)
@@ -247,8 +255,6 @@ def _held_cube_rgb(img: np.ndarray) -> np.ndarray:
 
 def _base_cube_rgb(img: np.ndarray, img_end: np.ndarray, picked_hues: list[float]) -> tuple[np.ndarray | None, int]:
     """The base cube in the head camera: a small coloured blob in the same place in the first and last frame."""
-    import colorsys
-
     from scipy.ndimage import median_filter
     crop = img[110:220, 30:210].astype(float)
     end = img_end[110:220, 30:210].astype(float)
@@ -256,15 +262,15 @@ def _base_cube_rgb(img: np.ndarray, img_end: np.ndarray, picked_hues: list[float
     local = np.linalg.norm(crop - background, axis=2).reshape(-1)
     unchanged = (np.linalg.norm(crop - end, axis=2) < 30).reshape(-1)
     region = crop.reshape(-1, 3)
-    hsv = np.array([colorsys.rgb_to_hsv(*(p / 255)) for p in region])
-    bg = np.array([colorsys.rgb_to_hsv(*(p / 255)) for p in background.reshape(-1, 3)])
+    hsv = _rgb_to_hsv(region / 255)
+    bg = _rgb_to_hsv(background.reshape(-1, 3) / 255)
     dh = np.abs(hsv[:, 0] - bg[:, 0]) * 360
     dh = np.minimum(dh, 360 - dh)
     not_shadow = (dh > 25) | (hsv[:, 1] - bg[:, 1] > 0.3)
     cand = (local > 40) & unchanged & not_shadow & (hsv[:, 1] > 0.3) & (hsv[:, 2] > 0.12)
     if picked_hues:
-        hd = np.array([min(_hue_dist(h * 360, ph) for ph in picked_hues) for h in hsv[:, 0]])
-        cand &= hd > 25
+        d = np.abs(hsv[:, :1] * 360 - np.array(picked_hues)[None, :]) % 360
+        cand &= np.minimum(d, 360 - d).min(1) > 25
     if cand.sum() < 8:
         return None, int(cand.sum())
     return np.median(region[cand], 0), int(cand.sum())
@@ -279,7 +285,8 @@ def cube_colors(videos: Videos, ep: int, A: np.ndarray, j: Joints) -> tuple[dict
     last = len(A) - 1
     lw = videos.frames(ep, "left_wrist_camera", [min(cl + 1, last)])[0]
     rw = videos.frames(ep, "right_wrist_camera", [min(cr + 1, last)])[0]
-    head, head_end = videos.frames(ep, "external_camera", [0, last])
+    # one seek per frame: decoding from frame 0 to the last frame would decode the whole episode
+    head, head_end = (videos.frames(ep, "external_camera", [i])[0] for i in (0, last))
     a, c = _held_cube_rgb(lw), _held_cube_rgb(rw)
     b, _ = _base_cube_rgb(head, head_end, [_hue(a), _hue(c)])
     return {"cube_left": color_name(a), "cube_base": color_name(b) if b is not None else "unknown",
@@ -380,6 +387,16 @@ def label(base: str, registry: Any = None, review_images: bool | None = None, pr
     for split in ("train", "val"):
         for s, i in m["episodes"][split]:
             eps.setdefault(s, []).append(int(i))
+    # plus demos the next version will add (VALID since the base, not excluded, not a held-out test source), so
+    # `--create` can't fail the coverage check after minutes of video decoding
+    from hackpipe.common.config import source_key
+    from hackpipe.quality.checks import VALID
+    test_sources = {source_key(resolve(p)) for p in dataset_config()["splits"].get("test_sources") or []}
+    in_base = {i for k in ("train", "val", "test") for i in m["demo_ids"][k]}
+    for d in reg.demos(status=VALID):
+        if d["demo_id"] not in in_base and not d["meta"].get("excluded") and d["source"] not in test_sources:
+            eps.setdefault(d["source"], []).append(int(d["episode_index"]))
+    eps = {s: sorted(set(e)) for s, e in eps.items()}
     unknown = [s for s in eps if kind_of(s, cfg) is None]
     if unknown:
         raise RuntimeError(f"No labelling rules for {unknown}: add them to configs/subtasks.yaml → sources")
@@ -421,11 +438,12 @@ def label(base: str, registry: Any = None, review_images: bool | None = None, pr
     index["sha256"] = hashlib.sha256(json.dumps({s: v["sha256"] for s, v in index["sources"].items()},
                                                 sort_keys=True).encode()).hexdigest()
     (tmp / "labels.json").write_text(json.dumps(index, indent=1))
-    out = outputs / f"subtasks-{index['sha256'][:12]}"
+    # folder = labels + the rules that made them + the base, so labels.json's provenance is always its own
+    key = hashlib.sha256(f"{index['sha256']}|{index['code_sha256']}|{base}".encode()).hexdigest()
+    out = outputs / f"subtasks-{key[:12]}"
     if out.exists():
-        shutil.rmtree(tmp)                      # same labels already there
-    else:
-        tmp.rename(out)
+        shutil.rmtree(out)                      # same labels, rules and base: replace (fresh created_at)
+    tmp.rename(out)
     progress(f"labels: {out}")
     return out
 

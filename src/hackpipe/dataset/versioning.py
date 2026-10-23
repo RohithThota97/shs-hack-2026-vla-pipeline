@@ -314,6 +314,9 @@ def create_dataset_version(registry: Registry | None = None, cfg: dict[str, Any]
             warnings.append(f"sub-task labels of {base} dropped: they don't cover the added episodes "
                             "(hackpipe subtasks label, then create again with --subtasks)")
     labels = _subtask_labels(labels_dir, episodes) if labels_dir is not None else None
+    if (base and subtasks is not None and labels and not lineage.get("added") and not lineage.get("removed")
+            and labels["sha256"] == (bm.get("subtasks") or {}).get("sha256")):
+        raise NothingNewError(f"Nothing new since {base}: same demos and the same sub-task labels.")
     if labels:                         # part of the fingerprint: other labels = another version
         preprocessing["subtask_labels"] = {"sha256": labels["sha256"], "label_version": labels["label_version"],
                                            "code_sha256": labels["code_sha256"]}
