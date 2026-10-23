@@ -88,6 +88,7 @@ updates that file.
 
 ## Docs
 
+- [`docs/architecture/`](docs/architecture/pipeline_architecture.png) — pipeline architecture diagram (PNG/SVG for slides)
 - [`docs/plan.md`](docs/plan.md) — goal, scope, model strategy, day plan, GPU schedule
 - [`docs/roles.md`](docs/roles.md) — who owns what
 - [`docs/interfaces.md`](docs/interfaces.md) — data contracts
