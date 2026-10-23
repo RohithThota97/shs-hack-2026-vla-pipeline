@@ -5,8 +5,10 @@
 #   ./scripts/remote/gpu.sh console [state.zip]      import the laptop's state (if given), start the console
 #   ./scripts/remote/gpu.sh console [state.zip] --public    same, plus a public cloudflared link (no SSH needed)
 #   ./scripts/remote/gpu.sh status                   console running? writer? datasets / models
-#   ./scripts/remote/gpu.sh export                   registry + small outputs → ~/gpu_state.zip (for the laptop)
+#   ./scripts/remote/gpu.sh export                   hand over: registry + small outputs → ~/gpu_state.zip, console
+#                                                    stopped, writer role released (refused while a job runs)
 #   ./scripts/remote/gpu.sh stop                     stop the console (training jobs it started keep running)
+#   ./scripts/remote/gpu.sh token                    print the console token (laptop.sh connect reads it)
 #
 # <data folder>: the dataset zips / folders downloaded from the team's Google Drive (never from HF / GitHub).
 # The console listens on 127.0.0.1 only; reach it with `laptop.sh connect` (SSH tunnel) or the --public link.
@@ -21,6 +23,20 @@ mkdir -p "$STATE_DIR"
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 alive() { [[ -f "$1" ]] && kill -0 "$(cat "$1")" 2>/dev/null; }
+versions() {
+  .venv/bin/python -c "
+from hackpipe.common.registry import Registry
+r = Registry()
+print('datasets:', ', '.join(f\"{d['version']} {d['status']}\" for d in r.datasets()) or 'none')
+print('models:  ', ', '.join(f\"{m['version']} {m['status']}\" for m in r.models()) or 'none')"
+}
+running_jobs() {
+  .venv/bin/python -c "
+from hackpipe.common.registry import Registry
+from hackpipe.jobs import runner
+r = Registry(); runner.reconcile(r)
+print(' '.join(f\"{j['job_id']}({j['kind']})\" for j in r.jobs(limit=50) if j['status'] in ('running', 'queued')))"
+}
 
 setup() {
   local data=${1:-}
@@ -57,7 +73,13 @@ if missing:
              "configs/project.yaml → dataset.pinned_names)")
 print("data/raw:", sorted(names))
 EOF
-  .venv/bin/python -m pytest -q 2>&1 | tail -1
+  local out
+  if out=$(.venv/bin/python -m pytest -q 2>&1); then
+    echo "$out" | tail -1
+  else
+    echo "$out" | tail -40
+    echo "WARNING: some tests failed on this machine (above) — send this output to the team before training"
+  fi
   echo
   echo "Setup done. Next: get hackpipe_state.zip from the laptop (laptop.sh send), then"
   echo "  ./scripts/remote/gpu.sh console ~/hackpipe_state.zip"
@@ -68,13 +90,14 @@ console() {
   for a in "$@"; do [[ "$a" == "--public" ]] && public=1 || zip=$a; done
   [[ -x $HP ]] || die "run ./scripts/remote/gpu.sh setup <data folder> first"
   if alive "$STATE_DIR/console.pid"; then
-    echo "console already running (pid $(cat "$STATE_DIR/console.pid")); ./scripts/remote/gpu.sh stop to restart"
+    [[ -z "$zip" ]] || die "the console is running, so $zip was NOT imported: ./scripts/remote/gpu.sh stop, then again"
+    echo "console already running (pid $(cat "$STATE_DIR/console.pid"))"
   else
     if [[ -n "$zip" ]]; then
       [[ -f "$zip" ]] || die "no file $zip"
       $HP state import "$zip" --replace          # the registry here is backed up first; this machine becomes writer
     fi
-    $HP dataset list | grep -E '"version"|"status"' | paste - - || true
+    versions
     .venv/bin/python -c "import secrets; print(secrets.token_urlsafe(16))" > "$STATE_DIR/console_token"
     chmod 600 "$STATE_DIR/console_token"
     HACKPIPE_CONSOLE_TOKEN=$(cat "$STATE_DIR/console_token") STREAMLIT_SERVER_ADDRESS=127.0.0.1 \
@@ -111,15 +134,19 @@ status() {
   alive "$STATE_DIR/console.pid" && echo "console: running (pid $(cat "$STATE_DIR/console.pid"))" || echo "console: stopped"
   alive "$STATE_DIR/tunnel.pid" && echo "public tunnel: running" || true
   $HP writer
-  $HP dataset list | grep -E '"version"|"status"' | paste - - || true
-  $HP jobs 2>/dev/null | tail -5 || true
+  versions
+  echo "running jobs: $(running_jobs)"
   nvidia-smi --query-gpu=name,utilization.gpu,memory.used,memory.total --format=csv
 }
 
 export_state() {
-  $HP state export "$HOME/gpu_state.zip"
+  local busy; busy=$(running_jobs)
+  [[ -z "$busy" ]] || die "jobs still running: $busy — wait for them (or cancel: $HP jobs --cancel <id>) first"
+  stop
+  $HP state export --out "$HOME/gpu_state.zip"
+  $HP writer --release || true            # this machine stops writing; the laptop takes over on import
   echo
-  echo "Stop writing here now (don't train / approve) until the laptop sends a new state back."
+  echo "Handed over: console stopped, writer released. Start again only with a new state from the laptop."
   echo "On the laptop:  ./scripts/remote/laptop.sh fetch $(whoami)@$(hostname)"
   echo "(no SSH: copy ~/gpu_state.zip to Drive; on the laptop: .venv/bin/hackpipe state import <zip> --replace)"
 }
@@ -136,10 +163,11 @@ stop() {
 }
 
 case "${1:-}" in
+  token) cat "$STATE_DIR/console_token" 2>/dev/null || die "no console token: start the console first" ;;
   setup) shift; setup "$@" ;;
   console) shift; console "$@" ;;
   status) status ;;
   export) export_state ;;
   stop) stop ;;
-  *) sed -n '2,12p' "$0"; exit 1 ;;
+  *) sed -n '2,15p' "$0"; exit 1 ;;
 esac
