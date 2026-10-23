@@ -41,6 +41,17 @@ def parse_overrides(pairs: list[str] | None) -> dict[str, Any]:
     return out
 
 
+def set_config_steps(config_path: str | Path, steps: int) -> None:
+    """Write the chosen step budget into the train config (keeps comments); commit it afterwards."""
+    import re
+    p = resolve(config_path)
+    text = p.read_text()
+    new, n = re.subn(r"^(\s*steps:\s*)\d+", rf"\g<1>{int(steps)}", text, count=1, flags=re.MULTILINE)
+    if n != 1:
+        raise ValueError(f"no `steps:` line in {p}")
+    p.write_text(new)
+
+
 def apply_overrides(cfg: dict[str, Any], overrides: dict[str, Any]) -> dict[str, Any]:
     """`seed` and `policy_name` are top-level config keys; everything else is a lerobot-train arg."""
     cfg = {**cfg, "args": dict(cfg.get("args") or {})}
@@ -103,7 +114,9 @@ def preflight() -> None:
 
 
 def train(config_path: str, dataset_version: str, dry_run: bool = False, registry: Registry | None = None,
-          resume_model: str | None = None, overrides: dict[str, Any] | None = None) -> dict[str, Any]:
+          resume_model: str | None = None, overrides: dict[str, Any] | None = None,
+          purpose: str = "model") -> dict[str, Any]:
+    """purpose: "model" or "timing" (a short run to measure speed — registered, but labelled as not a result)."""
     reg = registry or Registry()
     manifest = load_manifest(dataset_version, reg)
     if manifest["status"] != "approved":
@@ -140,6 +153,7 @@ def train(config_path: str, dataset_version: str, dry_run: bool = False, registr
         "command": cmd,
         "output_dir": str(output_dir),
         "environment": environment(),
+        "purpose": purpose,
         "started_at": now_iso(),
         "dry_run": dry_run,
     }
@@ -161,7 +175,8 @@ def train(config_path: str, dataset_version: str, dry_run: bool = False, registr
         reg.set_model_status(version, "training")
     else:
         reg.add_model(version, dataset_version, cfg.get("policy_name", "policy"), "training", str(ckpt),
-                      str(record_path), {"output_dir": str(output_dir), "train_config_file": str(config_path)})
+                      str(record_path), {"output_dir": str(output_dir), "train_config_file": str(config_path),
+                                         "purpose": purpose})
     print(f"{version}: training started — resume after a crash with "
           f"`hackpipe train --dataset {dataset_version} --resume {version}`", flush=True)
     t0 = time.time()

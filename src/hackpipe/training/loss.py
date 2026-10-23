@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime
 from pathlib import Path
 
 _STEP = re.compile(r"\bstep:\s*([0-9.]+)([KMBTQ]?)(?=\s|$)")
 _FIELD = {k: re.compile(rf"(?:^|\s){re.escape(k)}:\s*([-+0-9.eE]+)") for k in
           ("loss", "grdn", "lr", "updt_s", "data_s", "smp/s", "mem_gb", "epch")}
 _MULT = {"": 1, "K": 1_000, "M": 1_000_000, "B": 1_000_000_000, "T": 10**12, "Q": 10**15}
+_TIME = re.compile(r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})")
 
 
 def parse_metrics(text: str, log_freq: int | None = None) -> list[dict[str, float]]:
@@ -27,6 +29,9 @@ def parse_metrics(text: str, log_freq: int | None = None) -> list[dict[str, floa
         if mult > 1 and log_freq and prev is not None and abs(prev + log_freq - printed) <= mult / 2:
             step = prev + log_freq
         row: dict[str, float] = {"step": step}
+        t = _TIME.search(line)
+        if t:                                   # LeRobot's log timestamp (local time, 1 s resolution)
+            row["t"] = datetime.strptime(t.group(1), "%Y-%m-%d %H:%M:%S").timestamp()
         for k, rx in _FIELD.items():
             f = rx.search(line)
             if f:

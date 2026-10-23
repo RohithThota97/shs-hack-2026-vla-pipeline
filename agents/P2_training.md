@@ -51,6 +51,10 @@ Show it to the human.
 
 ## 3 · Timing run (about 15 min)
 
+Console alternative (Colab, notebook step 3b): Train → Timing run → Step budget → Full run. The same commands run
+as GPU jobs, and the page shows s/step, peak memory and data-loading share measured from the log. Commands below
+are the CLI equivalent (add `--purpose timing` so the model is labelled "timing run, not a result").
+
 ```bash
 mkdir -p outputs/logs
 nvidia-smi --query-gpu=memory.used --format=csv -l 10 > outputs/logs/vram_timing.csv &

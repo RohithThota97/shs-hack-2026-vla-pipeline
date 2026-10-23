@@ -54,8 +54,9 @@ def job_box(job: dict, reg: Registry) -> None:
     st.caption(f"{job['job_id']} · {job['needs'].upper()} · {job['machine']}"
                + (" · waiting for the GPU" if job["meta"].get("waiting_for") else ""))
     est = job["estimate_s"]
+    basis = job["meta"].get("estimate_basis")
     st.caption(f"expected {fmt_duration(est)} · elapsed {fmt_duration(el)}"
-               + ("" if est else f" · {job['meta'].get('estimate_basis', '')}"))
+               + ("" if est or not basis else f" · {basis}"))
     if job["status"] == "running" and est and el is not None:
         st.progress(min(el / est, 0.99), text="by expected time (not measured progress)")
     tail = runner.log_tail(job, 8)

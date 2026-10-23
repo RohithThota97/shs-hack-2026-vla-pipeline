@@ -64,6 +64,8 @@ def main(argv: list[str] | None = None) -> None:
     s.add_argument("--register-only", action="store_true", help="register an externally trained checkpoint")
     s.add_argument("--checkpoint")
     s.add_argument("--policy-name")
+    s.add_argument("--purpose", choices=["model", "timing"], default="model",
+                   help="'timing' = short speed measurement, labelled 'timing run, not a result'")
     s.add_argument("--set", action="append", default=[], metavar="KEY=VALUE",
                    help="override a train-config value, e.g. --set steps=200 (repeatable; stored in the run record)")
 
@@ -169,7 +171,7 @@ def main(argv: list[str] | None = None) -> None:
             if not args.config and not args.resume:
                 sys.exit("--config is required")
             rec = t.train(args.config, args.dataset, args.dry_run, reg, resume_model=args.resume,
-                          overrides=t.parse_overrides(args.set))
+                          overrides=t.parse_overrides(args.set), purpose=args.purpose)
             _print({k: rec.get(k) for k in ("model_version", "dataset_version", "output_dir", "exit_code")})
     elif args.cmd == "eval":
         from hackpipe.evaluation.runner import run_suite

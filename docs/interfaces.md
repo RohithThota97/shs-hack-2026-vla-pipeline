@@ -77,7 +77,8 @@ Fingerprint = hash of sorted (demo_id | content_sha256 | file checksums) + `prep
 
 Model version, dataset version + fingerprint, policy, full training config, `overrides` (`--set`), exact
 `lerobot-train` command, output dir, environment (Python, platform, GPU, git commit, packages), start/end time,
-exit code. The model is registered with status `training` before the run starts, then `trained` / `failed`.
+exit code, `purpose` (`model` | `timing`). The model is registered with status `training` before the run starts
+(after a `lerobot-train --help` preflight), then `trained` / `failed`.
 Training metrics: `loss.csv` (+ `loss.png`) next to the run record (`scripts/plot_loss.py`).
 After `hackpipe publish`: `registry.models.meta.hub = {repo_id, private, commit, published_at}`.
 

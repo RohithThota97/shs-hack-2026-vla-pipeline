@@ -4,6 +4,8 @@ Newest first. One line for the decision, one for the reason.
 
 | Date | Decision | Reason |
 |---|---|---|
+| 23 Oct | Colab: uninstall the preinstalled `torchao`; `hackpipe train` preflights `lerobot-train --help` | LeRobot 0.6.1 imports GR00T → diffusers at start-up; Colab's diffusers + old torchao fail (`FqnToConfig`). Reproduced locally; SmolVLA doesn't use torchao |
+| 23 Oct | Console on Colab through a cloudflared quick tunnel with an access token | Free, no account; the URL is public, and the console can start GPU jobs and approvals |
 | 23 Oct | `hackpipe auto`: import → QC of new/changed demos only → next draft based on the latest approved version; a human approves | New demonstrations flow through without manual steps; nothing is checked twice; approval stays human |
 | 23 Oct | Duplicate = same episode index + content hash + file checksums as a demo from another folder | In LeRobot v3 episodes share files, and here all trajectories are identical, so content alone can't tell episodes apart |
 | 23 Oct | ds-vN+1 inherits the base's train/val assignment; only added demos are split; test stays frozen | Versions stay comparable and v1 demos are not re-validated or reshuffled |

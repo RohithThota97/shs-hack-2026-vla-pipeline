@@ -38,16 +38,19 @@ def log_dir() -> Path:
 
 
 def submit(kind: str, argv: list[str], needs: str = "cpu", work_units: float | None = None, label: str = "",
-           registry: Registry | None = None, start: bool = True) -> str:
-    """Record and start a job. Claims the registry writer role for this machine first."""
+           registry: Registry | None = None, start: bool = True, estimate_override: dict | None = None,
+           extra_meta: dict | None = None) -> str:
+    """Record and start a job. Claims the registry writer role for this machine first.
+    estimate_override: {"seconds", "basis"} measured elsewhere (e.g. training: timing run × steps)."""
     if needs not in ("cpu", "gpu"):
         raise ValueError("needs must be 'cpu' or 'gpu'")
     reg = registry or Registry()
     acquire()
     me = machine_id()
     job_id = _next_job_id(reg)
-    est = estimate(kind, work_units, reg, me)
-    reg.add_job(job_id, kind, needs, me, {"argv": argv, "label": label or kind, "estimate_basis": est["basis"]},
+    est = estimate_override or estimate(kind, work_units, reg, me)
+    reg.add_job(job_id, kind, needs, me, {"argv": argv, "label": label or kind, "estimate_basis": est["basis"],
+                                          **(extra_meta or {})},
                 work_units=work_units, estimate_s=est["seconds"])
     reg.update_job(job_id, log_path=str(log_dir() / f"{job_id}.log"))
     if start:
