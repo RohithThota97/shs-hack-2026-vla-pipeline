@@ -90,10 +90,11 @@ def scan_section(reg: Registry, folders: list[str], waiting: list[dict]) -> None
                    "is registered.")
         return
     rows = [{"dataset": p["source"], "where": "data/raw · data/incoming", "episodes": p["episodes"],
-             "new": p["new"], "waiting for QC": p["pending_qc"]} for p in new]
+             "new": p["new"], "waiting for QC": p["pending_qc"], "changed files": p["changed_files"]} for p in new]
     rows += [{"dataset": f"{RAW}/{d['name']}", "where": f"{'zip' if d['kind'] == 'zip' else 'folder'} · "
               f"{source_key(d['path'])} — will be {'unzipped and ' if d['kind'] == 'zip' else ''}linked",
-              "episodes": d["episodes"], "new": d["episodes"], "waiting for QC": 0} for d in waiting]
+              "episodes": d["episodes"], "new": d["episodes"], "waiting for QC": 0, "changed files": 0}
+             for d in waiting]
     st.markdown(f"**{len(rows)} dataset(s) with new demonstrations found**")
     st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
     units = sum(p["work_units"] for p in new)

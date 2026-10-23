@@ -125,7 +125,10 @@ def prune_checkpoints(output_dir: Path, keep: int) -> list[str]:
 def _pruner(output_dir: Path, keep: int, stop: threading.Event, every_s: float = 60) -> threading.Thread:
     def loop() -> None:
         while not stop.wait(every_s):
-            prune_checkpoints(output_dir, keep)
+            try:
+                prune_checkpoints(output_dir, keep)
+            except OSError as e:     # e.g. lerobot renaming files right now: try again next round
+                print(f"checkpoint pruning skipped this round: {e}", flush=True)
     t = threading.Thread(target=loop, daemon=True)
     t.start()
     return t

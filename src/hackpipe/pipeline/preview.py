@@ -32,9 +32,22 @@ def new_folders(registry: Registry | None = None, base: Path = REPO_ROOT, folder
             if errors is not None:
                 errors.append(f"{f}: {type(e).__name__}: {e}")
             continue
-        if p["new"] or p["pending_qc"]:
+        if p["new"] or p["pending_qc"] or p["changed_files"]:
             out.append(p)
     return out
+
+
+def _changed_files(root: Path) -> int:
+    """Data / video files whose size or mtime differ from when they were imported (cheap: stat only)."""
+    from hackpipe.ingest.importer import HashCache
+    cache = HashCache().data
+    n = 0
+    for sub in ("data", "videos"):
+        for f in (root / sub).rglob("*"):
+            if f.is_file():
+                st, hit = f.stat(), cache.get(str(f.resolve()))
+                n += bool(hit and hit["sig"] != [st.st_size, st.st_mtime_ns])
+    return n
 
 
 def preview(root: str, registry: Registry | None = None) -> dict[str, Any]:
@@ -48,6 +61,7 @@ def preview(root: str, registry: Registry | None = None) -> dict[str, Any]:
     registered = {d["episode_index"]: d for d in reg.demos(source=src)}
     new = [i for i in lengths if i not in registered]
     pending = [i for i, d in registered.items() if d["status"] == "imported"]
+    changed = _changed_files(ds.root) if registered else 0
     cams = len(ds.video_keys) or 1
     decode_units = sum(lengths[i] for i in new + pending) * cams
     est = estimate("auto", decode_units, reg, machine_id()) if decode_units else {"seconds": 0, "basis": "nothing to check"}
@@ -55,6 +69,6 @@ def preview(root: str, registry: Registry | None = None) -> dict[str, Any]:
         "source": src, "episodes": n, "frames": int(ds.info.get("total_frames", 0)), "fps": ds.fps,
         "cameras": [k.rsplit(".", 1)[-1] for k in ds.video_keys], "tasks": sorted(ds.tasks().values()),
         "robot_type": ds.robot_type, "codebase_version": ds.info.get("codebase_version"),
-        "new": len(new), "registered": len(registered), "pending_qc": len(pending),
+        "new": len(new), "registered": len(registered), "pending_qc": len(pending), "changed_files": changed,
         "work_units": decode_units, "estimate": est, "needs": "cpu",
     }

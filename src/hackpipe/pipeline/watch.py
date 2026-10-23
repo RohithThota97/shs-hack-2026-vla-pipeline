@@ -36,10 +36,11 @@ def watch_dirs() -> list[Path]:
     return out
 
 
-def pinned_names() -> dict[int, str]:
-    """dataset.pinned_names: {name: episode count} → {episode count: name} (names that keep ds-v1's demo IDs)."""
+def pinned_names() -> dict[tuple[int, int], str]:
+    """dataset.pinned_names: {name: [episodes, frames]} → {(episodes, frames): name} — names that keep ds-v1's
+    demo IDs. Both numbers must match, so another dataset with 84 episodes doesn't take the name."""
     pins = project_config().get("dataset", {}).get("pinned_names") or {}
-    return {int(n): name for name, n in pins.items()}
+    return {(int(v[0]), int(v[1])): name for name, v in pins.items()}
 
 
 def _fp(info: bytes, stats: bytes | None) -> str:
@@ -93,7 +94,8 @@ def linked(base: Path = REPO_ROOT) -> dict[str, str]:
 
 
 def link_name(info: dict[str, Any], path: str | Path) -> str:
-    return pinned_names().get(int(info.get("total_episodes", -1))) or dataset_name(path)
+    key = (int(info.get("total_episodes", -1)), int(info.get("total_frames", -1)))
+    return pinned_names().get(key) or dataset_name(path)
 
 
 def unlinked(base: Path = REPO_ROOT, dirs: list[Path] | None = None) -> list[dict[str, Any]]:

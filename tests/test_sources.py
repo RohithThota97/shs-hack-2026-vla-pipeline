@@ -211,3 +211,74 @@ def test_missing_packages(monkeypatch):
     monkeypatch.setitem(sources.CLOUD_NEEDS, "s3", "definitely_not_installed_xyz")
     assert sources.missing_packages("local") == []
     assert "definitely_not_installed_xyz" in sources.missing_packages("cloud", "s3://b/x")
+
+
+def test_symlinked_folder_in_data_raw_is_used_in_place(tmp_path):
+    real = make_dataset(tmp_path / "cache" / "night", n_episodes=2)
+    repo = tmp_path / "repo"
+    (repo / "data" / "raw").mkdir(parents=True)
+    link = repo / "data" / "raw" / "night"
+    link.symlink_to(real, target_is_directory=True)
+    assert sources.fetch("local", str(link), base=repo) == [link]
+    assert not (repo / "data" / "incoming").exists()
+
+
+def test_uploaded_zip_kept_when_it_holds_no_dataset(tmp_path):
+    repo = tmp_path / "repo"
+    up = repo / "data" / "incoming" / "_uploads" / "bad.zip"
+    up.parent.mkdir(parents=True)
+    with zipfile.ZipFile(up, "w") as f:
+        f.writestr("readme.txt", "no dataset here")
+    with pytest.raises(FileNotFoundError):
+        sources.fetch("local", str(up), name="bad", base=repo)
+    assert up.exists()                                   # the user can fix the name and retry
+    ds = make_dataset(tmp_path / "ds", n_episodes=2)
+    good = up.with_name("good.zip")
+    with zipfile.ZipFile(good, "w") as f:
+        for p in ds.rglob("*"):
+            f.write(p, p.relative_to(ds).as_posix())
+    sources.fetch("local", str(good), name="good", base=repo)
+    assert not good.exists()                             # removed only after a successful check
+
+
+@pytest.mark.parametrize("src", ["--upload-pack=touch /tmp/x", "-c core.sshCommand=x"])
+def test_git_options_are_not_accepted_as_repo(src):
+    with pytest.raises(ValueError):
+        sources.github_url(src)
+
+
+def test_console_key_removed_when_fetch_fails_early(workspace, tmp_path, monkeypatch):
+    monkeypatch.setattr(sources, "KEY_DIR", tmp_path / "keys")
+    (tmp_path / "keys").mkdir()
+    key = tmp_path / "keys" / "gcs-1.json"
+    key.write_text("{}")
+    monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", str(key))
+    from hackpipe.cli import main
+    with pytest.raises(ValueError):                      # bad name: fails before fetch_cloud runs
+        main(["fetch", "--from", "cloud", "gs://b/x", "--name", "../x"])
+    assert not key.exists()
+
+
+def test_partial_auto_is_not_a_failed_job(capsys):
+    from hackpipe.cli import _exit_for
+    _exit_for({"sources": [{"source": "a"}], "errors": [{"source": "b", "error": "bad"}]})   # no exit
+    assert "skipped b" in capsys.readouterr().err
+    with pytest.raises(SystemExit):
+        _exit_for({"sources": [], "errors": [{"source": "b", "error": "bad"}]})
+
+
+def test_changed_files_are_found_without_hashing(workspace, monkeypatch):
+    import os
+    import hackpipe.pipeline.preview as pv
+    from hackpipe.ingest.importer import import_demos
+    tmp, reg = workspace
+    monkeypatch.setattr(pv, "REPO_ROOT", tmp)
+    root = make_dataset(tmp / "data" / "raw" / "a", n_episodes=4)
+    import_demos(str(root), reg)
+    from hackpipe.quality.report import run_qc
+    run_qc(str(root), reg)
+    assert pv.preview(str(root), reg)["changed_files"] == 0
+    f = next((root / "data").rglob("*.parquet"))
+    os.utime(f, ns=(f.stat().st_atime_ns, f.stat().st_mtime_ns + 10**9))
+    assert pv.preview(str(root), reg)["changed_files"] == 1
+    assert [p["source"] for p in pv.new_folders(reg, tmp)] == [pv.source_key(root)]

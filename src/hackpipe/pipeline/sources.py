@@ -98,8 +98,6 @@ def fetch_local(src: str, dest: Path, copy: bool = False) -> None:
         raise FileNotFoundError(src)
     if p.is_file() and p.suffix == ".zip":
         extract_zip(p, dest)
-        if p.parent.name == "_uploads":         # uploaded from the console: the extracted copy is enough
-            p.unlink()
     elif copy:
         shutil.copytree(p, dest)
     else:
@@ -126,6 +124,8 @@ def _git_env() -> dict[str, str]:
 def github_url(src: str) -> str:
     """owner/repo, github.com/owner/repo or a full URL → https clone URL."""
     s = src.strip().removesuffix("/")
+    if s.startswith("-"):
+        raise ValueError(f"not a repository: {src!r}")
     if re.fullmatch(r"[\w.-]+/[\w.-]+", s):
         return f"https://github.com/{s.removesuffix('.git')}.git"
     if s.startswith("github.com/"):
@@ -143,11 +143,13 @@ def fetch_github(src: str, dest: Path, revision: str | None = None) -> None:
     if revision and re.fullmatch(r"[0-9a-f]{7,40}", revision):     # a commit: --branch can't take it
         dest.mkdir(parents=True)
         subprocess.run([*git, "init", "-q"], check=True, env=env)
-        subprocess.run([*git, "remote", "add", "origin", github_url(src)], check=True, env=env)
-        subprocess.run([*git, "fetch", "--depth", "1", "origin", revision], check=True, env=env)
+        subprocess.run([*git, "remote", "add", "--", "origin", github_url(src)], check=True, env=env)
+        subprocess.run([*git, "fetch", "--depth", "1", "--", "origin", revision], check=True, env=env)
         subprocess.run([*git, "checkout", "-q", "FETCH_HEAD"], check=True, env=env)
     else:
-        subprocess.run(["git", "clone", "--depth", "1", *(["--branch", revision] if revision else []),
+        if revision and revision.startswith("-"):
+            raise ValueError(f"not a branch / tag: {revision!r}")
+        subprocess.run(["git", "clone", "--depth", "1", *(["--branch", revision] if revision else []), "--",
                         github_url(src), str(dest)], check=True, env=env)
     if _uses_lfs(dest):                       # datasets keep videos/parquet in LFS
         if not shutil.which("git-lfs"):
@@ -233,9 +235,14 @@ def fetch_cloud(url: str, dest: Path) -> None:
         else:
             fs.get(path + "/", str(dest), recursive=True)
     finally:
-        key = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "")
-        if key and Path(key).parent == KEY_DIR:      # a key typed into the console: used once, then removed
-            Path(key).unlink(missing_ok=True)
+        drop_console_key()
+
+
+def drop_console_key() -> None:
+    """A GCS key uploaded in the console is used once: remove it (also when the fetch failed earlier)."""
+    key = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "")
+    if key and Path(key).parent == KEY_DIR:
+        Path(key).unlink(missing_ok=True)
 
 
 NEEDS = {"hf": ["huggingface_hub"], "gdrive": ["gdown"], "cloud": ["fsspec"]}
@@ -259,9 +266,9 @@ def fetch(kind: str, src: str, name: str | None = None, revision: str | None = N
     if kind not in KINDS:
         raise ValueError(f"kind must be one of {KINDS}")
     if kind == "local":
-        p = local_path(src)
-        homes = [(base / d).resolve() for d in SEARCH_DIRS]
-        if p.is_dir() and any(p.resolve() == h or h in p.resolve().parents for h in homes):
+        p = local_path(src)              # not resolved: data/raw/<name> is usually a symlink to the real files
+        homes = [Path(os.path.abspath(base / d)) for d in SEARCH_DIRS]
+        if p.is_dir() and any(p == h or h in p.parents for h in homes):
             return _check(p)
     auto_name = kind == "gdrive" and not name           # the link has no name in it: use the one on Drive
     dest = _dest(name or (f"gdrive-{gdrive_id(src)[1][:10]}" if auto_name else dataset_name(src)), base)
@@ -272,6 +279,9 @@ def fetch(kind: str, src: str, name: str | None = None, revision: str | None = N
                "gdrive": lambda: fetch_gdrive(src, dest),
                "cloud": lambda: fetch_cloud(src, dest)}[kind]()
         roots = _check(dest)
+        up = local_path(src) if kind == "local" else None
+        if up is not None and up.suffix == ".zip" and up.parent.name == "_uploads":
+            up.unlink()                     # uploaded from the console: the checked, extracted copy is enough
         if auto_name and got and got != dest.name and not (dest.parent / got).exists():
             final = _dest(got, base)
             dest.rename(final)

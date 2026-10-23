@@ -14,6 +14,17 @@ def _print(obj) -> None:
     print(json.dumps(obj, indent=2, default=str))
 
 
+def _exit_for(out: dict) -> None:
+    """auto over several folders: fail the job only if no folder went through; otherwise warn in the log."""
+    errs = out.get("errors") or []
+    if not errs:
+        return
+    for e in errs:
+        print(f"WARNING: skipped {e['source']}: {e['error']}", file=sys.stderr)
+    if not out.get("sources"):
+        sys.exit(1)
+
+
 def _writes(args) -> bool:
     """Commands that change the registry claim the writer role first (see common/writelock.py)."""
     if args.cmd in ("ingest", "qc", "auto", "demo", "eval", "gates", "deploy", "rollback"):
@@ -185,23 +196,26 @@ def main(argv: list[str] | None = None) -> None:
         else:
             out = run_auto_many(args.root, reg, args.notes)
         _print(out)
-        if out.get("errors"):
-            sys.exit(1)
+        _exit_for(out)
     elif args.cmd == "watch":
         from hackpipe.pipeline.watch import unlinked, watch_dirs
         _print({"watch_dirs": [str(d) for d in watch_dirs()], "not_linked": unlinked()})
     elif args.cmd == "fetch":
+        import signal
         from hackpipe.common.config import source_key
-        from hackpipe.pipeline.sources import fetch
-        roots = fetch(args.kind, args.src, args.name, args.revision, args.subdir, args.copy)
+        from hackpipe.pipeline.sources import drop_console_key, fetch
+        signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))   # cancel from the console → finally runs
+        try:
+            roots = fetch(args.kind, args.src, args.name, args.revision, args.subdir, args.copy)
+        finally:
+            drop_console_key()
         for r in roots:
             print(f"found dataset: {source_key(r)}")
         if args.auto:
             from hackpipe.pipeline.auto import run_auto_many
             out = run_auto_many([str(r) for r in roots], reg)
             _print(out)
-            if out.get("errors"):
-                sys.exit(1)
+            _exit_for(out)
     elif args.cmd == "demo":
         from hackpipe.dataset.versioning import set_excluded
         set_excluded(args.demo_id, args.action == "exclude", args.reason, args.by, reg)

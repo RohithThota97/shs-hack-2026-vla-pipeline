@@ -58,8 +58,8 @@ def test_link_refuses_a_different_dataset_with_the_same_name(layout):
 
 def test_pinned_names_by_episode_count(layout, monkeypatch):
     repo, org = layout
-    monkeypatch.setattr(watch, "pinned_names", lambda: {6: "fr3_rand_pinned"})
-    assert watch.unlinked(repo, [org])[0]["name"] == "fr3_rand_pinned"
+    monkeypatch.setattr(watch, "pinned_names", lambda: {(6, 180): "fr3_rand_pinned", (3, 999): "not_this"})
+    assert [d["name"] for d in watch.unlinked(repo, [org])] == ["fr3_rand_pinned", "zip_only"]
 
 
 def test_watch_dirs_env_and_globs(tmp_path, monkeypatch):
