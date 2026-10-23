@@ -92,3 +92,50 @@ def test_offline_rate_from_run(tmp_path):
     (out / "train_config.json").write_text(json.dumps({"args": {"rate_hz": 6, "chunk": 20}}))
     assert model_rate({"meta": {"trainer": "curriculum", "output_dir": str(out)}}, 30) == (6.0, 20)
     assert model_rate({"meta": {"trainer": "lerobot-train", "output_dir": str(out)}}, 30) == (30.0, None)
+
+
+def test_eval_cli_keeps_adapter_flag(workspace, dataset):
+    from hackpipe.cli import main
+    from hackpipe.dataset.versioning import approve, create_dataset_version
+    from hackpipe.ingest.importer import ingest
+    from hackpipe.quality.report import run_qc
+    from hackpipe.training.train import register_external
+    tmp, reg = workspace
+    ingest(dataset, reg)
+    run_qc(dataset, reg)
+    create_dataset_version(reg)
+    approve("ds-v1", reg, by="t")
+    m = register_external(str(tmp / "ck"), "ds-v1", "p", reg)
+    main(["eval", "--model", m, "--adapter", "dummy"])           # was parsed onto `state` by mistake
+    assert reg.evals()
+
+
+def test_model_and_card_paths_stay_portable(workspace, monkeypatch):
+    import sqlite3
+
+    from hackpipe.common.config import project_config, resolve
+    tmp, reg = workspace
+    out = resolve(project_config()["project"]["outputs_dir"])
+    reg.add_model("m-v1", "ds-v1", "p", "trained", "/content/repo/outputs/train/m-v1/checkpoints/last/pretrained_model",
+                  "/content/repo/outputs/runs/m-v1/run_record.json", {"output_dir": "/content/repo/outputs/train/m-v1"})
+    m = reg.get_model("m-v1")                                     # a Colab row read here → this machine's outputs
+    assert m["checkpoint_dir"] == str(out / "train" / "m-v1" / "checkpoints" / "last" / "pretrained_model")
+    assert m["meta"]["output_dir"] == str(out / "train" / "m-v1")
+    reg.update_model_meta("m-v1", {"x": 1})
+    raw = sqlite3.connect(reg.path).execute("SELECT meta FROM models").fetchone()[0]
+    assert "/content/repo/outputs/train/m-v1" in raw               # stored value untouched by the update
+
+
+def test_state_replace_drops_stale_outputs_and_prunes_backups(workspace, tmp_path, monkeypatch):
+    from hackpipe.common import state
+    from hackpipe.common.config import project_config, resolve
+    tmp, reg = workspace
+    reg.close()
+    z = state.export(tmp / "s.zip")["zip"]
+    out = resolve(project_config()["project"]["outputs_dir"])
+    (out / "runs" / "m-old").mkdir(parents=True)
+    (out / "runs" / "m-old" / "offline_eval_test.json").write_text("{}")
+    for _ in range(5):
+        state.import_state(z, replace=True)
+    assert not (out / "runs" / "m-old").exists()                   # replaced, not mixed in
+    assert len(list(resolve(project_config()["project"]["registry_path"]).parent.glob("backup-*"))) == state.KEEP_BACKUPS

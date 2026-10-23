@@ -144,6 +144,8 @@ def main(argv: list[str] | None = None) -> None:
     s.add_argument("--split", choices=["test", "val"], default="test", help="with --offline")
     s.add_argument("--every", type=int, default=3, help="with --offline: every N-th frame on the policy's rate grid")
     s.add_argument("--batch", type=int, default=8, help="with --offline")
+    s.add_argument("--adapter", choices=["organizer", "dummy"], default="organizer",
+                   help="'dummy' gives FAKE results for pipeline testing only")
 
     s = sub.add_parser("state", help="move registry + dataset outputs between machines (laptop <-> Colab)")
     st_sub = s.add_subparsers(dest="action", required=True)
@@ -152,8 +154,6 @@ def main(argv: list[str] | None = None) -> None:
     im = st_sub.add_parser("import", help="unpack an export here (backs up the current registry first)")
     im.add_argument("zip")
     im.add_argument("--replace", action="store_true", help="replace a registry that already has data")
-    s.add_argument("--adapter", choices=["organizer", "dummy"], default="organizer",
-                   help="'dummy' gives FAKE results for pipeline testing only")
 
     for name, helptext in (("gates", "R6 quality gates"), ("card", "R7 quality statement"),
                            ("improve", "R11/B recommendations")):
@@ -196,6 +196,10 @@ def main(argv: list[str] | None = None) -> None:
             _print(writelock.acquire(force=True))
         else:
             _print({"writer": writelock.holder(), "this_machine": writelock.machine_id()})
+        return
+    if args.cmd == "state":           # before the registry is opened: import replaces the file itself
+        from hackpipe.common import state
+        _print(state.export(args.out) if args.action == "export" else state.import_state(args.zip, args.replace))
         return
     if _writes(args):
         from hackpipe.common import writelock
@@ -321,9 +325,6 @@ def main(argv: list[str] | None = None) -> None:
             from hackpipe.common.config import project_config
             from hackpipe.sim.camera_gap import camera_gap
             _print(camera_gap(args.snapshots, args.source or project_config()["dataset"]["root"], args.out))
-    elif args.cmd == "state":
-        from hackpipe.common import state
-        _print(state.export(args.out) if args.action == "export" else state.import_state(args.zip, args.replace))
     elif args.cmd == "eval" and args.offline:
         from hackpipe.evaluation.offline import offline_eval
         r = offline_eval(args.model, reg, args.split, args.every, args.batch)

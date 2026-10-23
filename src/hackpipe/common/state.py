@@ -29,16 +29,19 @@ def _paths() -> tuple[Path, Path]:
     return resolve(cfg["registry_path"]), resolve(cfg["outputs_dir"])
 
 
+KEEP_BACKUPS = 3
+
+
 def summary(db: Path) -> dict[str, Any]:
-    con = sqlite3.connect(db)
+    from hackpipe.common.registry import Registry
+    reg = Registry(db)
     try:
-        q = lambda sql: con.execute(sql).fetchall()  # noqa: E731
-        return {"demos": q("SELECT COUNT(*) FROM demos")[0][0],
-                "datasets": [{"version": v, "status": s, "fingerprint": f}
-                             for v, s, f in q("SELECT version, status, fingerprint FROM datasets ORDER BY created_at")],
-                "models": [v for (v,) in q("SELECT version FROM models ORDER BY created_at")]}
+        return {"demos": len(reg.demos()),
+                "datasets": [{"version": d["version"], "status": d["status"], "fingerprint": d["fingerprint"]}
+                             for d in reg.datasets()],
+                "models": [m["version"] for m in reg.models()]}
     finally:
-        con.close()
+        reg.close()
 
 
 def export(out_zip: str | Path) -> dict[str, Any]:
@@ -84,12 +87,16 @@ def import_state(zip_path: str | Path, replace: bool = False) -> dict[str, Any]:
                 raise FileExistsError(f"{db} already has {have['demos']} demos and versions "
                                       f"{[d['version'] for d in have['datasets']]}; import with --replace "
                                       "(it is backed up first)")
-            backup = db.parent / f"backup-{now_iso().replace(':', '')}"
-            backup.mkdir(parents=True)
+            import datetime
+            backup = db.parent / f"backup-{datetime.datetime.now():%Y%m%dT%H%M%S%f}"
+            backup.mkdir(parents=True, exist_ok=True)
             shutil.copy2(db, backup / "registry.db")
             for part in OUTPUT_PARTS:
                 if (outputs / part).is_dir():
                     shutil.copytree(outputs / part, backup / "outputs" / part)
+                    shutil.rmtree(outputs / part)        # replaced, not mixed with the imported state
+            for old in sorted(db.parent.glob("backup-*"))[:-KEEP_BACKUPS]:   # Drive quota: keep the last few
+                shutil.rmtree(old, ignore_errors=True)
         db.parent.mkdir(parents=True, exist_ok=True)
         with z.open("registry/registry.db") as f, open(db, "wb") as out:
             shutil.copyfileobj(f, out)

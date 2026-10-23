@@ -26,6 +26,30 @@ def portable(path: str | Path) -> str:
     return p.as_posix()
 
 
+def local_path(p: str | None) -> str | None:
+    """A stored path on this machine: as is if it exists; a path from another checkout (…/outputs/… or
+    …/registry/…, e.g. /content/repo/outputs/train/m-v3 read on a laptop) under this checkout's folders."""
+    if not p:
+        return p
+    q = resolve(p)
+    if q.exists():
+        return str(q)
+    parts = Path(p).parts
+    if "outputs" in parts:
+        rest = parts[len(parts) - 1 - parts[::-1].index("outputs") + 1:]
+        return str(resolve(project_config()["project"]["outputs_dir"]).joinpath(*rest))
+    return str(q)
+
+
+MODEL_META_PATHS = ("output_dir", "train_config_file")
+
+
+def _model_paths(row: dict[str, Any]) -> dict[str, Any]:
+    meta = {**row["meta"], **{k: local_path(row["meta"][k]) for k in MODEL_META_PATHS if row["meta"].get(k)}}
+    return {**row, "checkpoint_dir": local_path(row["checkpoint_dir"]),
+            "run_record_path": local_path(row["run_record_path"]), "meta": meta}
+
+
 def _dataset_paths(row: dict[str, Any]) -> dict[str, Any]:
     """Absolute manifest / card paths for this machine: this machine's <outputs>/datasets/<version>/ copy when
     there is one (registry and outputs move together, `hackpipe state`), else the stored path — so rows written
@@ -187,9 +211,10 @@ class Registry:
         self.conn.commit()
 
     def update_dataset_meta(self, version: str, extra: dict[str, Any]) -> None:
-        d = self.get_dataset(version)
-        if d is None:
+        rows = self._rows("SELECT * FROM datasets WHERE version=?", (version,))   # stored meta, not this machine's paths
+        if not rows:
             raise KeyError(version)
+        d = rows[0]
         self.conn.execute("UPDATE datasets SET meta=? WHERE version=?",
                           (json.dumps({**d["meta"], **extra}, default=str), version))
         self.conn.commit()
@@ -204,8 +229,11 @@ class Registry:
     # ---------- models ----------
     def add_model(self, version: str, dataset_version: str, policy_name: str, status: str,
                   checkpoint_dir: str | None, run_record_path: str | None, meta: dict[str, Any]) -> None:
+        meta = {**meta, **{k: portable(meta[k]) for k in MODEL_META_PATHS if meta.get(k)}}
         self.conn.execute("INSERT INTO models VALUES (?,?,?,?,?,?,?,?)",
-                          (version, dataset_version, policy_name, status, checkpoint_dir, run_record_path,
+                          (version, dataset_version, policy_name, status,
+                           portable(checkpoint_dir) if checkpoint_dir else checkpoint_dir,
+                           portable(run_record_path) if run_record_path else run_record_path,
                            json.dumps(meta, default=str), now_iso()))
         self.conn.commit()
 
@@ -214,19 +242,20 @@ class Registry:
         self.conn.commit()
 
     def update_model_meta(self, version: str, extra: dict[str, Any]) -> None:
-        m = self.get_model(version)
-        if m is None:
+        rows = self._rows("SELECT * FROM models WHERE version=?", (version,))
+        if not rows:
             raise KeyError(version)
+        m = rows[0]
         self.conn.execute("UPDATE models SET meta=? WHERE version=?",
                           (json.dumps({**m["meta"], **extra}, default=str), version))
         self.conn.commit()
 
     def get_model(self, version: str) -> dict[str, Any] | None:
         rows = self._rows("SELECT * FROM models WHERE version=?", (version,))
-        return rows[0] if rows else None
+        return _model_paths(rows[0]) if rows else None
 
     def models(self) -> list[dict[str, Any]]:
-        return self._rows("SELECT * FROM models ORDER BY created_at")
+        return [_model_paths(r) for r in self._rows("SELECT * FROM models ORDER BY created_at")]
 
     # ---------- evaluations ----------
     def add_eval(self, eval_id: str, model_version: str, test_suite: str, env_version: str,

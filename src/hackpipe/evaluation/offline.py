@@ -39,8 +39,23 @@ def model_rate(model: dict[str, Any], fps: float) -> tuple[float, int | None]:
     return float(fps), None
 
 
-def eval_tables(manifest: dict[str, Any], split: str, rate_hz: float) -> list[dict[str, Any]]:
-    """Frame tables of the split's episodes with sub-task labels (labelled on the fly — the test source has none)."""
+def model_sources(model: dict[str, Any], manifest: dict[str, Any]) -> list[str]:
+    """Folder names the model was trained on: the curriculum's train_sources, else the version's trainable ones."""
+    from hackpipe.dataset.versioning import trainable_sources
+    from hackpipe.training.curriculum import source_names
+    cfg_file = resolve(model["meta"].get("output_dir") or ".") / "train_config.json"
+    if model["meta"].get("trainer") == "curriculum" and cfg_file.exists():
+        names = source_names((json.loads(cfg_file.read_text()).get("args") or {}).get("train_sources"))
+        if names:
+            return names
+        return sorted({Path(s).name for s in (manifest.get("subtasks") or {}).get("sources", {})})
+    return [Path(s).name for s in trainable_sources(manifest)[0]]
+
+
+def eval_tables(manifest: dict[str, Any], split: str, rate_hz: float,
+                sources: list[str] | None = None) -> list[dict[str, Any]]:
+    """Frame tables of the split's episodes with sub-task labels (labelled on the fly — the test source has none).
+    sources: folder names to include (None = all of the split)."""
     from hackpipe.common.config import project_config as pc
     from hackpipe.dataset.subtasks import Joints, kind_of, label_source, subtasks_config
     from hackpipe.training.curriculum import build_table
@@ -48,7 +63,10 @@ def eval_tables(manifest: dict[str, Any], split: str, rate_hz: float) -> list[di
     j = Joints(cfg)
     eps: dict[str, list[int]] = defaultdict(list)
     for s, i in manifest["episodes"][split]:
-        eps[s].append(int(i))
+        if sources is None or Path(s).name in sources:
+            eps[s].append(int(i))
+    if not eps:
+        raise RuntimeError(f"no {split} episodes of {sources} in {manifest.get('version')}")
     tables = []
     for src, e in sorted(eps.items()):
         kind = kind_of(src, cfg) or kind_of(pc()["dataset"]["root"], cfg)
@@ -73,6 +91,9 @@ def score(tables: list[dict[str, Any]], predict: Callable[[dict[str, Any], np.nd
             for b in range(0, len(rows), batch):
                 rs = rows[b:b + batch]
                 pred = np.asarray(predict(t, rs, mode), np.float64)
+                if pred.ndim != 3 or pred.shape[1] < chunk:
+                    raise ValueError(f"the policy returned {pred.shape[1:2]} actions per prediction, expected "
+                                     f"{chunk}: set the chunk to the checkpoint's chunk_size")
                 for k, r in enumerate(rs):
                     idx, pad, _ = chunk_for(t, r, m, chunk, "mask")
                     valid = ~pad
@@ -113,7 +134,11 @@ def lerobot_predictor(checkpoint: Path, tables: list[dict[str, Any]], device: st
     @torch.no_grad()
     def predict(t: dict[str, Any], rows: np.ndarray, mode: str) -> np.ndarray:
         items = [lr[t["name"]][int(t["abs_index"][r])] for r in rows]
-        batch = {c: torch.stack([it[c] for it in items]) for c in cams if c in items[0]}
+        missing = [c for c in cams if c not in items[0]]
+        if missing:
+            raise KeyError(f"the policy expects cameras {missing}, {t['name']} has "
+                           f"{[k for k in items[0] if 'image' in k]}")
+        batch = {c: torch.stack([it[c] for it in items]) for c in cams}
         batch["observation.state"] = torch.from_numpy(np.stack([t["S"][r] for r in rows]))
         batch["task"] = [str(t["full_text"][r] if mode == "full" else t["sub_text"][r]) for r in rows]
         policy.reset()
@@ -136,11 +161,14 @@ def offline_eval(model_version: str, registry: Registry | None = None, split: st
     if not (ckpt / "config.json").exists():
         raise FileNotFoundError(f"no checkpoint at {ckpt} (config.json missing)")
     m = load_manifest(model["dataset_version"], reg)
-    first_src = next(iter(m["episodes"][split]), [None])[0]
-    if first_src is None:
-        raise RuntimeError(f"{model['dataset_version']} has no {split} episodes")
-    rate, chunk = model_rate(model, DatasetFolder(resolve(first_src)).fps)
-    tables = eval_tables(m, split, rate)
+    # val: only what the model was trained on; test: the held-out sources (same task, never trained on)
+    names = (model_sources(model, m) if split == "val"
+             else sorted({Path(s).name for s, _ in m["episodes"]["test"]}))
+    srcs = sorted({s for s, _ in m["episodes"][split] if Path(s).name in names})
+    if not srcs:
+        raise RuntimeError(f"{model['dataset_version']} has no {split} episodes of {names}")
+    rate, chunk = model_rate(model, DatasetFolder(resolve(srcs[0])).fps)
+    tables = eval_tables(m, split, rate, names)
     predict, ck_chunk = lerobot_predictor(ckpt, tables, device)
     res = score(tables, predict, int(chunk or ck_chunk or 50), every, batch, progress)
     res.update({"model": model_version, "checkpoint": str(ckpt), "dataset_version": model["dataset_version"],
