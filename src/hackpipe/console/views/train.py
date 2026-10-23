@@ -73,7 +73,7 @@ if not approved:
     st.info("Approve a dataset version first (Data → Versions).")
 else:
     ranked = ranking.ranking(reg)
-    best = ranking.best_model(reg)
+    best = ranking.best_model(reg, ranked)
     mode = st.radio("How to train", [MANUAL, AUTO], horizontal=True,
                     help="Automatic: the best model so far (sim success → offline test error → final loss) is the "
                          "starting checkpoint, with its own config and overrides; only the dataset is yours to pick.")
@@ -141,6 +141,9 @@ else:
                     "another seed). To compare, pick another config — or switch to **Automatic** to fine-tune the "
                     "best model.")
     cfg = load_yaml(cfg_path)
+    best_ov = {k: v for k, v in (best_rec.get("overrides") or {}).items() if k != "policy.path"}
+    plan_ov = {k: best_ov.pop(k) for k in ("curriculum", "no_curriculum") if k in best_ov}
+    cfg = apply_overrides(cfg, plan_ov)       # the plan editor and baseline toggle start from the best model's plan
     args = cfg.get("args") or {}
     curriculum = is_curriculum(cfg)
     _train_src, _data_only = trainable_sources(manifest)
@@ -148,8 +151,7 @@ else:
         st.caption(f"{ds} trains on {', '.join(f'`{x}`' for x in _train_src)}; kept as data only (other "
                    f"fps / schema, not trained): {', '.join(f'`{x}`' for x in _data_only)}. The curriculum "
                    "config (`smolvla_curriculum.yaml`) trains both at one rate.")
-    prefill = "\n".join(f"{k}={json.dumps(v) if isinstance(v, (dict, list, bool)) else v}"
-                        for k, v in (best_rec.get("overrides") or {}).items() if k != "policy.path")
+    prefill = "\n".join(f"{k}={json.dumps(v)}" for k, v in best_ov.items())    # JSON is YAML: values round-trip
     ov_text = st.text_area("Overrides (`key=value`, one per line — stored in the run record)"
                            + (f" — prefilled with {init_from}'s" if init_from else ""), value=prefill, height=68,
                            placeholder="batch_size=4", key=f"ov-{init_from or 'manual'}")
@@ -199,6 +201,8 @@ else:
                 overrides["curriculum"] = edited
             if baseline != bool(args.get("no_curriculum")):
                 overrides["no_curriculum"] = baseline
+            for k, v in plan_ov.items():          # unchanged in the editor: still the best model's plan
+                overrides.setdefault(k, v)
             if not blocked:
                 try:
                     plan_info = cur.describe(apply_overrides(cfg, overrides), manifest)
@@ -214,7 +218,7 @@ else:
                                          plan_info["sample_mix"])]), hide_index=True, use_container_width=True)
                 st.caption(f"{plan_info['rate_hz']} Hz, {plan_info['chunk']} actions per prediction · train episodes "
                            + ", ".join(f"`{s}` {n}" for s, n in plan_info["train_episodes"].items()))
-    ov_list = [f"{k}={json.dumps(v) if isinstance(v, (dict, list, bool)) else v}" for k, v in overrides.items()]
+    ov_list = [f"{k}={json.dumps(v)}" for k, v in overrides.items()]
     batch = int(overrides.get("batch_size", args.get("batch_size", 8)))
     save_freq = int(overrides.get("save_freq", args.get("save_freq", 1000)))
     log_freq = int(overrides.get("log_freq", args.get("log_freq", 50)))
@@ -226,8 +230,8 @@ else:
 
     # ---------- start bar ----------
     target = int(overrides.get("steps", args.get("steps", 0)))
-    tj = next((j for j in reg.jobs(kind="train_timing", limit=20) if j["status"] == "done"), None)
-    t = progress.timing_summary(tj, tj["meta"].get("log_freq", log_freq)) if tj else None
+    done_tj = next((j for j in reg.jobs(kind="train_timing", limit=20) if j["status"] == "done"), None)
+    done_t = t = progress.timing_summary(done_tj, done_tj["meta"].get("log_freq", log_freq)) if done_tj else None
     est = ({"seconds": progress.expected_seconds(target, t["seconds_per_step"], t["startup_s"]),
             "basis": f"timing run {t['job_id']}: {t['seconds_per_step']} s/step × {target} steps + start-up"}
            if t and t["seconds_per_step"] else None)
@@ -286,7 +290,7 @@ else:
         if st.button("Start timing run (200 steps)", type="primary", disabled=not (gpus and ok) or bool(blocked),
                      help=why or blocked or (None if gpus else "needs a GPU")):
             jid = runner.submit("train_timing", runner.hackpipe_cmd(
-                "train", "--config", cfg_path, "--dataset", ds, "--purpose", "timing",
+                "train", "--config", cfg_path, "--dataset", ds, "--purpose", "timing", *init_args,
                 *set_args(ov_list + ["steps=200", "save_freq=200"]
                           + (["stage_end_eval=false", "val_every=1000000"] if curriculum else []))),
                 needs="gpu", work_units=200, label=f"Timing run · {ds}", registry=reg,
@@ -313,8 +317,7 @@ else:
 
     # ---------- Step budget ----------
     with tabs[2]:
-        tj = next((j for j in reg.jobs(kind="train_timing", limit=20) if j["status"] == "done"), None)
-        t = progress.timing_summary(tj, tj["meta"].get("log_freq", log_freq)) if tj else None
+        tj, t = done_tj, done_t
         if not t or not t["seconds_per_step"]:
             st.info("Needs a finished timing run (seconds per step are measured, never assumed).")
         else:

@@ -119,3 +119,33 @@ def test_curriculum_val_l1_when_no_loss_csv(workspace, dataset):
         {"step": 1000, "stage": "s4", "h/full": {"l1_norm": 0.3}, "h/sub": {"l1_norm": 0.5}}]}))
     s = ranking.score(reg.get_model("m-v1"), reg)
     assert s["tier"] == "loss" and s["value"] == pytest.approx(0.4) and s["label"] == "validation L1 0.4000"
+
+
+def test_review_guards(workspace, dataset, monkeypatch):
+    from hackpipe.training import ranking
+    from hackpipe.training.train import train
+    tmp, reg = _approved(workspace, dataset)
+    _model(reg, tmp, "m-v1", loss=float("nan"))                         # diverged run: never best
+    _model(reg, tmp, "m-v2", loss=0.9)
+    assert ranking.best_model(reg)["model"]["version"] == "m-v2"
+    _model(reg, tmp, "m-v3", offline=(0.06, 0.12))                       # 50% of hold-still
+    _model(reg, tmp, "m-v4", offline=(0.04, 0.05))                       # 80%: lower rad, worse ratio
+    assert ranking.best_model(reg)["model"]["version"] == "m-v3"
+    reg.update_model_meta("m-v3", {"train_config_file": "configs/train/gone.yaml"})
+    assert "not found" in ranking.score(reg.get_model("m-v3"), reg)["why_not"]
+    rec = train("configs/train/act.yaml", "ds-v1", dry_run=True, registry=reg, init_from="m-v2")
+    assert not any(c.startswith("--policy.type") for c in rec["command"])
+
+
+def test_leakage_follows_fine_tune_chain(workspace, dataset, monkeypatch):
+    from hackpipe.training import ranking
+    tmp, reg = _approved(workspace, dataset)
+    _model(reg, tmp, "m-v1")
+    _model(reg, tmp, "m-v2")
+    reg.update_model_meta("m-v2", {"init_from": "m-v1"})
+    reg.conn.execute("UPDATE models SET dataset_version='ds-v2' WHERE version='m-v2'")
+    mans = {"ds-v1": {"episodes": {"train": [["data/raw/a", 3]], "val": []}},
+            "ds-v2": {"episodes": {"train": [["data/raw/b", 0]], "val": []}}}
+    monkeypatch.setattr("hackpipe.dataset.versioning.load_manifest", lambda v, r=None: mans[v])
+    target = {"episodes": {"test": [["data/raw/a", 3]]}}
+    assert ranking.init_leakage(reg.get_model("m-v2"), target, reg) == [("a", 3)]

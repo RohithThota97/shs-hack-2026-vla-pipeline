@@ -202,6 +202,7 @@ def train(config_path: str, dataset_version: str, dry_run: bool = False, registr
         if leak:
             raise RuntimeError(f"{init_from} was trained on {len(leak)} test episodes of {dataset_version} "
                                f"(e.g. {leak[:3]}): its scores on this test split would not be honest")
+        cfg["args"].pop("policy.type", None)          # the checkpoint's config sets the type
         cfg["args"]["policy.path"] = str(resolve(init["checkpoint_dir"]))
     outputs = resolve(project_config()["project"]["outputs_dir"])
 
