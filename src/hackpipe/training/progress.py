@@ -12,7 +12,7 @@ from statistics import mean
 from typing import Any
 
 from hackpipe.common.registry import Registry
-from hackpipe.dataset.versioning import load_manifest
+from hackpipe.dataset.versioning import load_manifest, trainable_sources
 from hackpipe.training.loss import parse_metrics
 
 
@@ -67,9 +67,11 @@ def expected_seconds(steps: int, seconds_per_step: float, startup_s: float | Non
 
 
 def train_frames(dataset_version: str, registry: Registry) -> int:
+    """Frames training reads: train demos of the trainable sources (a data-only subtask is not trained)."""
     m = load_manifest(dataset_version, registry)
-    ids = set(m["demo_ids"]["train"])
-    return sum(int(d["meta"].get("n_frames", 0)) for d in registry.demos() if d["demo_id"] in ids)
+    ids, used = set(m["demo_ids"]["train"]), set(trainable_sources(m)[0])
+    return sum(int(d["meta"].get("n_frames", 0)) for d in registry.demos()
+               if d["demo_id"] in ids and d["source"] in used)
 
 
 def epochs(steps: int, batch_size: int, frames: int) -> float | None:

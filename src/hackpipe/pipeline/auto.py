@@ -11,7 +11,8 @@ from typing import Any
 
 from hackpipe.common.config import source_key
 from hackpipe.common.registry import Registry
-from hackpipe.dataset.versioning import NothingNewError, create_dataset_version, latest_approved
+from hackpipe.dataset.versioning import (NothingNewError, create_dataset_version, latest_approved, needs_merge,
+                                         trainable_sources)
 from hackpipe.ingest.importer import import_demos
 from hackpipe.quality.report import run_qc
 
@@ -56,7 +57,8 @@ def _next_version(reg: Registry, out: dict[str, Any], changed: bool, notes: str)
     out.update({"version": m["version"], "fingerprint": m["fingerprint"],
                 "counts": {k: len(v) for k, v in m["demo_ids"].items()},
                 "inherited": len(lin.get("inherited", [])), "added": len(lin.get("added", [])),
-                "removed": len(lin.get("removed", [])), "needs_materialize": m["needs_materialize"],
+                "removed": len(lin.get("removed", [])), "needs_materialize": needs_merge(m),
+                "data_only_sources": trainable_sources(m)[1],
                 "reason": f"{m['version']} is waiting for approval."})
     return out
 

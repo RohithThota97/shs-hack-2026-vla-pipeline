@@ -18,7 +18,8 @@ from hackpipe.common.config import project_config, resolve, source_key
 from hackpipe.common.lerobot_io import DatasetFolder
 from hackpipe.common.registry import Registry
 from hackpipe.console.theme import TOKENS, badge
-from hackpipe.dataset.versioning import approve, frozen_test_ids, set_excluded
+from hackpipe.dataset.versioning import (approve, frozen_test_ids, needs_merge, schema_diff, set_excluded,
+                                         trainable_sources)
 from hackpipe.jobs import runner
 from hackpipe.jobs.estimates import fmt_duration
 from hackpipe.pipeline.preview import candidate_folders, new_folders, preview
@@ -522,11 +523,14 @@ def versions_tab(reg: Registry) -> None:
             st.markdown(f"Test split {'unchanged (frozen) ✓' if test_ok else 'differs from the frozen test ✗'} · "
                         "leakage guard passed ✓ · " + (f"removed {len(lin['removed'])} demo(s)"
                                                        if lin.get("removed") else "nothing removed"))
-            if m.get("mixed_schemas"):
-                fps = sorted({f"{s['fps']:g} fps" for s in m["preprocessing"].get("per_source_schema", {}).values()})
-                st.info(f"Sources differ in fps / schema ({', '.join(fps)}): kept together as data — this "
-                        "version can't be merged or trained as one folder (training on it not decided yet).")
-            elif m.get("needs_materialize"):
+            train_src, data_only = trainable_sources(m)
+            if data_only:
+                diff = ", ".join(schema_diff(m["preprocessing"].get("per_source_schema", {})))
+                st.info(f"Sources differ ({diff}). Training uses {', '.join(f'`{x}`' for x in train_src)}; "
+                        f"kept as data only: {', '.join(f'`{x}`' for x in data_only)}.")
+            for w in m.get("warnings") or []:
+                st.warning(w)
+            if needs_merge(m):
                 st.info("Several sources: before training, run `hackpipe dataset materialize "
                         f"{d['version']}` on the GPU machine (merges them into one folder)."
                         + (" ✓ done" if m.get("materialized") else ""))

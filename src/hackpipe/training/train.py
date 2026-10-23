@@ -20,7 +20,7 @@ from hackpipe.common.config import load_yaml, project_config, resolve
 from hackpipe.common.envinfo import environment
 from hackpipe.common.ids import next_version, now_iso
 from hackpipe.common.registry import Registry
-from hackpipe.dataset.versioning import load_manifest
+from hackpipe.dataset.versioning import load_manifest, needs_merge, trainable_sources
 
 
 def _fmt(v: Any) -> str:
@@ -71,20 +71,22 @@ def apply_overrides(cfg: dict[str, Any], overrides: dict[str, Any]) -> dict[str,
 def training_input(manifest: dict[str, Any], dataset_root: str | None = None) -> dict[str, Any]:
     """Which folder, repo id and episode indices training reads: the merged folder for multi-source versions,
     else the version's single source (falling back to the project dataset root for old manifests)."""
+    train, data_only = trainable_sources(manifest)
     mat = manifest.get("materialized")
     if mat:
-        return {"repo_id": mat["repo_id"], "root": str(resolve(mat["root"])), "episodes": mat["splits"]["train"]}
-    if manifest.get("mixed_schemas"):
-        raise RuntimeError(f"{manifest['version']} mixes datasets with different fps / schemas "
-                           f"({', '.join(manifest.get('sources') or [])}); LeRobot can't merge them into one "
-                           "training folder. Train from a single-schema version (e.g. ds-v1) — training on the "
-                           "mixed data is not decided yet (docs/decisions.md).")
-    if manifest.get("needs_materialize"):
+        return {"repo_id": mat["repo_id"], "root": str(resolve(mat["root"])), "episodes": mat["splits"]["train"],
+                "data_only_sources": data_only}
+    if data_only and len(train) == 1:      # mixed version: train on the main-schema source, skip the subtask
+        eps = sorted(i for s, i in manifest["episodes"]["train"] if s == train[0])
+        return {"repo_id": manifest["repo_id"], "root": str(resolve(train[0])), "episodes": eps,
+                "data_only_sources": data_only}
+    if needs_merge(manifest):
         raise RuntimeError(f"{manifest['version']} has several sources; merge them first: "
                            f"hackpipe dataset materialize {manifest['version']}")
     src = manifest.get("source")
     root = str(resolve(src)) if src else dataset_root
-    return {"repo_id": manifest["repo_id"], "root": root, "episodes": manifest["splits"]["train"]}
+    return {"repo_id": manifest["repo_id"], "root": root, "episodes": manifest["splits"]["train"],
+            "data_only_sources": data_only}
 
 
 def build_command(train_cfg: dict[str, Any], manifest: dict[str, Any], output_dir: Path, job_name: str,
