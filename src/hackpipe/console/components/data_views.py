@@ -73,10 +73,43 @@ def _scan(folders: tuple[str, ...], n_demos: int, n_imported: int) -> tuple[list
     return new_folders(Registry(), folders=list(folders), errors=errors), errors
 
 
+def _drop_stale_uploads(d: Path, reg: Registry) -> None:
+    """Uploads older than a day that no queued / running job uses (abandoned picks; a fetch removes its own)."""
+    busy = {a for s in ("queued", "running") for j in reg.jobs(status=s) for a in j["meta"].get("argv", [])}
+    for old in d.glob("*.zip"):
+        try:
+            if str(old) not in busy and time.time() - old.stat().st_mtime > 86400:
+                old.unlink()
+        except OSError:          # removed meanwhile by a finishing fetch
+            pass
+
+
+def _dir_stamp() -> tuple:
+    """Changes when something is linked / fetched into data/raw or data/incoming (directory mtimes)."""
+    out = []
+    for d in ("data/raw", "data/incoming"):
+        try:
+            out.append(resolve(d).stat().st_mtime_ns)
+        except OSError:
+            out.append(None)
+    return tuple(out)
+
+
 @st.cache_data(ttl=20, show_spinner=False)
-def _folders() -> list[str]:
-    """candidate_folders() walks data/raw + data/incoming (maybe a Drive mount): not on every click."""
+def _folders_cached(stamp: tuple) -> list[str]:
     return candidate_folders()
+
+
+def _folders() -> list[str]:
+    """candidate_folders() walks data/raw + data/incoming (maybe a Drive mount): cached, but refreshed as soon as
+    a dataset is linked or fetched there."""
+    return _folders_cached(_dir_stamp())
+
+
+def _forget_scans() -> None:
+    """After starting a job that adds datasets: rescan on the next render instead of showing them as waiting."""
+    for f in (_folders_cached, _unlinked, _scan):
+        f.clear()
 
 
 @st.cache_data(ttl=20, show_spinner=False)
@@ -110,6 +143,7 @@ def scan_section(reg: Registry, folders: list[str], waiting: list[dict]) -> None
         jid = runner.submit("auto", runner.hackpipe_cmd("auto", "--all"), work_units=units or None,
                             label=f"Pipeline · {len(rows)} dataset(s)", registry=reg)
         st.success(f"Started {jid}: link new ones as {RAW}/<name> → import → QC (new only) → one draft version.")
+        _forget_scans()
 
 
 def fetch_section(reg: Registry) -> None:
@@ -133,12 +167,7 @@ def fetch_section(reg: Registry) -> None:
             if up.file_id not in saved:        # write each upload once, even after the job removed the zip
                 d = resolve("data/incoming/_uploads")
                 d.mkdir(parents=True, exist_ok=True)
-                for old, _ in saved.values():  # an earlier pick in this session that was never fetched
-                    Path(old).unlink(missing_ok=True)
-                saved.clear()
-                for old in d.glob("*.zip"):    # abandoned in an earlier session (a day old)
-                    if time.time() - old.stat().st_mtime > 86400:
-                        old.unlink(missing_ok=True)
+                _drop_stale_uploads(d, reg)
                 dest = d / f"{dataset_name(up.name)}-{up.file_id[:8]}.zip"
                 with open(dest, "wb") as out:
                     shutil.copyfileobj(up, out, 16 << 20)
@@ -207,6 +236,7 @@ def fetch_section(reg: Registry) -> None:
         jid = runner.submit("fetch", argv, label=f"Fetch · {name.strip() or dataset_name(src)}", registry=reg,
                             env=env)
         st.success(f"Started {jid}: fetch → import → QC (new only) → draft version. Follow it in the jobs panel.")
+        _forget_scans()
 
 
 def link_panel(reg: Registry, d: dict) -> None:
@@ -226,6 +256,7 @@ def link_panel(reg: Registry, d: dict) -> None:
                  help=why or None):
         argv = runner.hackpipe_cmd("auto", "--link", d["path"], "--name", name.strip())
         jid = runner.submit("auto", argv, label=f"Pipeline · {name.strip()}", registry=reg)
+        _forget_scans()
         st.success(f"Started {jid}. Follow it in the jobs panel; the result appears under Versions.")
 
 

@@ -311,7 +311,7 @@ def test_gdrive_throttled_files_are_kept_and_retry_gets_only_the_rest(tmp_path, 
     with pytest.raises(RuntimeError, match="could not be downloaded"):
         sources.fetch("gdrive", link, base=repo)
     part = sources.partial_dir(link, repo)
-    kept = [p for p in part.rglob("*") if p.is_file()]
+    kept = [p for p in part.rglob("*") if p.is_file() and p.name != ".listing.json"]
     n_refused = len(g.calls) - len(kept)
     assert n_refused >= 1 and kept                        # everything except the refused files is kept
     assert sources.find_roots(repo / "data" / "incoming") == []      # an unfinished download is not a dataset
@@ -319,3 +319,40 @@ def test_gdrive_throttled_files_are_kept_and_retry_gets_only_the_rest(tmp_path, 
     roots = sources.fetch("gdrive", link, base=repo)
     assert len(g2.calls) == n_refused                     # only the missing files
     assert roots == [repo / "data" / "incoming" / "rand" / "rand"] and not part.exists()
+
+
+def test_gdrive_retry_starts_over_when_folder_changed(tmp_path, monkeypatch):
+    link = "https://drive.google.com/drive/folders/1QVcgaNooB0MHn6Dj"
+    repo = tmp_path / "repo"
+    _fake_gdown(monkeypatch, tmp_path, folder_name="rand", refuse={".parquet"})
+    with pytest.raises(RuntimeError):
+        sources.fetch("gdrive", link, base=repo)
+    part = sources.partial_dir(link, repo)
+    stale = part / "rand" / "old_file.json"
+    stale.write_text("{}")
+    (part / ".listing.json").write_text("[]")              # pretend the first attempt saw another listing
+    g = _fake_gdown(monkeypatch, tmp_path, folder_name="rand")
+    roots = sources.fetch("gdrive", link, base=repo)
+    assert len(g.calls) == 3 and not (roots[0] / "old_file.json").exists()
+    assert not (roots[0].parent / ".listing.json").exists()
+
+
+def test_gdrive_no_access_leaves_no_partial_folder(tmp_path, monkeypatch):
+    _fake_gdown(monkeypatch, tmp_path, error=True)
+    repo = tmp_path / "repo"
+    with pytest.raises(RuntimeError):
+        sources.fetch("gdrive", "https://drive.google.com/drive/folders/1QVcgaNooB0MHn6Dj", base=repo)
+    assert not (repo / "data" / "incoming" / "_partial").exists()
+
+
+def test_github_branch_named_like_a_commit(tmp_path):
+    src = tmp_path / "src"
+    ds = make_dataset(tmp_path / "tmpds", n_episodes=2)
+    files = {str(p.relative_to(ds.parent)): (p.read_text(errors="replace") if p.suffix == ".json" else "x")
+             for p in ds.rglob("*") if p.is_file()}
+    _git_repo(src, files)
+    subprocess.run(["git", "-C", str(src), "branch", "cafe123"], check=True)
+    subprocess.run(["git", "-C", str(src), "branch", "release/abc1234"], check=True)
+    assert sources.fetch("github", f"file://{src}", name="b", revision="cafe123", base=tmp_path / "repo")
+    with pytest.raises(subprocess.CalledProcessError):     # abc1234 is not a commit here, nor an exact ref
+        sources.fetch("github", f"file://{src}", name="c", revision="abc1234", base=tmp_path / "repo")

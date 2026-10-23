@@ -143,9 +143,12 @@ def fetch_github(src: str, dest: Path, revision: str | None = None) -> None:
     if revision and revision.startswith("-"):
         raise ValueError(f"not a branch / tag / commit: {revision!r}")
     url = github_url(src)
-    is_ref = bool(revision) and bool(subprocess.run(
-        ["git", "ls-remote", "--heads", "--tags", "--", url, revision], check=True, env=env,
-        capture_output=True, text=True).stdout.strip())
+    hexrev = bool(revision) and re.fullmatch(r"[0-9a-f]{7,40}", revision) is not None
+    is_ref = True
+    if hexrev:              # a branch / tag named like a commit? ls-remote matches ref name endings: compare exactly
+        refs = subprocess.run(["git", "ls-remote", "--heads", "--tags", "--", url], check=True, env=env,
+                              capture_output=True, text=True).stdout.split()
+        is_ref = any(r in (f"refs/heads/{revision}", f"refs/tags/{revision}") for r in refs)
     if revision and not is_ref and re.fullmatch(r"[0-9a-f]{40}", revision):   # full commit: shallow fetch by SHA
         dest.mkdir(parents=True)
         subprocess.run([*git, "init", "-q"], check=True, env=env)
@@ -153,14 +156,14 @@ def fetch_github(src: str, dest: Path, revision: str | None = None) -> None:
         subprocess.run([*git, "fetch", "--depth", "1", "--", "origin", revision], check=True, env=env)
         subprocess.run([*git, "checkout", "-q", "FETCH_HEAD"], check=True, env=env)
     elif revision and not is_ref and re.fullmatch(r"[0-9a-f]{7,39}", revision):
-        # short commit (as GitHub shows it): servers only fetch full SHAs, so clone and check it out
-        subprocess.run(["git", "clone", "-q", "--", url, str(dest)], check=True, env=env)
-        subprocess.run([*git, "checkout", "-q", revision], check=True, env=env)
+        # short commit (as GitHub shows it): servers only fetch full SHAs. History without file contents
+        # (--filter=blob:none, no LFS smudge), then only that commit's files are downloaded on checkout.
+        subprocess.run(["git", "clone", "-q", "--filter=blob:none", "--no-checkout", "--", url, str(dest)],
+                       check=True, env={**env, "GIT_LFS_SKIP_SMUDGE": "1"})
+        subprocess.run([*git, "checkout", "-q", revision], check=True, env={**env, "GIT_LFS_SKIP_SMUDGE": "1"})
     else:
-        if revision and revision.startswith("-"):
-            raise ValueError(f"not a branch / tag: {revision!r}")
         subprocess.run(["git", "clone", "--depth", "1", *(["--branch", revision] if revision else []), "--",
-                        github_url(src), str(dest)], check=True, env=env)
+                        url, str(dest)], check=True, env=env)
     if _uses_lfs(dest):                       # datasets keep videos/parquet in LFS
         if not shutil.which("git-lfs"):
             raise RuntimeError("this repo stores files in Git LFS: install git-lfs (brew / apt install git-lfs), "
@@ -203,9 +206,21 @@ def _gdrive_folder(gdown, fid: str, part: Path) -> None:
     """List the folder once, then download only files that aren't on disk yet. Google refuses some files after
     many downloads of a shared link ('too many accesses'); those are counted, the rest is kept for a retry."""
     from gdown.exceptions import DownloadError
+    import json
     files = gdown.download_folder(id=fid, output=str(part) + "/", skip_download=True, quiet=True)
     if not files:
         raise RuntimeError(NO_ACCESS)
+    listing = sorted([f.id, f.path] for f in files)
+    mark = part / ".listing.json"                    # what the kept files belong to
+    try:
+        before = json.loads(mark.read_text())
+    except (OSError, ValueError):
+        before = None
+    if before is not None and before != listing:     # the folder changed on Drive since the first attempt
+        print("Drive folder changed since the last attempt: starting over", flush=True)
+        for p in part.iterdir():
+            shutil.rmtree(p) if p.is_dir() else p.unlink()
+    mark.write_text(json.dumps(listing))
     missing = [f for f in files if not Path(f.local_path).is_file()]
     print(f"Drive folder: {len(files)} files, {len(files) - len(missing)} already here, {len(missing)} to download",
           flush=True)
@@ -219,9 +234,10 @@ def _gdrive_folder(gdown, fid: str, part: Path) -> None:
             print(f"failed: {f.path}: {str(e).strip().splitlines()[0]}", flush=True)
     if failed:
         raise RuntimeError(
-            f"{len(failed)} of {len(files)} files could not be downloaded — Google limits downloads of shared links "
-            f"('too many accesses'). The other {len(files) - len(failed)} are kept in {part}: run the same fetch "
-            "again later (only the missing files are fetched), or share the dataset as one zip instead.")
+            f"{len(failed)} of {len(files)} files could not be downloaded. Usually Google's limit on downloads of "
+            "shared links ('too many accesses') — or those files aren't shared themselves (check their sharing). "
+            f"The other {len(files) - len(failed)} are kept in {part}: run the same fetch again later (only the "
+            "missing files are fetched), or share the dataset as one zip instead.")
 
 
 def fetch_gdrive(src: str, dest: Path, base: Path = REPO_ROOT) -> str:
@@ -241,14 +257,17 @@ def fetch_gdrive(src: str, dest: Path, base: Path = REPO_ROOT) -> str:
             _gdrive_folder(gdown, fid, part)
         else:
             out = gdown.download(id=fid, output=str(part) + "/", quiet=False, resume=True)
-    except DownloadError as e:      # a file without access → FileURLRetrievalError; a folder → "status code 401"
-        if isinstance(e, FileURLRetrievalError) or re.search(r"status code 40[13]", str(e)):
-            if not any(part.rglob("*")):
-                part.rmdir()
-                _rmdir_if_empty(part.parent)
+    except BaseException as e:
+        if not any(p.name != ".listing.json" for p in part.rglob("*")):    # nothing downloaded: leave nothing
+            shutil.rmtree(part, ignore_errors=True)
+            _rmdir_if_empty(part.parent)
+        # a file without access → FileURLRetrievalError; a folder → "status code 401"
+        if isinstance(e, FileURLRetrievalError) or (isinstance(e, DownloadError)
+                                                    and re.search(r"status code 40[13]", str(e))):
             raise RuntimeError(NO_ACCESS) from e
         raise
     if kind == "folder":
+        (part / ".listing.json").unlink(missing_ok=True)
         kids = [p for p in part.iterdir() if p.is_dir()]        # gdown puts the files in <part>/<folder name>/
         name = kids[0].name if len(kids) == 1 else dataset_name(src)
         part.rename(dest)
