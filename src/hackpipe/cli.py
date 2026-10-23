@@ -132,14 +132,11 @@ def main(argv: list[str] | None = None) -> None:
                    help="'timing' = short speed measurement, labelled 'timing run, not a result'")
     s.add_argument("--set", action="append", default=[], metavar="KEY=VALUE",
                    help="override a train-config value, e.g. --set steps=200 (repeatable; stored in the run record)")
-    s.add_argument("--then-eval", action="store_true",
-                   help="after a successful run: offline eval on the test split (same job, same GPU)")
     s.add_argument("--init-from", metavar="MODEL_VERSION",
                    help="fine-tune: start from this model's checkpoint (config defaults to the model's own)")
 
     s = sub.add_parser("eval", help="R5 run the test suite")
-    s.add_argument("--model", required=True, help="model version; with --offline also 'pending' = every finished "
-                                                   "model without an offline eval yet")
+    s.add_argument("--model", required=True)
     s.add_argument("--suite", default="configs/eval/test_suite_v1.yaml")
     s.add_argument("--import", dest="import_results", metavar="RESULTS_JSON",
                    help="import an Isaac Sim run (eval_isaac.py results.json) instead of running the suite")
@@ -149,9 +146,6 @@ def main(argv: list[str] | None = None) -> None:
     s.add_argument("--split", choices=["test", "val"], default="test", help="with --offline")
     s.add_argument("--every", type=int, default=3, help="with --offline: every N-th frame on the policy's rate grid")
     s.add_argument("--batch", type=int, default=8, help="with --offline")
-    s.add_argument("--no-robustness", action="store_true", help="with --offline: skip the robustness variants")
-    s.add_argument("--replay", metavar="REPLAY_JSON",
-                   help="with --import: eval_isaac.py --mode replay result of the same scene (sim sanity check)")
     s.add_argument("--adapter", choices=["organizer", "dummy"], default="organizer",
                    help="'dummy' gives FAKE results for pipeline testing only")
 
@@ -167,9 +161,6 @@ def main(argv: list[str] | None = None) -> None:
                            ("improve", "R11/B recommendations")):
         s = sub.add_parser(name, help=helptext)
         s.add_argument("--eval", required=True, dest="eval_id")
-
-    s = sub.add_parser("verdict", help="post-training verdict: offline + sim gates -> DEPLOY / MORE TRAINING / HOLD")
-    s.add_argument("--model", required=True)
 
     s = sub.add_parser("deploy", help="R10 gated deployment")
     s.add_argument("--model", required=True)
@@ -322,14 +313,6 @@ def main(argv: list[str] | None = None) -> None:
             rec = t.train(args.config, args.dataset, args.dry_run, reg, resume_model=args.resume,
                           overrides=t.parse_overrides(args.set), purpose=args.purpose, init_from=args.init_from)
             _print({k: rec.get(k) for k in ("model_version", "dataset_version", "output_dir", "exit_code")})
-            if args.then_eval and not args.dry_run and args.purpose == "model" and rec.get("exit_code") == 0:
-                from hackpipe.evaluation.offline import offline_eval
-                try:                          # training succeeded; an eval failure must not fail the job
-                    r = offline_eval(rec["model_version"], reg)
-                    _print({"offline_eval": r["file"], "executed_arm_mean": (r.get("executed") or {}).get("arm_mean")})
-                except Exception as e:  # noqa: BLE001
-                    print(f"training finished, but the offline eval failed: {type(e).__name__}: {e} — run it again "
-                          f"from the Evaluate page (hackpipe eval --model {rec['model_version']} --offline)", flush=True)
     elif args.cmd == "sim":
         if args.action == "reference":
             from hackpipe.sim.reference import write_reference
@@ -345,23 +328,13 @@ def main(argv: list[str] | None = None) -> None:
             from hackpipe.sim.camera_gap import camera_gap
             _print(camera_gap(args.snapshots, args.source or project_config()["dataset"]["root"], args.out))
     elif args.cmd == "eval" and args.offline:
-        from hackpipe.evaluation.offline import offline_eval, pending
-        todo = pending(reg, args.split) if args.model == "pending" else [args.model]
-        if not todo:
-            print("nothing pending: every finished model has an offline eval")
-        for mv in todo:
-            r = offline_eval(mv, reg, args.split, args.every, args.batch, robustness=not args.no_robustness)
-            _print({"model": mv, "file": r["file"], "predictions": r["predictions"], "seconds": r["seconds"],
-                    "executed_arm_mean": (r.get("executed") or {}).get("arm_mean"),
-                    "gripper_hit_rate": (r.get("gripper_events") or {}).get("hit_rate"),
-                    "summary": [x for x in r["rows"] if x["subtask"].endswith("· all")]})
-    elif args.cmd == "verdict":
-        from hackpipe.gates.verdict import verdict
-        v = verdict(args.model, reg)
-        _print({k: v[k] for k in ("model", "verdict", "online_state", "todo")})
+        from hackpipe.evaluation.offline import offline_eval
+        r = offline_eval(args.model, reg, args.split, args.every, args.batch)
+        _print({"file": r["file"], "predictions": r["predictions"], "seconds": r["seconds"],
+                "summary": [x for x in r["rows"] if x["subtask"].endswith("· all")]})
     elif args.cmd == "eval" and args.import_results:
         from hackpipe.evaluation.sim_import import import_results
-        r = import_results(args.model, args.suite, args.import_results, args.gifs, reg, replay=args.replay)
+        r = import_results(args.model, args.suite, args.import_results, args.gifs, reg)
         m = r["metrics"]
         _print({"eval_id": r["eval_id"], "results_dir": r["results_dir"], "task_success": m["task_success"],
                 "stage_counts_0to4": m["stage_counts_0to4"]})
