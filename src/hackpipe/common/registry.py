@@ -12,6 +12,37 @@ from typing import Any
 from hackpipe.common.config import project_config, resolve
 from hackpipe.common.ids import now_iso
 
+def portable(path: str | Path) -> str:
+    """Repo-relative inside the repo (the same on a laptop and on Colab), absolute otherwise."""
+    p = Path(path)
+    if not p.is_absolute():
+        return p.as_posix()
+    from hackpipe.common.config import REPO_ROOT
+    for root in {REPO_ROOT, REPO_ROOT.resolve()}:
+        try:
+            return p.relative_to(root).as_posix()
+        except ValueError:
+            continue
+    return p.as_posix()
+
+
+def _dataset_paths(row: dict[str, Any]) -> dict[str, Any]:
+    """Absolute manifest / card paths for this machine: this machine's <outputs>/datasets/<version>/ copy when
+    there is one (registry and outputs move together, `hackpipe state`), else the stored path — so rows written
+    on another checkout (e.g. /Users/… read on Colab) still resolve."""
+    out_dir = resolve(project_config()["project"]["outputs_dir"]) / "datasets" / row["version"]
+
+    def here(p: str | None, name: str) -> str | None:
+        if p is None:
+            return None
+        return str(out_dir / name if (out_dir / name).exists() else resolve(p))
+
+    row = {**row, "manifest_path": here(row["manifest_path"], "manifest.json")}
+    if row["meta"].get("card"):
+        row["meta"] = {**row["meta"], "card": here(row["meta"]["card"], "dataset_card.md")}
+    return row
+
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS demos (
     demo_id TEXT PRIMARY KEY,
@@ -143,8 +174,10 @@ class Registry:
 
     # ---------- datasets ----------
     def add_dataset(self, version: str, fingerprint: str, manifest_path: str, meta: dict[str, Any]) -> None:
+        meta = {**meta, **({"card": portable(meta["card"])} if meta.get("card") else {})}
         self.conn.execute("INSERT INTO datasets VALUES (?,?,?,?,?,?)",
-                          (version, fingerprint, "draft", manifest_path, json.dumps(meta, default=str), now_iso()))
+                          (version, fingerprint, "draft", portable(manifest_path), json.dumps(meta, default=str),
+                           now_iso()))
         self.conn.commit()
 
     def set_dataset_status(self, version: str, status: str) -> None:
@@ -163,10 +196,10 @@ class Registry:
 
     def get_dataset(self, version: str) -> dict[str, Any] | None:
         rows = self._rows("SELECT * FROM datasets WHERE version=?", (version,))
-        return rows[0] if rows else None
+        return _dataset_paths(rows[0]) if rows else None
 
     def datasets(self) -> list[dict[str, Any]]:
-        return self._rows("SELECT * FROM datasets ORDER BY created_at")
+        return [_dataset_paths(r) for r in self._rows("SELECT * FROM datasets ORDER BY created_at")]
 
     # ---------- models ----------
     def add_model(self, version: str, dataset_version: str, policy_name: str, status: str,

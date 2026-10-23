@@ -88,3 +88,18 @@ hackpipe eval --model m-vN --suite configs/eval/sim_handover_v1.yaml --import ev
 ```
 
 `eval --import` refuses runs whose lighting isn't lighting10's, or whose `n_action_steps` differs from the suite's.
+
+## Quick T4 run on Colab (laptop registry ↔ Drive)
+
+The laptop and Colab don't share a folder, so the registry moves as one zip (paths inside are portable):
+
+```bash
+# laptop: approve ds-v3 in the console (Data → Versions), then
+hackpipe state export --out hackpipe_state.zip        # upload to Drive: shs-hack-2026/state_import/
+# Colab: notebooks/colab_train.ipynb steps 0–5, then section Q (Q1 imports it, Q4 trains batch 4 × 2000 steps,
+#        Q5 runs `hackpipe eval --offline`, Q6 exports to shs-hack-2026/state_export/colab_state.zip)
+# laptop: download colab_state.zip, then
+hackpipe state import colab_state.zip --replace       # backs up the laptop registry first; writer role moves back
+```
+
+Only one machine writes at a time: after exporting, don't change the laptop registry until you import Colab's back.
