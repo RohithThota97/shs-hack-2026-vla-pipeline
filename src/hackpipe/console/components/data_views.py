@@ -5,6 +5,7 @@ import json
 import os
 import secrets
 import shutil
+import time
 from pathlib import Path
 
 import numpy as np
@@ -73,6 +74,12 @@ def _scan(folders: tuple[str, ...], n_demos: int, n_imported: int) -> tuple[list
 
 
 @st.cache_data(ttl=20, show_spinner=False)
+def _folders() -> list[str]:
+    """candidate_folders() walks data/raw + data/incoming (maybe a Drive mount): not on every click."""
+    return candidate_folders()
+
+
+@st.cache_data(ttl=20, show_spinner=False)
 def _unlinked(folders: tuple[str, ...], dirs: tuple[str, ...]) -> list[dict]:
     """Datasets in the watch dirs not linked yet (re-scanned when data/raw, data/incoming or the dirs change)."""
     return unlinked(dirs=[Path(d) for d in dirs])
@@ -126,6 +133,12 @@ def fetch_section(reg: Registry) -> None:
             if up.file_id not in saved:        # write each upload once, even after the job removed the zip
                 d = resolve("data/incoming/_uploads")
                 d.mkdir(parents=True, exist_ok=True)
+                for old, _ in saved.values():  # an earlier pick in this session that was never fetched
+                    Path(old).unlink(missing_ok=True)
+                saved.clear()
+                for old in d.glob("*.zip"):    # abandoned in an earlier session (a day old)
+                    if time.time() - old.stat().st_mtime > 86400:
+                        old.unlink(missing_ok=True)
                 dest = d / f"{dataset_name(up.name)}-{up.file_id[:8]}.zip"
                 with open(dest, "wb") as out:
                     shutil.copyfileobj(up, out, 16 << 20)
@@ -222,7 +235,7 @@ def add_tab(reg: Registry) -> None:
                 "demos the registry hasn't seen is listed here. **Run pipeline** imports it, "
                 "checks only new or changed demos, recognises duplicates and creates the next draft dataset "
                 "version for your approval.")
-    folders = candidate_folders()
+    folders = _folders()
     waiting = _unlinked(tuple(folders), tuple(str(d) for d in watch_dirs()))
     scan_section(reg, folders, waiting)
     with st.expander("Bring in a dataset from elsewhere — this machine, upload, Hugging Face, GitHub, Drive, "

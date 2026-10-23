@@ -140,12 +140,22 @@ def _uses_lfs(repo: Path) -> bool:
 def fetch_github(src: str, dest: Path, revision: str | None = None) -> None:
     env = _git_env()
     git = ["git", "-C", str(dest)]
-    if revision and re.fullmatch(r"[0-9a-f]{7,40}", revision):     # a commit: --branch can't take it
+    if revision and revision.startswith("-"):
+        raise ValueError(f"not a branch / tag / commit: {revision!r}")
+    url = github_url(src)
+    is_ref = bool(revision) and bool(subprocess.run(
+        ["git", "ls-remote", "--heads", "--tags", "--", url, revision], check=True, env=env,
+        capture_output=True, text=True).stdout.strip())
+    if revision and not is_ref and re.fullmatch(r"[0-9a-f]{40}", revision):   # full commit: shallow fetch by SHA
         dest.mkdir(parents=True)
         subprocess.run([*git, "init", "-q"], check=True, env=env)
-        subprocess.run([*git, "remote", "add", "--", "origin", github_url(src)], check=True, env=env)
+        subprocess.run([*git, "remote", "add", "--", "origin", url], check=True, env=env)
         subprocess.run([*git, "fetch", "--depth", "1", "--", "origin", revision], check=True, env=env)
         subprocess.run([*git, "checkout", "-q", "FETCH_HEAD"], check=True, env=env)
+    elif revision and not is_ref and re.fullmatch(r"[0-9a-f]{7,39}", revision):
+        # short commit (as GitHub shows it): servers only fetch full SHAs, so clone and check it out
+        subprocess.run(["git", "clone", "-q", "--", url, str(dest)], check=True, env=env)
+        subprocess.run([*git, "checkout", "-q", revision], check=True, env=env)
     else:
         if revision and revision.startswith("-"):
             raise ValueError(f"not a branch / tag: {revision!r}")

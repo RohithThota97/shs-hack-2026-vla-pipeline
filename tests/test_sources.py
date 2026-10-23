@@ -137,6 +137,8 @@ def test_github_fetch_by_commit(tmp_path):
     sha = _git_repo(src, files)
     roots = sources.fetch("github", f"file://{src}", name="g", revision=sha, base=tmp_path / "repo")
     assert [r.name for r in roots] == ["tmpds"] and not (tmp_path / "repo" / "data" / "incoming" / "g" / ".git").exists()
+    roots = sources.fetch("github", f"file://{src}", name="g7", revision=sha[:7], base=tmp_path / "repo")
+    assert [r.name for r in roots] == ["tmpds"]                       # short SHA as GitHub shows it
 
 
 def test_github_lfs_without_git_lfs_fails_clearly(tmp_path, monkeypatch):
