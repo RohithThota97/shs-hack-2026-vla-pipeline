@@ -407,8 +407,9 @@ def main(argv: list[str] | None = None) -> None:
     elif args.cmd == "deploy":
         from hackpipe.deploy.deploy import deploy
         r = deploy(args.model, reg, args.allow_supervised, args.serve, args.n_action_steps, args.grasp_extend, args.by)
-        _print({k: r[k] for k in ("dep_id", "status", "smoke_test", "launch")} |
-               {"recommendation": r["gates"]["recommendation"]})
+        _print({k: r[k] for k in ("dep_id", "status", "verdict", "error", "serving", "launch")})
+        if r["status"] != "deployed":
+            sys.exit(1)
     elif args.cmd == "rollback":
         from hackpipe.deploy.deploy import rollback
         _print(rollback(reg, args.serve, args.by))
@@ -418,11 +419,11 @@ def main(argv: list[str] | None = None) -> None:
         cfg = settings()
         ckpt, hz = args.checkpoint, 6.0
         if args.model:
-            from hackpipe.evaluation.offline import model_rate
+            from hackpipe.deploy.serving import policy_rate
             m = reg.get_model(args.model)
             if m is None:
                 sys.exit(f"Unknown model {args.model}")
-            ckpt, hz = m["checkpoint_dir"], model_rate(m, 30)[0]
+            ckpt, hz = m["checkpoint_dir"], policy_rate(m, reg)
         policy = server.build_policy(ckpt, args.model, args.dummy, args.n_action_steps, args.grasp_extend,
                                      args.grasp_hold, hz, args.device, args.any_robot)
         reg.close()
@@ -435,7 +436,7 @@ def main(argv: list[str] | None = None) -> None:
         elif args.action == "stop":
             print(f"stopped the server on {port}" if serving.stop(port) else f"nothing of ours serves {port}")
         else:
-            cur = next((d for d in reversed(reg.deployments()) if d["status"] == "deployed"), None)
+            cur = reg.current_deployment()
             if cur is None:
                 sys.exit("nothing deployed yet: hackpipe deploy --model … --serve")
             srv = (cur["meta"] or {}).get("serving") or {}

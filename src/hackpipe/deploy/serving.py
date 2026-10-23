@@ -46,6 +46,29 @@ def _url(port: int, path: str) -> str:
     return f"http://{'127.0.0.1' if host in ('0.0.0.0', '') else host}:{port}{path}"
 
 
+def policy_rate(model: dict[str, Any], reg: Any) -> float:
+    """Policy rate in Hz: the curriculum's rate_hz, else the fps of the model's first training source."""
+    from hackpipe.common.lerobot_io import DatasetFolder
+    from hackpipe.dataset.versioning import load_manifest, trainable_sources
+    from hackpipe.evaluation.offline import model_rate
+    try:
+        src = trainable_sources(load_manifest(model["dataset_version"], reg))[0][0]
+        fps = DatasetFolder(resolve(src)).fps
+    except Exception:  # noqa: BLE001 — no dataset on this machine: the project default
+        fps = 30.0
+    return float(model_rate(model, fps)[0])
+
+
+def _is_server(pid: int) -> bool:
+    """The pid still runs `hackpipe … serve` (a recorded pid may be reused by another process after a crash)."""
+    try:
+        cmd = subprocess.run(["ps", "-o", "command=", "-p", str(int(pid))], capture_output=True, text=True,
+                             timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return "hackpipe" in cmd and " serve" in cmd
+
+
 def _alive(pid: int | None) -> bool:
     if not pid:
         return False
@@ -56,9 +79,9 @@ def _alive(pid: int | None) -> bool:
         pass
     try:
         os.kill(int(pid), 0)
-        return True
     except OSError:
         return False
+    return _is_server(int(pid))
 
 
 def info(port: int, timeout: float = 2) -> dict[str, Any] | None:
@@ -82,6 +105,8 @@ def start(port: int, model: str | None = None, checkpoint: str | None = None, du
     """Start `hackpipe serve` on this port in its own session; wait until /info answers."""
     cfg = settings()
     st = status(port)
+    if st["ours"] and not st["live"]:
+        raise RuntimeError(f"a server for port {port} is still starting (pid {st['state']['pid']}): wait, or stop it")
     if st["live"]:
         raise RuntimeError(f"port {port} is already serving {(st['info'] or {}).get('model') or 'something'}"
                            + ("" if st["ours"] else " (not started by hackpipe — stop it yourself)"))
@@ -125,9 +150,12 @@ def stop(port: int | None = None, timeout: float = 20) -> bool:
         f.unlink(missing_ok=True)
         return False
     try:
-        os.killpg(int(st["pid"]), signal.SIGTERM)
+        os.killpg(int(st["pid"]), signal.SIGTERM)       # its own session: the server and its children
     except OSError:
-        os.kill(int(st["pid"]), signal.SIGTERM)
+        try:
+            os.kill(int(st["pid"]), signal.SIGTERM)
+        except OSError:
+            pass
     t0 = time.time()
     while time.time() - t0 < timeout and (_alive(st["pid"]) or info(port, 0.5)):
         time.sleep(0.5)

@@ -237,3 +237,62 @@ def test_deploy_page(workspace, dataset, monkeypatch):
     at.text_input[0].input("rohith").run()
     assert not at.exception
     assert not next(b for b in at.button if b.label.startswith("Deploy m-v1")).disabled
+
+
+def test_review_fixes_serving(workspace):
+    import os
+    from hackpipe.deploy import serving
+    port = _free_port()
+    serving._state_file(port).write_text(json.dumps({"pid": os.getpid(), "port": port}))   # pid reused by pytest
+    assert serving.stop(port) is False and not serving.status(port)["ours"]                # never killed
+    st = serving.start(port, dummy=True, wait=False)
+    try:
+        with pytest.raises(RuntimeError, match="still starting|already serving"):
+            serving.start(port, dummy=True)                                              # no duplicate server
+    finally:
+        assert serving.stop(port)
+
+
+def test_review_fixes_deploy(workspace, dataset, monkeypatch, capsys):
+    import hackpipe.deploy.serving as srv
+    from hackpipe.cli import main
+    from hackpipe.deploy.deploy import deploy, rollback
+    tmp, reg = _models(workspace, dataset)
+    with pytest.raises(SystemExit):                                     # rejected: printed, exit 1, no KeyError
+        main(["deploy", "--model", "m-v1"])
+    assert '"verdict": "NOT EVALUATED"' in capsys.readouterr().out
+    for v in ("m-v1", "m-v2"):
+        _offline(v)
+        _sim_pass(reg, tmp, v)
+    fake = FakeServing()
+    for k in ("settings", "stop", "start", "health_check", "status"):
+        monkeypatch.setattr(srv, k, getattr(fake, k))
+    assert deploy("m-v1", reg)["status"] == "deployed"                  # without --serve: no serving settings
+    assert deploy("m-v2", reg, serve=True)["status"] == "deployed"
+    rollback(reg, serve=True)
+    assert fake.ports[8090] == {"model": "m-v1", "n_action_steps": 5}   # the configured default, not None
+
+    def boom(*a, **k):
+        raise OSError("state file corrupt")
+    monkeypatch.setattr(srv, "stop", boom)                              # any exception → a rejected record
+    r = deploy("m-v2", reg, serve=True)
+    assert r["status"] == "rejected" and "OSError" in r["error"] and reg.deployments()[-1]["status"] == "rejected"
+
+    fake2 = FakeServing(initial={"model": "m-v1"})
+    for k in ("settings", "stop", "start", "health_check", "status"):
+        monkeypatch.setattr(srv, k, getattr(fake2, k))
+    monkeypatch.setattr(srv, "start", lambda port, model=None, **k: (_ for _ in ()).throw(RuntimeError("OOM"))
+                        if port == 8090 else {"pid": 1})
+    r = deploy("m-v2", reg, serve=True)
+    assert "OOM" in r["error"] and "could not be restarted" in r["error"]  # both failures reported
+
+
+def test_policy_rate(workspace, dataset, tmp_path):
+    from hackpipe.deploy.serving import policy_rate
+    tmp, reg = _models(workspace, dataset)
+    assert policy_rate(reg.get_model("m-v1"), reg) == 10.0             # the synthetic data's fps
+    out = tmp_path / "run"
+    out.mkdir()
+    (out / "train_config.json").write_text(json.dumps({"args": {"rate_hz": 6, "chunk": 20}}))
+    reg.update_model_meta("m-v2", {"trainer": "curriculum", "output_dir": str(out)})
+    assert policy_rate(reg.get_model("m-v2"), reg) == 6.0

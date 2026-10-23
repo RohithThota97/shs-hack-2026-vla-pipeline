@@ -66,10 +66,15 @@ def _swap(model_version: str, n_action_steps: int | None, grasp_extend: float) -
     serving.stop(port)
     try:
         started = serving.start(port, model=model_version, n_action_steps=n_action_steps, grasp_extend=grasp_extend)
-    except RuntimeError:
+    except Exception as e:
         if previous and previous.get("model"):
-            serving.start(port, model=previous["model"], n_action_steps=previous.get("n_action_steps"),
-                          grasp_extend=previous.get("grasp_extend") or 0.0)
+            try:
+                serving.start(port, model=previous["model"], n_action_steps=previous.get("n_action_steps"),
+                              grasp_extend=previous.get("grasp_extend") or 0.0)
+            except Exception as e2:  # noqa: BLE001
+                raise RuntimeError(f"{e} — and the previous model {previous['model']} could not be restarted "
+                                   f"({e2}): port {port} serves nothing") from e
+            raise RuntimeError(f"{e} — the previous model {previous['model']} serves again") from e
         raise
     return {"health_check": health, "port": port, "pid": started["pid"], "n_action_steps": n_action_steps,
             "grasp_extend": grasp_extend, "replaced": (previous or {}).get("model")}
@@ -104,8 +109,8 @@ def deploy(model_version: str, registry: Registry | None = None, allow_supervise
             n_action_steps = settings().get("n_action_steps")
         try:
             meta["serving"] = _swap(model_version, n_action_steps, grasp_extend)
-        except RuntimeError as e:
-            error = str(e)
+        except Exception as e:  # noqa: BLE001 — any failure is recorded as a rejected deployment
+            error = f"{type(e).__name__}: {e}" if not isinstance(e, RuntimeError) else str(e)
     status = "rejected" if error else "deployed"
     if error:
         meta["error"] = error
@@ -126,8 +131,10 @@ def rollback(registry: Registry | None = None, serve: bool = False, by: str = ""
     current, previous = deployed[-1]["model_version"], deployed[-2]["model_version"]
     meta: dict[str, Any] = {"rollback_from": current, "by": by, "launch": "hackpipe serve" if serve else LAUNCH_COMMAND}
     if serve:
+        from hackpipe.deploy.serving import settings
         prev_srv = (deployed[-2]["meta"] or {}).get("serving") or {}
-        meta["serving"] = _swap(previous, prev_srv.get("n_action_steps"), prev_srv.get("grasp_extend") or 0.0)
+        meta["serving"] = _swap(previous, prev_srv.get("n_action_steps") or settings().get("n_action_steps"),
+                                prev_srv.get("grasp_extend") or 0.0)
     dep_id = _dep_id(previous, "rollback-")
     reg.add_deployment(dep_id, previous, "deployed", meta)
     reg.set_model_status(current, "rolled_back")

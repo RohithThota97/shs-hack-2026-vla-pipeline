@@ -7,7 +7,7 @@ from hackpipe.common import writelock
 from hackpipe.common.registry import Registry
 from hackpipe.console.theme import badge
 from hackpipe.deploy import serving
-from hackpipe.gates.verdict import verdict
+from hackpipe.gates.verdict import offline_result, verdict
 from hackpipe.jobs import runner
 from hackpipe.training.ranking import FINISHED
 
@@ -28,6 +28,8 @@ def writer_ok() -> tuple[bool, str]:
 
 
 ok, why = writer_ok()
+if st.session_state.get("deploy_msg"):              # result of the last button, shown after the rerun
+    st.success(st.session_state.pop("deploy_msg"))
 jobs = [j for j in reg.jobs(limit=30) if j["kind"] in ("deploy", "serving") and j["status"] in ("running", "queued")]
 for j in jobs:
     st.markdown(f"**{j['job_id']}** {badge(j['status'])} · {j['meta'].get('label', j['kind'])}", unsafe_allow_html=True)
@@ -35,7 +37,7 @@ busy = bool(jobs)
 
 # ---------- serving now ----------
 deps = reg.deployments()
-current = next((d for d in reversed(deps) if d["status"] == "deployed"), None)
+current = reg.current_deployment()
 stt = serving.status(PORT)
 with st.container(border=True):
     a, b = st.columns([3, 1])
@@ -56,7 +58,9 @@ with st.container(border=True):
         a.caption(f"Deployed: **{current['model_version']}** ({current['dep_id']}, {current['created_at']}"
                   + (", supervised" if (current['meta'] or {}).get("supervised") else "") + ")")
     if b.button("Stop serving", disabled=not (stt["live"] and stt["ours"]) or busy, use_container_width=True):
-        st.success("stopped" if serving.stop(PORT) else "nothing of ours was serving")
+        with st.spinner(f"stopping the server on {PORT} …"):
+            stopped = serving.stop(PORT)
+        st.session_state["deploy_msg"] = f"Port {PORT} stopped." if stopped else "Nothing of ours was serving."
         st.rerun()
     if b.button("Start (deployed model)", disabled=stt["live"] or not current or busy or not ok,
                 use_container_width=True, help=why or "serves the deployed model again, with its recorded settings"):
@@ -76,7 +80,9 @@ models = [m for m in reg.models() if m["meta"].get("purpose") != "timing" and m[
 if not models:
     st.info("No trained models yet.")
 else:
-    verdicts = {m["version"]: verdict(m["version"], reg, write=False) for m in models}
+    dep_model = current["model_version"] if current else None
+    ref = offline_result(dep_model) if dep_model else None              # loaded once, not per model
+    verdicts = {m["version"]: verdict(m["version"], reg, write=False, deployed=dep_model, ref=ref) for m in models}
     c = st.columns([2, 1, 1])
     pick = c[0].selectbox("Model", [m["version"] for m in models][::-1],
                           format_func=lambda v: f"{v} · {verdicts[v]['verdict']}")
