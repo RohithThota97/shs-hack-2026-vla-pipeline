@@ -27,6 +27,15 @@ dataset:
   root: data/raw/fr3_duo_handover_84
   repo_id: local/fr3_duo_handover_84   # LeRobot needs a repo_id even for local datasets
   revision: null                       # only for a Hub dataset; null = local folder (pinned by fingerprint)
+  # Where the console / `hackpipe auto --all` look for datasets not yet in data/raw (folders with meta/info.json
+  # or zips of them, any depth). Found ones are linked as data/raw/<name> (same as the Colab notebook).
+  watch_dirs:
+    - data/C2_Teach-the-robot_VLA                                    # organisers' download on the laptop
+    - /content/drive/MyDrive/shs-hack-2026/data                      # Colab, Drive mounted
+    - ~/Library/CloudStorage/GoogleDrive-*/My Drive/shs-hack-2026/data   # Google Drive for desktop (macOS)
+  pinned_names:                        # name: [episodes, frames] — keep ds-v1's demo IDs (= PINNED in the notebook)
+    fr3_duo_handover_84: [84, 188748]
+    fr3_duo_handover_lighting10: [10, 22470]
 
 # Defaults used when a demo record has no metadata for these fields. Per-episode seed, lighting and layout come
 # from meta/fr3_episodes_extra.jsonl when present.

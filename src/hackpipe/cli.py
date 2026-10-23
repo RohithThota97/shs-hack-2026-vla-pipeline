@@ -14,6 +14,17 @@ def _print(obj) -> None:
     print(json.dumps(obj, indent=2, default=str))
 
 
+def _exit_for(out: dict) -> None:
+    """auto over several folders: fail the job only if no folder went through; otherwise warn in the log."""
+    errs = out.get("errors") or []
+    if not errs:
+        return
+    for e in errs:
+        print(f"WARNING: skipped {e['source']}: {e['error']}", file=sys.stderr)
+    if not out.get("sources"):
+        sys.exit(1)
+
+
 def _writes(args) -> bool:
     """Commands that change the registry claim the writer role first (see common/writelock.py)."""
     if args.cmd in ("ingest", "qc", "auto", "demo", "eval", "gates", "deploy", "rollback"):
@@ -42,7 +53,11 @@ def main(argv: list[str] | None = None) -> None:
     s = sub.add_parser("auto", help="new demos → import → QC (new only) → next draft version, automatically")
     g = s.add_mutually_exclusive_group(required=True)
     g.add_argument("--root", action="append", help="dataset folder (repeat for several → one version)")
-    g.add_argument("--all", action="store_true", help="every dataset folder under data/incoming and data/raw")
+    g.add_argument("--all", action="store_true", help="every dataset under data/incoming and data/raw, after "
+                   "linking new ones from dataset.watch_dirs as data/raw/<name>")
+    g.add_argument("--link", metavar="PATH", help="link this folder / zip as data/raw/<name>, then run on it")
+    s.add_argument("--name", help="with --link: name under data/raw (default: pinned name or folder name)")
+    sub.add_parser("watch", help="datasets in dataset.watch_dirs that aren't linked into data/raw yet")
     s.add_argument("--notes", default="")
     s = sub.add_parser("fetch", help="bring a dataset into data/incoming/<name> from a folder/zip, Hugging Face, "
                                      "GitHub, Google Drive or a cloud bucket; keys from the environment")
@@ -123,7 +138,7 @@ def main(argv: list[str] | None = None) -> None:
         from hackpipe.common.config import REPO_ROOT
         app = Path(__file__).parent / "console" / "app.py"
         sys.exit(subprocess.call([sys.executable, "-m", "streamlit", "run", str(app),
-                                  "--server.port", str(args.port), "--server.maxUploadSize", "2048"],
+                                  "--server.port", str(args.port), "--server.maxUploadSize", "5120"],
                                  cwd=REPO_ROOT))
     if args.cmd == "writer":
         from hackpipe.common import writelock
@@ -158,29 +173,49 @@ def main(argv: list[str] | None = None) -> None:
         _print({k: r[k] for k in ("n_episodes", "checked_now", "reused", "status_counts", "reason_counts",
                                   "dataset_issues", "paths")})
     elif args.cmd == "auto":
+        from hackpipe.common.config import source_key
         from hackpipe.pipeline.auto import run_auto, run_auto_many
         if args.all:
             from hackpipe.pipeline.preview import candidate_folders
+            from hackpipe.pipeline.watch import link, unlinked
+            link_errors = []
+            for d in unlinked():
+                try:
+                    print(f"linked {source_key(link(d['path'], d['name']))} ← {d['path']}", flush=True)
+                except (OSError, ValueError) as e:
+                    link_errors.append({"source": d["path"], "error": f"{type(e).__name__}: {e}"})
             out = run_auto_many(candidate_folders(), reg, args.notes)
+            out["errors"] = link_errors + out.get("errors", [])
+        elif args.link:
+            from hackpipe.pipeline.watch import link
+            dest = link(args.link, args.name)
+            print(f"linked {source_key(dest)} ← {args.link}", flush=True)
+            out = run_auto(str(dest), reg, args.notes)
         elif len(args.root) == 1:
             out = run_auto(args.root[0], reg, args.notes)
         else:
             out = run_auto_many(args.root, reg, args.notes)
         _print(out)
-        if out.get("errors"):
-            sys.exit(1)
+        _exit_for(out)
+    elif args.cmd == "watch":
+        from hackpipe.pipeline.watch import unlinked, watch_dirs
+        _print({"watch_dirs": [str(d) for d in watch_dirs()], "not_linked": unlinked()})
     elif args.cmd == "fetch":
+        import signal
         from hackpipe.common.config import source_key
-        from hackpipe.pipeline.sources import fetch
-        roots = fetch(args.kind, args.src, args.name, args.revision, args.subdir, args.copy)
+        from hackpipe.pipeline.sources import drop_console_key, fetch
+        signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))   # cancel from the console → finally runs
+        try:
+            roots = fetch(args.kind, args.src, args.name, args.revision, args.subdir, args.copy)
+        finally:
+            drop_console_key()
         for r in roots:
             print(f"found dataset: {source_key(r)}")
         if args.auto:
             from hackpipe.pipeline.auto import run_auto_many
             out = run_auto_many([str(r) for r in roots], reg)
             _print(out)
-            if out.get("errors"):
-                sys.exit(1)
+            _exit_for(out)
     elif args.cmd == "demo":
         from hackpipe.dataset.versioning import set_excluded
         set_excluded(args.demo_id, args.action == "exclude", args.reason, args.by, reg)

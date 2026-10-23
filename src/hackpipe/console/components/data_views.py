@@ -13,7 +13,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from hackpipe.common import writelock
-from hackpipe.common.config import project_config, resolve
+from hackpipe.common.config import project_config, resolve, source_key
 from hackpipe.common.lerobot_io import DatasetFolder
 from hackpipe.common.registry import Registry
 from hackpipe.console.theme import TOKENS, badge
@@ -22,6 +22,7 @@ from hackpipe.jobs import runner
 from hackpipe.jobs.estimates import fmt_duration
 from hackpipe.pipeline.preview import candidate_folders, new_folders, preview
 from hackpipe.pipeline.sources import KEY_DIR, dataset_name, missing_packages
+from hackpipe.pipeline.watch import RAW, unlinked, watch_dirs
 from hackpipe.quality.report import report_name
 
 
@@ -71,26 +72,37 @@ def _scan(folders: tuple[str, ...], n_demos: int, n_imported: int) -> tuple[list
     return new_folders(Registry(), folders=list(folders), errors=errors), errors
 
 
-def scan_section(reg: Registry, folders: list[str]) -> None:
-    """Every folder under data/incoming and data/raw with demos the registry hasn't seen → one click."""
+@st.cache_data(ttl=20, show_spinner=False)
+def _unlinked(folders: tuple[str, ...], dirs: tuple[str, ...]) -> list[dict]:
+    """Datasets in the watch dirs not linked yet (re-scanned when data/raw, data/incoming or the dirs change)."""
+    return unlinked(dirs=[Path(d) for d in dirs])
+
+
+def scan_section(reg: Registry, folders: list[str], waiting: list[dict]) -> None:
+    """Every dataset with demos the registry hasn't seen — in data/incoming, data/raw or a watch dir → one click."""
     demos = reg.demos()
     new, errors = _scan(tuple(folders), len(demos), sum(d["status"] == "imported" for d in demos))
     for e in errors:
         st.warning(f"Can't read {e}")
-    if not new:
-        st.caption("No new dataset folders under data/incoming or data/raw — everything there is registered.")
+    if not new and not waiting:
+        dirs = ", ".join(f"`{source_key(d)}`" for d in watch_dirs()) or "none on this machine"
+        st.caption(f"No new datasets — everything in data/raw, data/incoming and the watch folders ({dirs}) "
+                   "is registered.")
         return
-    st.markdown(f"**{len(new)} folder(s) with new demonstrations found**")
-    st.dataframe(pd.DataFrame([{"folder": p["source"], "episodes": p["episodes"], "new": p["new"],
-                                "waiting for QC": p["pending_qc"], "cameras": len(p["cameras"])} for p in new]),
-                 hide_index=True, use_container_width=True)
+    rows = [{"dataset": p["source"], "where": "data/raw · data/incoming", "episodes": p["episodes"],
+             "new": p["new"], "waiting for QC": p["pending_qc"], "changed files": p["changed_files"]} for p in new]
+    rows += [{"dataset": f"{RAW}/{d['name']}", "where": f"{'zip' if d['kind'] == 'zip' else 'folder'} · "
+              f"{source_key(d['path'])} — will be {'unzipped and ' if d['kind'] == 'zip' else ''}linked",
+              "episodes": d["episodes"], "new": d["episodes"], "waiting for QC": 0, "changed files": 0}
+             for d in waiting]
+    st.markdown(f"**{len(rows)} dataset(s) with new demonstrations found**")
+    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
     units = sum(p["work_units"] for p in new)
     ok, why = writer_ok()
-    if st.button("Run pipeline on all new folders", type="primary", disabled=not ok, help=why or None):
-        argv = runner.hackpipe_cmd("auto", *[a for p in new for a in ("--root", p["source"])])
-        jid = runner.submit("auto", argv, work_units=units or None, label=f"Pipeline · {len(new)} folder(s)",
-                            registry=reg)
-        st.success(f"Started {jid}: import → QC (new only) → one draft version for all of them.")
+    if st.button("Run pipeline on all new datasets", type="primary", disabled=not ok, help=why or None):
+        jid = runner.submit("auto", runner.hackpipe_cmd("auto", "--all"), work_units=units or None,
+                            label=f"Pipeline · {len(rows)} dataset(s)", registry=reg)
+        st.success(f"Started {jid}: link new ones as {RAW}/<name> → import → QC (new only) → one draft version.")
 
 
 def fetch_section(reg: Registry) -> None:
@@ -106,8 +118,9 @@ def fetch_section(reg: Registry) -> None:
             args.append("--copy")
         st.caption("A folder containing several datasets is fine — each one with meta/info.json is found.")
     elif kind == "upload":
-        up = st.file_uploader("Zip of a LeRobot v3 dataset (meta/, data/, videos/), up to 2 GB", type=["zip"],
-                              help="Bigger: copy it to this machine or Drive and use 'This machine'.")
+        up = st.file_uploader("Zip of a LeRobot v3 dataset (meta/, data/, videos/), up to 5 GB", type=["zip"],
+                              help="The browser upload is held in memory (~1× its size). On Colab (~12 GB RAM) prefer the "
+                                   "Drive link or 'This machine' for big zips.")
         if up:
             saved = st.session_state.setdefault("saved_uploads", {})
             if up.file_id not in saved:        # write each upload once, even after the job removed the zip
@@ -183,22 +196,48 @@ def fetch_section(reg: Registry) -> None:
         st.success(f"Started {jid}: fetch → import → QC (new only) → draft version. Follow it in the jobs panel.")
 
 
+def link_panel(reg: Registry, d: dict) -> None:
+    """A dataset in a watch dir: what it is, and one button to link it as data/raw/<name> and run the pipeline."""
+    c = st.columns(3)
+    c[0].metric("Episodes", d["episodes"])
+    c[1].metric("Frames", f"{d['frames']:,}" if d["frames"] else "—")
+    c[2].metric("FPS", d["fps"])
+    zipped = d["kind"] == "zip"
+    st.caption(f"{'Zip' if zipped else 'Folder'}: {d['path']}" + (f" (inside: {d['inner']})" if d["inner"] else ""))
+    name = st.text_input(f"Name under {RAW}", value=d["name"], key=f"link-{d['fingerprint']}",
+                         help="Demo IDs depend on this path — the Colab notebook uses the same name.")
+    st.markdown(f"**Run pipeline:** {'unzip to `data/cache/` → ' if zipped else ''}link as `{RAW}/{name}` → "
+                "import → QC (new only) → next draft version.")
+    ok, why = writer_ok()
+    if st.button(f"Link as {RAW}/{name} and run pipeline", type="primary", disabled=not (ok and name.strip()),
+                 help=why or None):
+        argv = runner.hackpipe_cmd("auto", "--link", d["path"], "--name", name.strip())
+        jid = runner.submit("auto", argv, label=f"Pipeline · {name.strip()}", registry=reg)
+        st.success(f"Started {jid}. Follow it in the jobs panel; the result appears under Versions.")
+
+
 def add_tab(reg: Registry) -> None:
-    st.markdown("New demonstrations are found by themselves: every LeRobot v3 folder under `data/incoming` or "
-                "`data/raw` that has demos the registry hasn't seen is listed here. **Run pipeline** imports it, "
+    st.markdown("New demonstrations are found by themselves: every LeRobot v3 dataset under `data/incoming`, "
+                "`data/raw` or a watch folder (organiser download, Google Drive — `dataset.watch_dirs`) that has "
+                "demos the registry hasn't seen is listed here. **Run pipeline** imports it, "
                 "checks only new or changed demos, recognises duplicates and creates the next draft dataset "
                 "version for your approval.")
     folders = candidate_folders()
-    scan_section(reg, folders)
+    waiting = _unlinked(tuple(folders), tuple(str(d) for d in watch_dirs()))
+    scan_section(reg, folders, waiting)
     with st.expander("Bring in a dataset from elsewhere — this machine, upload, Hugging Face, GitHub, Drive, "
-                     "cloud", expanded=not folders):
+                     "cloud", expanded=not folders and not waiting):
         fetch_section(reg)
-    st.markdown("**Check one folder**")
-    choice = st.selectbox("Folder (data/incoming, data/raw)", folders + ["Other path…"], index=None,
-                          placeholder="Choose a dataset folder")
+    st.markdown("**Check one dataset**")
+    found = {f"{RAW}/{d['name']} — not linked yet ({d['kind']}: {source_key(d['path'])})": d for d in waiting}
+    choice = st.selectbox("Dataset (data/raw, data/incoming, watch folders)", folders + list(found) + ["Other path…"],
+                          index=None, placeholder="Choose a dataset")
     if choice == "Other path…":
         choice = st.text_input("Path to the dataset folder (contains meta/info.json)")
     if not choice:
+        return
+    if choice in found:
+        link_panel(reg, found[choice])
         return
     try:
         p = preview(choice, reg)
