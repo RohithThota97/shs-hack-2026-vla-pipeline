@@ -97,6 +97,10 @@ def leakage_guard(splits: dict[str, list[dict[str, Any]]], group_key: str | None
                 raise LeakageError(f"test {key} values also in {k}: {sorted(bad)[:5]}")
 
 
+def _schema(record: dict[str, Any]) -> dict[str, Any]:
+    return {k: v for k, v in record["schema"].items() if k != "codebase_version"}
+
+
 def _schema_key(schema: dict[str, Any]) -> str:
     return json.dumps({k: v for k, v in schema.items() if k != "codebase_version"}, sort_keys=True)
 
@@ -112,26 +116,34 @@ def schema_diff(schemas: dict[str, dict[str, Any]]) -> list[str]:
         for sub in ("shape", "names"):
             if len({json.dumps((v.get(part) or {}).get(sub)) for v in vals}) > 1:
                 out.append(f"{part} {sub}")
+    if not out and len({_schema_key(v) for v in vals}) > 1:
+        out.append("other schema fields")
     return out
 
 
-def primary_source(sources: list[str]) -> str:
-    """The source whose schema the version trains with: the project's dataset.root (handover) if it is in the
-    version, else the first source."""
+def primary_source(sources: list[str]) -> str | None:
+    """The source whose schema a mixed version trains with: the project's dataset.root (handover), if it is one of
+    the version's sources (None otherwise — no guessing by alphabetical order)."""
     root = project_config()["dataset"].get("root")
     key = source_key(resolve(root)) if root else None
-    return key if key in sources else sources[0]
+    return key if key in sources else None
 
 
 def trainable_sources(manifest: dict[str, Any]) -> tuple[list[str], list[str]]:
     """(sources training uses, data-only sources). A version mixing schemas (e.g. the 6 fps cube-stacking subtask
     next to 30 fps handover) trains on the sources with the primary source's schema; the rest is kept as data.
-    Derived from the manifest, so versions created before this rule get it too."""
-    sources = manifest.get("sources") or [manifest["source"]]
+    Read from the manifest (train_sources, stored at creation) so a later config change can't alter what an
+    approved version trains; older manifests without it are derived once from their per-source schemas."""
+    if manifest.get("train_sources") is not None:          # fixed when the version was created
+        return list(manifest["train_sources"]), list(manifest.get("data_only_sources") or [])
+    sources = manifest.get("sources") or ([manifest["source"]] if manifest.get("source") else [])
     per = (manifest.get("preprocessing") or {}).get("per_source_schema")
     if not manifest.get("mixed_schemas") or not per:
         return sources, []
-    want = _schema_key(per[primary_source(sources)])
+    primary = primary_source(sources)
+    if primary is None:
+        raise RuntimeError(f"{manifest.get('version')}: mixed sources but dataset.root is none of {sources}")
+    want = _schema_key(per[primary])
     train = [s for s in sources if _schema_key(per[s]) == want]
     return train, [s for s in sources if s not in train]
 
@@ -234,30 +246,35 @@ def create_dataset_version(registry: Registry | None = None, cfg: dict[str, Any]
                         "added_split": {k: sorted(d["demo_id"] for d in new[k]) for k in ("train", "val")}})
     else:
         splits = split_demos(pool, cfg, held_out)
-    frozen = frozen_test_ids(reg)
-    if cfg["splits"].get("freeze_test", True) and frozen and frozen[1] != sorted(d["demo_id"] for d in splits["test"]):
-        raise LeakageError(f"The test split is frozen since {frozen[0]}; this version's test demos differ. "
-                           "Keep the split config, or start a new test suite on purpose.")
-
     sources = sorted({d["source"] for d in splits["train"] + splits["val"]})
     records = {s: preprocessing_record(s, cfg) for s in sources}
-    schemas = {s: {k: v for k, v in r["schema"].items() if k != "codebase_version"} for s, r in records.items()}
-    mixed = len({json.dumps(v, sort_keys=True) for v in schemas.values()}) > 1
+    schemas = {s: _schema(r) for s, r in records.items()}
+    mixed = len({_schema_key(v) for v in schemas.values()}) > 1
     if mixed and not (cfg.get("versions") or {}).get("allow_mixed_schemas"):
         raise RuntimeError(f"Sources have different schemas ({', '.join(schema_diff(schemas))}): {sorted(schemas)}. "
                            "To keep them in one version anyway (only the sources matching the main dataset are "
                            "trained), set versions.allow_mixed_schemas: true in configs/dataset.yaml")
-    primary = primary_source(sources)
+    if mixed:
+        primary = primary_source(sources)
+        if primary is None:
+            raise RuntimeError("Sources have different schemas and dataset.root (configs/project.yaml) is not one of "
+                               f"the train/val sources {sources}: set it to the main dataset, whose schema is trained.")
+    else:
+        primary = sources[0]           # as before: fingerprints of unmixed versions don't depend on dataset.root
+    other_task = {s for s in sources if _schema_key(schemas[s]) != _schema_key(schemas[primary])}
+    leakage_guard(splits, cfg["splits"].get("group_key"), cfg["splits"].get("leakage_keys"), other_task)
+    frozen = frozen_test_ids(reg)
+    if cfg["splits"].get("freeze_test", True) and frozen and frozen[1] != sorted(d["demo_id"] for d in splits["test"]):
+        raise LeakageError(f"The test split is frozen since {frozen[0]}; this version's test demos differ. "
+                           "Keep the split config, or start a new test suite on purpose.")
     preprocessing = records[primary]   # the trained schema (single source: its only one, as before)
     if mixed:                          # recorded per source; part of the fingerprint
         preprocessing["per_source_schema"] = schemas
-    other_task = {s for s in sources if _schema_key(schemas[s]) != _schema_key(schemas[primary])}
-    leakage_guard(splits, cfg["splits"].get("group_key"), cfg["splits"].get("leakage_keys"), other_task)
-    warnings = [f"test source {t} has another schema than the trained sources ({', '.join(d)})"
-                for t in test_sources
-                for d in [schema_diff({"a": schemas[primary],
-                                       "b": {k: v for k, v in preprocessing_record(t, cfg)["schema"].items()
-                                             if k != "codebase_version"}})] if d]
+    warnings = []
+    for t in test_sources:
+        d = schema_diff({"trained": schemas[primary], t: _schema(preprocessing_record(t, cfg))})
+        if d:
+            warnings.append(f"test source {t} has another schema than the trained sources ({', '.join(d)})")
     if len(sources) > 1:            # single-source records stay as before, so fingerprints stay comparable
         preprocessing["normalisation_stats"]["per_source"] = {s: r["normalisation_stats"]["sha256"]
                                                               for s, r in records.items()}
@@ -298,7 +315,7 @@ def create_dataset_version(registry: Registry | None = None, cfg: dict[str, Any]
     }
     out_dir = resolve(Path(project_config()["project"]["outputs_dir"]) / "datasets" / version)
     out_dir.mkdir(parents=True, exist_ok=True)
-    stats = DatasetFolder(resolve(sources[0])).stats_path()
+    stats = DatasetFolder(resolve(primary)).stats_path()          # normalisation stats of the trained schema
     if stats.exists():
         shutil.copyfile(stats, out_dir / "stats.json")
     manifest_path = out_dir / "manifest.json"

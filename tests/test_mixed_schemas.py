@@ -31,6 +31,9 @@ def two_fps(workspace, monkeypatch, tmp_path):
     cfg = write_test_configs(tmp_path / "cfg")
     monkeypatch.setenv("HACKPIPE_CONFIG_DIR", str(cfg))
     a = make_dataset(tmp / "a", n_episodes=10, frames=30)                  # 10 fps, 3 s
+    proj = yaml.safe_load((cfg / "project.yaml").read_text())
+    proj["dataset"]["root"] = str(a)                                      # the main dataset (handover's role)
+    (cfg / "project.yaml").write_text(yaml.safe_dump(proj))
     b = _set_fps(make_dataset(tmp / "b", n_episodes=10, frames=40), 5)     # 5 fps, 8 s (other content)
     run_auto(str(a), reg)
     approve("ds-v1", reg, by="t")
@@ -133,3 +136,28 @@ def test_train_frames_and_train_page_with_mixed_version(two_fps):
     at.run()
     assert not at.exception, [e.message for e in at.exception]
     assert any("kept as data only" in c.value for c in at.caption)
+
+
+def test_mixed_without_main_dataset_is_refused(two_fps):
+    reg, a, b, cfg = two_fps
+    proj = yaml.safe_load((cfg / "project.yaml").read_text())
+    proj["dataset"]["root"] = None
+    (cfg / "project.yaml").write_text(yaml.safe_dump(proj))
+    out = run_auto(str(b), reg)
+    assert out["version"] is None and "dataset.root" in out["reason"]
+
+
+def test_trained_sources_fixed_at_creation(two_fps):
+    """Changing dataset.root after creating a version doesn't change what that version trains."""
+    from hackpipe.training.train import training_input
+    reg, a, b, cfg = two_fps
+    run_auto(str(b), reg)
+    proj = yaml.safe_load((cfg / "project.yaml").read_text())
+    proj["dataset"]["root"] = str(b)
+    (cfg / "project.yaml").write_text(yaml.safe_dump(proj))
+    assert training_input(load_manifest("ds-v2", reg))["root"].endswith("/a")
+
+
+def test_old_manifest_without_sources():
+    from hackpipe.dataset.versioning import trainable_sources
+    assert trainable_sources({"version": "ds-v1", "source": None, "preprocessing": {}}) == ([], [])
