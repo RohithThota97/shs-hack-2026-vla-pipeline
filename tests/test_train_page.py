@@ -116,3 +116,17 @@ def test_purpose_recorded(workspace, dataset, monkeypatch):
                 overrides={"steps": 200})
     assert rec["purpose"] == "timing" and reg.get_model("m-v1")["meta"]["purpose"] == "timing"
     assert json.loads(Path(reg.get_model("m-v1")["run_record_path"]).read_text())["purpose"] == "timing"
+
+
+def test_prune_checkpoints_keeps_newest_and_last(tmp_path):
+    from hackpipe.training.train import prune_checkpoints
+    ck = tmp_path / "checkpoints"
+    for n in ("001000", "002000", "003000", "004000"):
+        (ck / n / "pretrained_model").mkdir(parents=True)
+    (ck / "last").symlink_to("002000")                    # e.g. 003000 / 004000 still being written
+    assert prune_checkpoints(tmp_path, 2) == ["001000"]
+    assert sorted(p.name for p in ck.iterdir()) == ["002000", "003000", "004000", "last"]
+    (ck / "last").unlink()
+    (ck / "last").symlink_to("004000")
+    assert prune_checkpoints(tmp_path, 2) == ["002000"]
+    assert prune_checkpoints(tmp_path, 0) == []

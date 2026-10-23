@@ -9,22 +9,29 @@ from hackpipe.common.lerobot_io import DatasetFolder
 from hackpipe.common.registry import Registry
 from hackpipe.common.writelock import machine_id
 from hackpipe.jobs.estimates import estimate
+from hackpipe.pipeline.sources import find_roots
 
 SEARCH_DIRS = ("data/incoming", "data/raw")
 
 
 def candidate_folders(base: Path = REPO_ROOT) -> list[str]:
-    """LeRobot dataset folders (meta/info.json) directly or one level below data/incoming and data/raw."""
+    """LeRobot dataset folders (meta/info.json) anywhere below data/incoming and data/raw (nested ones too,
+    e.g. data/incoming/fr3_duo_rand500/fr3_duo_rand500)."""
+    return sorted({source_key(r) for d in SEARCH_DIRS for r in find_roots(base / d)})
+
+
+def new_folders(registry: Registry | None = None, base: Path = REPO_ROOT) -> list[dict[str, Any]]:
+    """Folders with episodes the registry hasn't seen (or hasn't checked yet) — what "Add all new" runs on."""
+    reg = registry or Registry()
     out = []
-    for d in SEARCH_DIRS:
-        top = base / d
-        if not top.is_dir():
+    for f in candidate_folders(base):
+        try:
+            p = preview(f, reg)
+        except (FileNotFoundError, ValueError, OSError):
             continue
-        for child in sorted(top.iterdir()):
-            for cand in [child, *(sorted(child.iterdir()) if child.is_dir() else [])]:
-                if (cand / "meta" / "info.json").exists():
-                    out.append(source_key(cand))
-    return sorted(set(out))
+        if p["new"] or p["pending_qc"]:
+            out.append(p)
+    return out
 
 
 def preview(root: str, registry: Registry | None = None) -> dict[str, Any]:

@@ -94,3 +94,12 @@ def test_token_protects_console(workspace, monkeypatch):
     assert not any("FR3 Duo · Demo-to-Deployment" in m.value for m in at.markdown)
     at.text_input[0].input("s3cret").run()
     assert any("FR3 Duo · Demo-to-Deployment" in m.value for m in at.markdown)
+
+
+def test_add_tab_every_source_renders(workspace):
+    at = _run(CONSOLE / "views" / "data.py")
+    def radio():
+        return next(r for r in at.radio if r.label == "From")
+    for opt in radio().options:
+        radio().set_value(opt).run()
+        assert not at.exception, (opt, [e.message for e in at.exception])
