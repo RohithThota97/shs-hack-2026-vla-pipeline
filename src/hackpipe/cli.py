@@ -171,32 +171,10 @@ def main(argv: list[str] | None = None) -> None:
     s = sub.add_parser("verdict", help="post-training verdict: offline + sim gates -> DEPLOY / MORE TRAINING / HOLD")
     s.add_argument("--model", required=True)
 
-    s = sub.add_parser("deploy", help="R10 gated deployment (verdict DEPLOY, or HOLD with --allow-supervised)")
+    s = sub.add_parser("deploy", help="R10 gated deployment")
     s.add_argument("--model", required=True)
     s.add_argument("--allow-supervised", action="store_true")
-    s.add_argument("--serve", action="store_true", help="stage + health-check, then serve it on the deploy port")
-    s.add_argument("--n-action-steps", type=int, help="with --serve (default: configs/project.yaml deploy)")
-    s.add_argument("--grasp-extend", type=float, default=0.0, help="with --serve: inference-time grasp shaping (s)")
-    s.add_argument("--by", default="", help="who deploys (recorded)")
-    s = sub.add_parser("rollback", help="R10 roll back to the previous deployed model")
-    s.add_argument("--serve", action="store_true", help="also serve it (staged + health-checked)")
-    s.add_argument("--by", default="")
-    s = sub.add_parser("serve", help="policy server for the Isaac Sim bridge (foreground; GET /info, POST /reset, /act)")
-    src = s.add_mutually_exclusive_group(required=True)
-    src.add_argument("--model", help="registered model version")
-    src.add_argument("--checkpoint", help="pretrained_model folder")
-    src.add_argument("--dummy", action="store_true", help="holds the start pose — bridge tests only, FAKE")
-    s.add_argument("--host", default=None)
-    s.add_argument("--port", type=int, default=None)
-    s.add_argument("--n-action-steps", type=int)
-    s.add_argument("--grasp-extend", type=float, default=0.0)
-    s.add_argument("--grasp-hold", type=float, default=0.7)
-    s.add_argument("--device", default="auto")
-    s.add_argument("--probe-source", help="recorded dataset for POST /probe (the deploy health check)")
-    s.add_argument("--any-robot", action="store_true", help="serve a checkpoint outside the FR3 Duo contract (tests)")
-    s = sub.add_parser("serving", help="the deploy port: status / stop / start (the deployed model, detached)")
-    s.add_argument("action", choices=["status", "stop", "start"])
-    s.add_argument("--port", type=int, default=None)
+    sub.add_parser("rollback", help="R10 roll back to the previous deployed model")
     s = sub.add_parser("publish", help="push a model + model card to the Hugging Face Hub (never the dataset)")
     s.add_argument("--model", required=True)
     s.add_argument("--repo", help="<hf-user>/<name>; default hub.model_repo_id in configs/project.yaml")
@@ -406,42 +384,12 @@ def main(argv: list[str] | None = None) -> None:
         _print(recommend(args.eval_id, reg))
     elif args.cmd == "deploy":
         from hackpipe.deploy.deploy import deploy
-        r = deploy(args.model, reg, args.allow_supervised, args.serve, args.n_action_steps, args.grasp_extend, args.by)
-        _print({k: r[k] for k in ("dep_id", "status", "verdict", "error", "serving", "launch")})
-        if r["status"] != "deployed":
-            sys.exit(1)
+        r = deploy(args.model, reg, args.allow_supervised)
+        _print({k: r[k] for k in ("dep_id", "status", "smoke_test", "launch")} |
+               {"recommendation": r["gates"]["recommendation"]})
     elif args.cmd == "rollback":
         from hackpipe.deploy.deploy import rollback
-        _print(rollback(reg, args.serve, args.by))
-    elif args.cmd == "serve":
-        from hackpipe.deploy import server
-        from hackpipe.deploy.serving import settings
-        cfg = settings()
-        ckpt, hz = args.checkpoint, 6.0
-        if args.model:
-            from hackpipe.deploy.serving import policy_rate
-            m = reg.get_model(args.model)
-            if m is None:
-                sys.exit(f"Unknown model {args.model}")
-            ckpt, hz = m["checkpoint_dir"], policy_rate(m, reg)
-        policy = server.build_policy(ckpt, args.model, args.dummy, args.n_action_steps, args.grasp_extend,
-                                     args.grasp_hold, hz, args.device, args.any_robot)
-        reg.close()
-        server.serve(policy, args.host or cfg["host"], args.port or cfg["port"], hz, args.probe_source)
-    elif args.cmd == "serving":
-        from hackpipe.deploy import serving
-        port = args.port or serving.settings()["port"]
-        if args.action == "status":
-            _print(serving.status(port))
-        elif args.action == "stop":
-            print(f"stopped the server on {port}" if serving.stop(port) else f"nothing of ours serves {port}")
-        else:
-            cur = reg.current_deployment()
-            if cur is None:
-                sys.exit("nothing deployed yet: hackpipe deploy --model … --serve")
-            srv = (cur["meta"] or {}).get("serving") or {}
-            _print(serving.start(port, model=cur["model_version"], n_action_steps=srv.get("n_action_steps"),
-                                 grasp_extend=srv.get("grasp_extend") or 0.0))
+        _print(rollback(reg))
     elif args.cmd == "publish":
         from hackpipe.hub.publish import publish
         _print(publish(args.model, args.repo, private=not args.public, dry_run=args.dry_run, registry=reg))
