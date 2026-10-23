@@ -1,0 +1,121 @@
+{
+  "schema_version": 1,
+  "dataset_id": "handover10",
+  "task_group": "handover",
+  "task_descriptions": [
+    "Hand the box from the left gripper to the right gripper and place it on the serving tray."
+  ],
+  "dataset_root": "D:\\Hackathon Challenges\\C2_Teach-the-robot_VLA\\Datasets\\FR3Duo_Handover_Dataset_lerobot3",
+  "format": "v3.0",
+  "source_fingerprint": "5838a4fdefc3c531f1d817f0b883066c87dfedb48c62c568fb75004f220b3782",
+  "source_fingerprint_scope": "SHA-256 of every file under the source dataset root, including videos",
+  "episode_count": 10,
+  "frame_count": 22470,
+  "fps": 30.0,
+  "robot_type": "fr3_duo",
+  "cameras": {
+    "observation.images.external_camera": [
+      224,
+      224,
+      3
+    ],
+    "observation.images.left_wrist_camera": [
+      224,
+      224,
+      3
+    ],
+    "observation.images.right_wrist_camera": [
+      224,
+      224,
+      3
+    ]
+  },
+  "features": {
+    "observation.state": {
+      "dtype": "float32",
+      "shape": [
+        16
+      ],
+      "names": [
+        "left_joint1",
+        "left_joint2",
+        "left_joint3",
+        "left_joint4",
+        "left_joint5",
+        "left_joint6",
+        "left_joint7",
+        "left_gripper",
+        "right_joint1",
+        "right_joint2",
+        "right_joint3",
+        "right_joint4",
+        "right_joint5",
+        "right_joint6",
+        "right_joint7",
+        "right_gripper"
+      ]
+    },
+    "action": {
+      "dtype": "float32",
+      "shape": [
+        16
+      ],
+      "names": [
+        "left_joint1",
+        "left_joint2",
+        "left_joint3",
+        "left_joint4",
+        "left_joint5",
+        "left_joint6",
+        "left_joint7",
+        "left_gripper",
+        "right_joint1",
+        "right_joint2",
+        "right_joint3",
+        "right_joint4",
+        "right_joint5",
+        "right_joint6",
+        "right_joint7",
+        "right_gripper"
+      ]
+    }
+  },
+  "success_label": {
+    "feature_present": true,
+    "all_episode_final_values_true": true,
+    "interpretation": "source-provided labels; not independently verified"
+  },
+  "seed": 20261023,
+  "split_ratios": {
+    "train": 0.7,
+    "validation": 0.15,
+    "test": 0.15
+  },
+  "split_counts": {
+    "train": 0,
+    "validation": 0,
+    "test": 0
+  },
+  "trajectory_group_count": 1,
+  "duplicate_trajectory_groups": [
+    [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9
+    ]
+  ],
+  "split_status": "BLOCKED",
+  "training_candidate": false,
+  "status": "BLOCKED_NO_INDEPENDENT_SPLITS",
+  "limitations": [
+    "Exact numeric state/action trajectories form fewer than three independent groups; no leakage-safe train/validation/test split is emitted."
+  ],
+  "splits_file": "handover10/splits.json"
+}

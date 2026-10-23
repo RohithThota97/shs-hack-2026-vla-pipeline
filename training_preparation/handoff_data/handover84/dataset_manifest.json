@@ -1,0 +1,195 @@
+{
+  "schema_version": 1,
+  "dataset_id": "handover84",
+  "task_group": "handover",
+  "task_descriptions": [
+    "Hand the box from the left gripper to the right gripper and place it on the serving tray."
+  ],
+  "dataset_root": "D:\\Hackathon Challenges\\C2_Teach-the-robot_VLA\\Datasets\\fr3_duo_handover_84_ep\\fr3_duo_handover_v9_night_84",
+  "format": "v3.0",
+  "source_fingerprint": "63bae37273d981b66c352b156d5fdebe5dc6bcf7821c37acd18668ef0874faad",
+  "source_fingerprint_scope": "SHA-256 of every file under the source dataset root, including videos",
+  "episode_count": 84,
+  "frame_count": 188748,
+  "fps": 30.0,
+  "robot_type": "fr3_duo",
+  "cameras": {
+    "observation.images.external_camera": [
+      224,
+      224,
+      3
+    ],
+    "observation.images.left_wrist_camera": [
+      224,
+      224,
+      3
+    ],
+    "observation.images.right_wrist_camera": [
+      224,
+      224,
+      3
+    ]
+  },
+  "features": {
+    "observation.state": {
+      "dtype": "float32",
+      "shape": [
+        16
+      ],
+      "names": [
+        "left_joint1",
+        "left_joint2",
+        "left_joint3",
+        "left_joint4",
+        "left_joint5",
+        "left_joint6",
+        "left_joint7",
+        "left_gripper",
+        "right_joint1",
+        "right_joint2",
+        "right_joint3",
+        "right_joint4",
+        "right_joint5",
+        "right_joint6",
+        "right_joint7",
+        "right_gripper"
+      ]
+    },
+    "action": {
+      "dtype": "float32",
+      "shape": [
+        16
+      ],
+      "names": [
+        "left_joint1",
+        "left_joint2",
+        "left_joint3",
+        "left_joint4",
+        "left_joint5",
+        "left_joint6",
+        "left_joint7",
+        "left_gripper",
+        "right_joint1",
+        "right_joint2",
+        "right_joint3",
+        "right_joint4",
+        "right_joint5",
+        "right_joint6",
+        "right_joint7",
+        "right_gripper"
+      ]
+    }
+  },
+  "success_label": {
+    "feature_present": true,
+    "all_episode_final_values_true": true,
+    "interpretation": "source-provided labels; not independently verified"
+  },
+  "seed": 20261023,
+  "split_ratios": {
+    "train": 0.7,
+    "validation": 0.15,
+    "test": 0.15
+  },
+  "split_counts": {
+    "train": 0,
+    "validation": 0,
+    "test": 0
+  },
+  "trajectory_group_count": 1,
+  "duplicate_trajectory_groups": [
+    [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27,
+      28,
+      29,
+      30,
+      31,
+      32,
+      33,
+      34,
+      35,
+      36,
+      37,
+      38,
+      39,
+      40,
+      41,
+      42,
+      43,
+      44,
+      45,
+      46,
+      47,
+      48,
+      49,
+      50,
+      51,
+      52,
+      53,
+      54,
+      55,
+      56,
+      57,
+      58,
+      59,
+      60,
+      61,
+      62,
+      63,
+      64,
+      65,
+      66,
+      67,
+      68,
+      69,
+      70,
+      71,
+      72,
+      73,
+      74,
+      75,
+      76,
+      77,
+      78,
+      79,
+      80,
+      81,
+      82,
+      83
+    ]
+  ],
+  "split_status": "BLOCKED",
+  "training_candidate": false,
+  "status": "BLOCKED_NO_INDEPENDENT_SPLITS",
+  "limitations": [
+    "Exact numeric state/action trajectories form fewer than three independent groups; no leakage-safe train/validation/test split is emitted."
+  ],
+  "splits_file": "handover84/splits.json"
+}

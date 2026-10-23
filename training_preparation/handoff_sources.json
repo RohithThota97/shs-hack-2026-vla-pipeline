@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "seed": 20261023,
+  "split_ratios": {
+    "train": 0.7,
+    "validation": 0.15,
+    "test": 0.15
+  },
+  "datasets": [
+    {
+      "id": "handover84",
+      "task_group": "handover",
+      "root": "D:\\Hackathon Challenges\\C2_Teach-the-robot_VLA\\Datasets\\fr3_duo_handover_84_ep\\fr3_duo_handover_v9_night_84"
+    },
+    {
+      "id": "cube_stack490",
+      "task_group": "cube_stacking",
+      "root": "D:\\Hackathon Challenges\\C2_Teach-the-robot_VLA\\Datasets\\fr3_duo_rand500\\fr3_duo_rand500"
+    },
+    {
+      "id": "handover10",
+      "task_group": "handover",
+      "root": "D:\\Hackathon Challenges\\C2_Teach-the-robot_VLA\\Datasets\\FR3Duo_Handover_Dataset_lerobot3"
+    }
+  ]
+}
