@@ -130,3 +130,9 @@ def test_prune_checkpoints_keeps_newest_and_last(tmp_path):
     (ck / "last").symlink_to("004000")
     assert prune_checkpoints(tmp_path, 2) == ["002000"]
     assert prune_checkpoints(tmp_path, 0) == []
+
+
+def test_keep_checkpoints_override_is_not_a_lerobot_arg():
+    from hackpipe.training.train import apply_overrides
+    cfg = apply_overrides({"keep_checkpoints": 2, "args": {"steps": 10}}, {"keep_checkpoints": 0, "steps": 5})
+    assert cfg["keep_checkpoints"] == 0 and cfg["args"] == {"steps": 5}

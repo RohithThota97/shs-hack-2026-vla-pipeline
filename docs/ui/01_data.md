@@ -16,7 +16,7 @@ ds-v1's validated demos; nothing is checked twice; demos that already exist are 
   | From | Source | Keys (password fields, passed to the job as env vars only — never saved or logged) |
   |---|---|---|
   | This machine | folder (linked, or copied) or `.zip`; a mounted Drive path works here | — |
-  | Upload a zip | browser upload (console allows up to 8 GB) | — |
+  | Upload a zip | browser upload, up to 2 GB (Streamlit holds it in memory; bigger → copy to this machine / Drive) | — |
   | Hugging Face | dataset repo ID, revision, subfolder | `HF_TOKEN` |
   | GitHub | `owner/repo` or URL, branch; Git LFS pulled if installed | `GITHUB_TOKEN` (sent as a header) |
   | Google Drive link | share link to a zip or folder (`gdown`, folders ≤ 50 files) | — (link sharing) |

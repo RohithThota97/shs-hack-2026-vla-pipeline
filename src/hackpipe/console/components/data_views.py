@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
+import shutil
 from pathlib import Path
 
 import numpy as np
@@ -19,7 +21,7 @@ from hackpipe.dataset.versioning import approve, frozen_test_ids, set_excluded
 from hackpipe.jobs import runner
 from hackpipe.jobs.estimates import fmt_duration
 from hackpipe.pipeline.preview import candidate_folders, new_folders, preview
-from hackpipe.pipeline.sources import dataset_name
+from hackpipe.pipeline.sources import KEY_DIR, dataset_name
 from hackpipe.quality.report import report_name
 
 
@@ -52,18 +54,29 @@ def _secret(label: str, env_var: str, key: str) -> str:
                          help=f"Only passed to the fetch job as {env_var}; not saved, not logged.")
 
 
-def _private_file(text: str, name: str) -> str:
-    d = Path.home() / ".cache" / "hackpipe"
-    d.mkdir(parents=True, exist_ok=True)
-    f = d / name
-    f.write_text(text)
-    f.chmod(0o600)
+def _private_file(data: bytes, name: str) -> str:
+    """Owner-only file in KEY_DIR (created 0600, never world-readable); the fetch job deletes it after use."""
+    KEY_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    f = KEY_DIR / name
+    fd = os.open(f, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "wb") as out:
+        out.write(data)
     return str(f)
 
 
-def scan_section(reg: Registry) -> None:
+@st.cache_data(ttl=20, show_spinner=False)
+def _scan(folders: tuple[str, ...], n_demos: int, n_imported: int) -> tuple[list[dict], list[str]]:
+    """new_folders() for the page, cached briefly: it previews every folder (keyed on what would change it)."""
+    errors: list[str] = []
+    return new_folders(Registry(), folders=list(folders), errors=errors), errors
+
+
+def scan_section(reg: Registry, folders: list[str]) -> None:
     """Every folder under data/incoming and data/raw with demos the registry hasn't seen → one click."""
-    new = new_folders(reg)
+    demos = reg.demos()
+    new, errors = _scan(tuple(folders), len(demos), sum(d["status"] == "imported" for d in demos))
+    for e in errors:
+        st.warning(f"Can't read {e}")
     if not new:
         st.caption("No new dataset folders under data/incoming or data/raw — everything there is registered.")
         return
@@ -85,7 +98,7 @@ def fetch_section(reg: Registry) -> None:
     kind = SOURCES[st.radio("From", list(SOURCES), horizontal=True)]
     env: dict[str, str] = {}
     args: list[str] = []
-    src = ""
+    src = default_name = ""
     if kind == "local":
         src = st.text_input("Folder or .zip on this machine", placeholder="/content/drive/MyDrive/shs-hack-2026/data")
         copy = st.checkbox("Copy to local disk (faster than reading from a Drive mount)")
@@ -93,14 +106,18 @@ def fetch_section(reg: Registry) -> None:
             args.append("--copy")
         st.caption("A folder containing several datasets is fine — each one with meta/info.json is found.")
     elif kind == "upload":
-        up = st.file_uploader("Zip of a LeRobot v3 dataset (meta/, data/, videos/)", type=["zip"])
+        up = st.file_uploader("Zip of a LeRobot v3 dataset (meta/, data/, videos/), up to 2 GB", type=["zip"],
+                              help="Bigger: copy it to this machine or Drive and use 'This machine'.")
         if up:
-            d = resolve("data/incoming/_uploads")
-            d.mkdir(parents=True, exist_ok=True)
-            dest = d / Path(up.name).name
-            if not dest.exists() or dest.stat().st_size != up.size:
-                dest.write_bytes(up.getbuffer())
-            src = str(dest)
+            saved = st.session_state.setdefault("saved_uploads", {})
+            if up.file_id not in saved:        # write each upload once, even after the job removed the zip
+                d = resolve("data/incoming/_uploads")
+                d.mkdir(parents=True, exist_ok=True)
+                dest = d / f"{dataset_name(up.name)}-{up.file_id[:8]}.zip"
+                with open(dest, "wb") as out:
+                    shutil.copyfileobj(up, out, 16 << 20)
+                saved[up.file_id] = (str(dest), dataset_name(up.name))
+            src, default_name = saved[up.file_id]
         kind = "local"
     elif kind == "hf":
         src = st.text_input("Dataset repo ID", placeholder="your-user/fr3_duo_handover")
@@ -133,9 +150,10 @@ def fetch_section(reg: Registry) -> None:
             st.caption("Empty fields use this machine's AWS environment / ~/.aws credentials.")
         elif prov.startswith("Google"):
             src = st.text_input("URL", placeholder="gs://bucket/path/to/dataset")
-            sa = st.file_uploader("Service-account key (JSON, optional)", type=["json"], key="k-gcs")
+            sa = st.file_uploader("Service-account key (JSON, optional)", type=["json"], key="k-gcs",
+                                  help="Stored owner-only in ~/.cache/hackpipe/keys until the fetch job used it.")
             if sa:
-                env["GOOGLE_APPLICATION_CREDENTIALS"] = _private_file(sa.getvalue().decode(), "gcs-key.json")
+                env["GOOGLE_APPLICATION_CREDENTIALS"] = f"@{sa.file_id}"      # written at submit time
         else:
             src = st.text_input("URL", placeholder="az://container/path/to/dataset")
             env["AZURE_STORAGE_CONNECTION_STRING"] = st.text_input("Connection string", type="password",
@@ -143,10 +161,13 @@ def fetch_section(reg: Registry) -> None:
     env = {k: v for k, v in env.items() if v}
     if not src:
         return
-    name = st.text_input("Name under data/incoming", value=dataset_name(src),
+    name = st.text_input("Name under data/incoming", value=default_name or dataset_name(src),
                          help="Demo IDs depend on this path — use the same name on every machine.")
     ok, why = writer_ok()
     if st.button("Fetch and run pipeline", type="primary", disabled=not (ok and name.strip()), help=why or None):
+        if env.get("GOOGLE_APPLICATION_CREDENTIALS", "").startswith("@"):
+            env["GOOGLE_APPLICATION_CREDENTIALS"] = _private_file(st.session_state["k-gcs"].getvalue(),
+                                                                  f"gcs-{secrets.token_hex(6)}.json")
         argv = runner.hackpipe_cmd("fetch", "--from", kind, src, "--name", name.strip(), *args, "--auto")
         jid = runner.submit("fetch", argv, label=f"Fetch · {name.strip()}", registry=reg, env=env)
         st.success(f"Started {jid}: fetch → import → QC (new only) → draft version. Follow it in the jobs panel.")
@@ -157,12 +178,12 @@ def add_tab(reg: Registry) -> None:
                 "`data/raw` that has demos the registry hasn't seen is listed here. **Run pipeline** imports it, "
                 "checks only new or changed demos, recognises duplicates and creates the next draft dataset "
                 "version for your approval.")
-    scan_section(reg)
+    folders = candidate_folders()
+    scan_section(reg, folders)
     with st.expander("Bring in a dataset from elsewhere — this machine, upload, Hugging Face, GitHub, Drive, "
-                     "cloud", expanded=not candidate_folders()):
+                     "cloud", expanded=not folders):
         fetch_section(reg)
     st.markdown("**Check one folder**")
-    folders = candidate_folders()
     choice = st.selectbox("Folder (data/incoming, data/raw)", folders + ["Other path…"], index=None,
                           placeholder="Choose a dataset folder")
     if choice == "Other path…":

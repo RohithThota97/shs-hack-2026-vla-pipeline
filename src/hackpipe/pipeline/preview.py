@@ -9,9 +9,8 @@ from hackpipe.common.lerobot_io import DatasetFolder
 from hackpipe.common.registry import Registry
 from hackpipe.common.writelock import machine_id
 from hackpipe.jobs.estimates import estimate
-from hackpipe.pipeline.sources import find_roots
+from hackpipe.pipeline.sources import SEARCH_DIRS, find_roots
 
-SEARCH_DIRS = ("data/incoming", "data/raw")
 
 
 def candidate_folders(base: Path = REPO_ROOT) -> list[str]:
@@ -20,14 +19,18 @@ def candidate_folders(base: Path = REPO_ROOT) -> list[str]:
     return sorted({source_key(r) for d in SEARCH_DIRS for r in find_roots(base / d)})
 
 
-def new_folders(registry: Registry | None = None, base: Path = REPO_ROOT) -> list[dict[str, Any]]:
-    """Folders with episodes the registry hasn't seen (or hasn't checked yet) — what "Add all new" runs on."""
+def new_folders(registry: Registry | None = None, base: Path = REPO_ROOT, folders: list[str] | None = None,
+                errors: list[str] | None = None) -> list[dict[str, Any]]:
+    """Folders with episodes the registry hasn't seen (or hasn't checked yet) — what "Add all new" runs on.
+    Folders that can't be read are skipped and, if `errors` is given, listed there."""
     reg = registry or Registry()
     out = []
-    for f in candidate_folders(base):
+    for f in candidate_folders(base) if folders is None else folders:
         try:
             p = preview(f, reg)
-        except (FileNotFoundError, ValueError, OSError):
+        except (FileNotFoundError, ValueError, KeyError, OSError) as e:
+            if errors is not None:
+                errors.append(f"{f}: {type(e).__name__}: {e}")
             continue
         if p["new"] or p["pending_qc"]:
             out.append(p)

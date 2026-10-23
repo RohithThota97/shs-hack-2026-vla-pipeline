@@ -20,7 +20,9 @@ from pathlib import Path
 from hackpipe.common.config import REPO_ROOT
 
 INCOMING = "data/incoming"
+SEARCH_DIRS = (INCOMING, "data/raw")      # where new dataset folders are looked for
 KINDS = ("local", "hf", "github", "gdrive", "cloud")
+KEY_DIR = Path.home() / ".cache" / "hackpipe" / "keys"
 MAX_DEPTH = 4          # how deep below a folder to look for meta/info.json
 _SKIP = {".git", "node_modules", "__pycache__", ".cache"}
 
@@ -58,6 +60,8 @@ def dataset_name(path: str | Path) -> str:
 
 
 def _dest(name: str, base: Path) -> Path:
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", name) or ".." in name:
+        raise ValueError(f"name {name!r}: use letters, digits, '.', '_' or '-' only (one folder, no '/' or '..')")
     d = base / INCOMING / name
     if d.exists() or d.is_symlink():
         raise FileExistsError(f"{d} already exists — pick another name or remove it")
@@ -83,8 +87,13 @@ def extract_zip(zip_path: str | Path, dest: Path) -> None:
 
 
 # ---------- one fetcher per kind; each fills dest ----------
+def local_path(src: str) -> Path:
+    """~ expanded, relative to the current directory (the console runs from the repo root)."""
+    return Path(os.path.abspath(Path(src).expanduser()))
+
+
 def fetch_local(src: str, dest: Path, copy: bool = False) -> None:
-    p = Path(src).expanduser()
+    p = local_path(src)
     if not p.exists():
         raise FileNotFoundError(src)
     if p.is_file() and p.suffix == ".zip":
@@ -124,12 +133,27 @@ def github_url(src: str) -> str:
     return s
 
 
+def _uses_lfs(repo: Path) -> bool:
+    return any("filter=lfs" in f.read_text(errors="replace") for f in repo.rglob(".gitattributes"))
+
+
 def fetch_github(src: str, dest: Path, revision: str | None = None) -> None:
     env = _git_env()
-    cmd = ["git", "clone", "--depth", "1", *(["--branch", revision] if revision else []), github_url(src), str(dest)]
-    subprocess.run(cmd, check=True, env=env)
-    if shutil.which("git-lfs"):               # datasets keep videos/parquet in LFS
-        subprocess.run(["git", "-C", str(dest), "lfs", "pull"], check=True, env=env)
+    git = ["git", "-C", str(dest)]
+    if revision and re.fullmatch(r"[0-9a-f]{7,40}", revision):     # a commit: --branch can't take it
+        dest.mkdir(parents=True)
+        subprocess.run([*git, "init", "-q"], check=True, env=env)
+        subprocess.run([*git, "remote", "add", "origin", github_url(src)], check=True, env=env)
+        subprocess.run([*git, "fetch", "--depth", "1", "origin", revision], check=True, env=env)
+        subprocess.run([*git, "checkout", "-q", "FETCH_HEAD"], check=True, env=env)
+    else:
+        subprocess.run(["git", "clone", "--depth", "1", *(["--branch", revision] if revision else []),
+                        github_url(src), str(dest)], check=True, env=env)
+    if _uses_lfs(dest):                       # datasets keep videos/parquet in LFS
+        if not shutil.which("git-lfs"):
+            raise RuntimeError("this repo stores files in Git LFS: install git-lfs (brew / apt install git-lfs), "
+                               "otherwise only small pointer files would be imported")
+        subprocess.run([*git, "lfs", "pull"], check=True, env=env)
     shutil.rmtree(dest / ".git", ignore_errors=True)
 
 
@@ -178,16 +202,21 @@ def fetch_cloud(url: str, dest: Path) -> None:
         opts["token"] = os.environ["GOOGLE_APPLICATION_CREDENTIALS"]
     if proto in ("az", "abfs") and os.environ.get("AZURE_STORAGE_CONNECTION_STRING"):
         opts["connection_string"] = os.environ["AZURE_STORAGE_CONNECTION_STRING"]
-    fs = fsspec.filesystem(proto, **opts)
-    path = url.split("://", 1)[1].rstrip("/")
-    if path.endswith(".zip"):
-        dest.mkdir(parents=True)
-        tmp = dest / "_download.zip"
-        fs.get(path, str(tmp))
-        extract_zip(tmp, dest)
-        tmp.unlink()
-    else:
-        fs.get(path + "/", str(dest), recursive=True)
+    try:
+        fs = fsspec.filesystem(proto, **opts)
+        path = url.split("://", 1)[1].rstrip("/")
+        if path.endswith(".zip"):
+            dest.mkdir(parents=True)
+            tmp = dest / "_download.zip"
+            fs.get(path, str(tmp))
+            extract_zip(tmp, dest)
+            tmp.unlink()
+        else:
+            fs.get(path + "/", str(dest), recursive=True)
+    finally:
+        key = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "")
+        if key and Path(key).parent == KEY_DIR:      # a key typed into the console: used once, then removed
+            Path(key).unlink(missing_ok=True)
 
 
 def fetch(kind: str, src: str, name: str | None = None, revision: str | None = None, subdir: str = "",
@@ -198,9 +227,9 @@ def fetch(kind: str, src: str, name: str | None = None, revision: str | None = N
     if kind not in KINDS:
         raise ValueError(f"kind must be one of {KINDS}")
     if kind == "local":
-        p = Path(os.path.abspath(Path(src).expanduser() if Path(src).is_absolute() else base / src))
-        homes = [base / d for d in (INCOMING, "data/raw")]
-        if p.is_dir() and any(p == h or h in p.parents for h in homes):
+        p = local_path(src)
+        homes = [(base / d).resolve() for d in SEARCH_DIRS]
+        if p.is_dir() and any(p.resolve() == h or h in p.resolve().parents for h in homes):
             return _check(p)
     dest = _dest(name or dataset_name(src), base)
     try:

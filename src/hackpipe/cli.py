@@ -6,6 +6,9 @@ import json
 import sys
 from pathlib import Path
 
+from hackpipe.pipeline.sources import KINDS as SOURCE_KINDS   # stdlib-only module, cheap to import
+
+
 
 def _print(obj) -> None:
     print(json.dumps(obj, indent=2, default=str))
@@ -43,7 +46,8 @@ def main(argv: list[str] | None = None) -> None:
     s.add_argument("--notes", default="")
     s = sub.add_parser("fetch", help="bring a dataset into data/incoming/<name> from a folder/zip, Hugging Face, "
                                      "GitHub, Google Drive or a cloud bucket; keys from the environment")
-    s.add_argument("--from", dest="kind", required=True, choices=["local", "hf", "github", "gdrive", "cloud"])
+    s.add_argument("--from", dest="kind", required=True, choices=SOURCE_KINDS,
+                   help="local = folder or zip on this machine (also a mounted Drive)")
     s.add_argument("src", help="path / zip, HF dataset repo ID, owner/repo or URL, Drive link, s3:// gs:// az://")
     s.add_argument("--name", help="folder name under data/incoming (default: from src)")
     s.add_argument("--revision", help="branch / tag / commit (hf, github)")
@@ -119,7 +123,7 @@ def main(argv: list[str] | None = None) -> None:
         from hackpipe.common.config import REPO_ROOT
         app = Path(__file__).parent / "console" / "app.py"
         sys.exit(subprocess.call([sys.executable, "-m", "streamlit", "run", str(app),
-                                  "--server.port", str(args.port), "--server.maxUploadSize", "8192"],
+                                  "--server.port", str(args.port), "--server.maxUploadSize", "2048"],
                                  cwd=REPO_ROOT))
     if args.cmd == "writer":
         from hackpipe.common import writelock
@@ -157,11 +161,14 @@ def main(argv: list[str] | None = None) -> None:
         from hackpipe.pipeline.auto import run_auto, run_auto_many
         if args.all:
             from hackpipe.pipeline.preview import candidate_folders
-            _print(run_auto_many(candidate_folders(), reg, args.notes))
+            out = run_auto_many(candidate_folders(), reg, args.notes)
         elif len(args.root) == 1:
-            _print(run_auto(args.root[0], reg, args.notes))
+            out = run_auto(args.root[0], reg, args.notes)
         else:
-            _print(run_auto_many(args.root, reg, args.notes))
+            out = run_auto_many(args.root, reg, args.notes)
+        _print(out)
+        if out.get("errors"):
+            sys.exit(1)
     elif args.cmd == "fetch":
         from hackpipe.common.config import source_key
         from hackpipe.pipeline.sources import fetch
@@ -170,7 +177,10 @@ def main(argv: list[str] | None = None) -> None:
             print(f"found dataset: {source_key(r)}")
         if args.auto:
             from hackpipe.pipeline.auto import run_auto_many
-            _print(run_auto_many([str(r) for r in roots], reg))
+            out = run_auto_many([str(r) for r in roots], reg)
+            _print(out)
+            if out.get("errors"):
+                sys.exit(1)
     elif args.cmd == "demo":
         from hackpipe.dataset.versioning import set_excluded
         set_excluded(args.demo_id, args.action == "exclude", args.reason, args.by, reg)

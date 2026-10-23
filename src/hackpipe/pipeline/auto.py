@@ -69,12 +69,19 @@ def run_auto(root: str, registry: Registry | None = None, notes: str = "") -> di
 
 
 def run_auto_many(roots: list[str], registry: Registry | None = None, notes: str = "") -> dict[str, Any]:
-    """Several folders (e.g. everything new under data/incoming + data/raw) → one draft version."""
+    """Several folders (e.g. everything new under data/incoming + data/raw) → one draft version. A folder that
+    fails is listed under "errors" and the others still go in."""
     reg = registry or Registry()
-    parts = [_import_and_check(r, reg) for r in roots]
-    out: dict[str, Any] = {"sources": [p for p, _ in parts], "version": None, "base": latest_approved(reg)}
-    if not roots:
-        out["reason"] = "no dataset folders found"
+    parts, errors = [], []
+    for r in roots:
+        try:
+            parts.append(_import_and_check(r, reg))
+        except Exception as e:  # noqa: BLE001 — report it, carry on with the other folders
+            errors.append({"source": source_key(r), "error": f"{type(e).__name__}: {e}"})
+    out: dict[str, Any] = {"sources": [p for p, _ in parts], "errors": errors, "version": None,
+                           "base": latest_approved(reg)}
+    if not parts:
+        out["reason"] = "no dataset folders could be read" if errors else "no dataset folders found"
         return out
     srcs = ", ".join(p["source"] for p, _ in parts)
     return _next_version(reg, out, any(c for _, c in parts), notes or f"auto: {srcs}")

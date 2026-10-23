@@ -53,11 +53,15 @@ def set_config_steps(config_path: str | Path, steps: int) -> None:
     p.write_text(new)
 
 
+TOP_LEVEL = ("seed", "policy_name", "keep_checkpoints")
+
+
 def apply_overrides(cfg: dict[str, Any], overrides: dict[str, Any]) -> dict[str, Any]:
-    """`seed` and `policy_name` are top-level config keys; everything else is a lerobot-train arg."""
+    """`seed`, `policy_name` and `keep_checkpoints` are top-level config keys; everything else is a
+    lerobot-train arg."""
     cfg = {**cfg, "args": dict(cfg.get("args") or {})}
     for k, v in overrides.items():
-        if k in ("seed", "policy_name"):
+        if k in TOP_LEVEL:
             cfg[k] = v
         else:
             cfg["args"][k] = v

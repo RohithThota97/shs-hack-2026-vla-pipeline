@@ -1,6 +1,7 @@
 """Add demonstrations from anywhere: discovery of nested folders, local folder / zip fetch, naming, one version
 for several new folders."""
 import base64
+import subprocess
 import zipfile
 
 import pytest
@@ -46,7 +47,7 @@ def test_fetch_local_folder_is_linked_zip_is_extracted(tmp_path):
 def test_fetch_local_inside_repo(tmp_path):
     repo = tmp_path / "repo"
     raw = make_dataset(repo / "data" / "raw" / "a", n_episodes=2)
-    assert sources.fetch("local", "data/raw/a", base=repo) == [raw]          # already in place
+    assert sources.fetch("local", str(raw), base=repo) == [raw]               # already in place
     other = make_dataset(repo / "data" / "organiser" / "b" / "b", n_episodes=2)
     roots = sources.fetch("local", str(other.parent), base=repo)              # elsewhere in the repo → linked
     assert roots == [repo / "data" / "incoming" / "b" / "b"]
@@ -95,3 +96,53 @@ def test_new_folders_and_one_version_for_all(workspace, monkeypatch):
     assert out["version"] == "ds-v1" and len(out["sources"]) == 2
     assert new_folders(reg, tmp) == []
     assert run_auto_many(folders, reg)["version"] is None       # nothing new → no second version
+
+
+@pytest.mark.parametrize("bad", ["../raw/foo", "a/b", "..", ".hidden", "x y"])
+def test_bad_names_are_refused(tmp_path, bad):
+    ds = make_dataset(tmp_path / "ds", n_episodes=2)
+    with pytest.raises(ValueError):
+        sources.fetch("local", str(ds), name=bad, base=tmp_path / "repo")
+    assert not (tmp_path / "repo" / "data" / "raw").exists()
+
+
+def test_one_bad_folder_does_not_stop_the_others(workspace):
+    tmp, reg = workspace
+    good = make_dataset(tmp / "good", n_episodes=6)
+    bad = tmp / "bad" / "meta"
+    bad.mkdir(parents=True)
+    (bad / "info.json").write_text("{not json")
+    out = run_auto_many([str(tmp / "bad"), str(good)], reg)
+    assert out["version"] == "ds-v1" and len(out["sources"]) == 1 and len(out["errors"]) == 1
+
+
+def _git_repo(path, files):
+    path.mkdir(parents=True)
+    for name, text in files.items():
+        (path / name).parent.mkdir(parents=True, exist_ok=True)
+        (path / name).write_text(text)
+    g = ["git", "-C", str(path), "-c", "user.name=t", "-c", "user.email=t@t"]
+    subprocess.run([*g[:3], "init", "-q"], check=True)
+    subprocess.run([*g[:3], "add", "-A"], check=True)
+    subprocess.run([*g, "commit", "-qm", "x"], check=True)
+    return subprocess.run([*g[:3], "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
+
+
+def test_github_fetch_by_commit(tmp_path):
+    src = tmp_path / "src"
+    ds = make_dataset(tmp_path / "tmpds", n_episodes=2)
+    files = {str(p.relative_to(ds.parent)): "" for p in ds.rglob("*") if p.is_file()}
+    files = {k: (ds.parent / k).read_text(errors="replace") if k.endswith(".json") else "x" for k in files}
+    sha = _git_repo(src, files)
+    roots = sources.fetch("github", f"file://{src}", name="g", revision=sha, base=tmp_path / "repo")
+    assert [r.name for r in roots] == ["tmpds"] and not (tmp_path / "repo" / "data" / "incoming" / "g" / ".git").exists()
+
+
+def test_github_lfs_without_git_lfs_fails_clearly(tmp_path, monkeypatch):
+    src = tmp_path / "src"
+    _git_repo(src, {".gitattributes": "*.mp4 filter=lfs diff=lfs merge=lfs -text\n", "meta/info.json": "{}"})
+    real = sources.shutil.which
+    monkeypatch.setattr(sources.shutil, "which", lambda n: None if n == "git-lfs" else real(n))
+    with pytest.raises(RuntimeError, match="git-lfs"):
+        sources.fetch("github", f"file://{src}", name="g", base=tmp_path / "repo")
+    assert not (tmp_path / "repo" / "data" / "incoming" / "g").exists()
