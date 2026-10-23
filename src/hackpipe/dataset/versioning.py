@@ -261,7 +261,13 @@ def create_dataset_version(registry: Registry | None = None, cfg: dict[str, Any]
         if not added and not removed and subtasks is None:
             raise NothingNewError(f"Nothing new since {base}: no added or removed demos, so no new version.")
         new_cfg = {**cfg, "splits": {**cfg["splits"], "test": 0.0, "test_episodes": []}}
-        new = split_demos(added, new_cfg) if added else {"train": [], "val": [], "test": []}
+        # copies of a demo (sim re-renders, perturbed replays) go where their original is, never across splits
+        follow = {k: [d for d in added if d["meta"].get("derived_from") in base_ids[k]] for k in ("train", "val", "test")}
+        if follow["test"]:
+            raise LeakageError(f"{len(follow['test'])} added demos are copies of test demos: they can't be trained on")
+        rest = [d for d in added if d not in follow["train"] and d not in follow["val"]]
+        new = split_demos(rest, new_cfg) if rest else {"train": [], "val": [], "test": []}
+        new = {"train": follow["train"] + new["train"], "val": follow["val"] + new["val"], "test": new["test"]}
         splits = {
             "train": [by_id[i] for i in sorted(base_ids["train"]) if i in by_id] + new["train"],
             "val": [by_id[i] for i in sorted(base_ids["val"]) if i in by_id] + new["val"],

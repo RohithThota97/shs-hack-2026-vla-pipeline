@@ -150,6 +150,9 @@ def build_demo_records(root: str | Path, source: str | None = None,
             stage_root = (extra.get("stack_lock") or {}).get("root")
             if stage_root:
                 environment["layout_id"] = Path(stage_root).name.split(".")[0]
+        derived = extra.get("derived_from") or {}
+        derived_id = (demo_id(derived["source"], int(derived["episode_index"]))
+                      if derived.get("source") and derived.get("episode_index") is not None else None)
         records.append({
             "demo_id": demo_id(source, ep_idx),
             "source": source,
@@ -173,6 +176,8 @@ def build_demo_records(root: str | Path, source: str | None = None,
                 "operator": proj["demo_defaults"]["operator"],
                 "environment": environment,
                 "outcome": _outcome(extra) if extra else None,
+                # re-rendered / perturbed copy of another demo (sim recordings): keeps that demo's split
+                "derived_from": derived_id,
                 "content_sha256": _episode_checksum(ep, hash_cols),
                 "trajectory_sha256": _episode_checksum(ep, [cfg["state"], cfg["action"]]),
                 "files_sha256": files,

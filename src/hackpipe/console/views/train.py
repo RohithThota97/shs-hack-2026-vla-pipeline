@@ -135,7 +135,8 @@ else:
     save_freq = int(overrides.get("save_freq", args.get("save_freq", 1000)))
     log_freq = int(overrides.get("log_freq", args.get("log_freq", 50)))
     rate = float(overrides.get("rate_hz", args.get("rate_hz", cur.DEFAULTS["rate_hz"])))
-    frames = (progress.curriculum_frames(ds, reg, rate) if curriculum and manifest.get("subtasks")
+    frames = (progress.curriculum_frames(ds, reg, rate, overrides.get("train_sources", args.get("train_sources")))
+              if curriculum and manifest.get("subtasks")
               else progress.train_frames(ds, reg))
 
     tabs = st.tabs(["Setup & dry run", "Timing run", "Step budget", "Full run", "Runs"])
