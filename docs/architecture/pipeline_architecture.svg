@@ -10,13 +10,13 @@
 <rect x="54" y="176" width="308" height="104" rx="10" fill="#fff" stroke="#475569" stroke-width="1.6" />
 <rect x="54" y="176" width="6" height="104" rx="3" fill="#475569"/>
 <text x="72" y="206" font-size="18" font-weight="700" fill="#1f2937">Organiser download</text>
-<text x="72" y="232" font-size="14.5" fill="#4b5563">data/C2_Teach-the-robot_VLA (folders or</text>
-<text x="72" y="252" font-size="14.5" fill="#4b5563">zips)</text>
+<text x="72" y="232" font-size="14.5" fill="#4b5563">data/C2_Teach-the-robot_VLA (folders</text>
+<text x="72" y="252" font-size="14.5" fill="#4b5563">or zips)</text>
 <rect x="54" y="294" width="308" height="104" rx="10" fill="#fff" stroke="#475569" stroke-width="1.6" />
 <rect x="54" y="294" width="6" height="104" rx="3" fill="#475569"/>
 <text x="72" y="324" font-size="18" font-weight="700" fill="#1f2937">Google Drive</text>
-<text x="72" y="350" font-size="14.5" fill="#4b5563">Colab mount · Drive for desktop · shared</text>
-<text x="72" y="370" font-size="14.5" fill="#4b5563">link</text>
+<text x="72" y="350" font-size="14.5" fill="#4b5563">Colab mount · Drive for desktop ·</text>
+<text x="72" y="370" font-size="14.5" fill="#4b5563">shared link</text>
 <rect x="54" y="412" width="308" height="104" rx="10" fill="#fff" stroke="#475569" stroke-width="1.6" />
 <rect x="54" y="412" width="6" height="104" rx="3" fill="#475569"/>
 <text x="72" y="442" font-size="18" font-weight="700" fill="#1f2937">Upload / local folder</text>
@@ -29,8 +29,8 @@
 <rect x="54" y="648" width="308" height="104" rx="10" fill="#fff" stroke="#475569" stroke-width="1.6" />
 <rect x="54" y="648" width="6" height="104" rx="3" fill="#475569"/>
 <text x="72" y="678" font-size="18" font-weight="700" fill="#1f2937">Cloud bucket</text>
-<text x="72" y="704" font-size="14.5" fill="#4b5563">S3 · GCS · Azure — keys only as job env</text>
-<text x="72" y="724" font-size="14.5" fill="#4b5563">vars</text>
+<text x="72" y="704" font-size="14.5" fill="#4b5563">S3 · GCS · Azure — keys only as job</text>
+<text x="72" y="724" font-size="14.5" fill="#4b5563">env vars</text>
 <line x1="378" y1="444" x2="413" y2="444" stroke="#374151" stroke-width="3" marker-end="url(#a)"/>
 <rect x="416" y="112" width="336" height="658" rx="16" fill="#eff6ff" stroke="#1d4ed8" stroke-opacity=".35"/>
 <rect x="416" y="112" width="336" height="48" rx="16" fill="#1d4ed8"/><rect x="416" y="142" width="336" height="18" fill="#1d4ed8"/>
@@ -45,8 +45,8 @@
 <rect x="430" y="294" width="308" height="104" rx="10" fill="#fff" stroke="#1d4ed8" stroke-width="1.6" />
 <rect x="430" y="294" width="6" height="104" rx="3" fill="#1d4ed8"/>
 <text x="448" y="324" font-size="18" font-weight="700" fill="#1f2937">R2 · Quality checks</text>
-<text x="448" y="350" font-size="14.5" fill="#4b5563">NaN, gaps, video decode, length ≥ 50 s →</text>
-<text x="448" y="370" font-size="14.5" fill="#4b5563">VALID / REVIEW / INVALID</text>
+<text x="448" y="350" font-size="14.5" fill="#4b5563">NaN, gaps, video decode, length ≥ 50 s</text>
+<text x="448" y="370" font-size="14.5" fill="#4b5563">→ VALID / REVIEW / INVALID</text>
 <line x1="584.0" y1="399" x2="584.0" y2="411" stroke="#6b7280" stroke-width="2" marker-end="url(#a)"/>
 <rect x="430" y="412" width="308" height="104" rx="10" fill="#fff" stroke="#1d4ed8" stroke-width="1.6" />
 <rect x="430" y="412" width="6" height="104" rx="3" fill="#1d4ed8"/>
@@ -83,8 +83,8 @@
 <rect x="806" y="412" width="308" height="104" rx="10" fill="#fff" stroke="#6d28d9" stroke-width="1.6" />
 <rect x="806" y="412" width="6" height="104" rx="3" fill="#6d28d9"/>
 <text x="824" y="442" font-size="18" font-weight="700" fill="#1f2937">Dry run → timing → full run</text>
-<text x="824" y="468" font-size="14.5" fill="#4b5563">steps set from the measured seconds per</text>
-<text x="824" y="488" font-size="14.5" fill="#4b5563">step</text>
+<text x="824" y="468" font-size="14.5" fill="#4b5563">steps set from the measured seconds</text>
+<text x="824" y="488" font-size="14.5" fill="#4b5563">per step</text>
 <line x1="960.0" y1="517" x2="960.0" y2="529" stroke="#6b7280" stroke-width="2" marker-end="url(#a)"/>
 <rect x="806" y="530" width="308" height="104" rx="10" fill="#fff" stroke="#6d28d9" stroke-width="1.6" />
 <rect x="806" y="530" width="6" height="104" rx="3" fill="#6d28d9"/>
@@ -105,8 +105,8 @@
 <rect x="1182" y="176" width="308" height="104" rx="10" fill="#fff" stroke="#0f766e" stroke-width="1.6" />
 <rect x="1182" y="176" width="6" height="104" rx="3" fill="#0f766e"/>
 <text x="1200" y="206" font-size="18" font-weight="700" fill="#1f2937">Test suite test-vN</text>
-<text x="1200" y="232" font-size="14.5" fill="#4b5563">frozen; the same scenarios and seeds for</text>
-<text x="1200" y="252" font-size="14.5" fill="#4b5563">every model</text>
+<text x="1200" y="232" font-size="14.5" fill="#4b5563">frozen; the same scenarios and seeds</text>
+<text x="1200" y="252" font-size="14.5" fill="#4b5563">for every model</text>
 <line x1="1336.0" y1="281" x2="1336.0" y2="293" stroke="#6b7280" stroke-width="2" marker-end="url(#a)"/>
 <rect x="1182" y="294" width="308" height="104" rx="10" fill="#fff" stroke="#0f766e" stroke-width="1.6" />
 <rect x="1182" y="294" width="6" height="104" rx="3" fill="#0f766e"/>
@@ -123,14 +123,14 @@
 <rect x="1182" y="530" width="308" height="104" rx="10" fill="#fff" stroke="#0f766e" stroke-width="1.6" />
 <rect x="1182" y="530" width="6" height="104" rx="3" fill="#0f766e"/>
 <text x="1200" y="560" font-size="18" font-weight="700" fill="#1f2937">Option A · Success judge</text>
-<text x="1200" y="586" font-size="14.5" fill="#4b5563">success and progress from state / vision</text>
-<text x="1200" y="606" font-size="14.5" fill="#4b5563">traces</text>
+<text x="1200" y="586" font-size="14.5" fill="#4b5563">success and progress from state /</text>
+<text x="1200" y="606" font-size="14.5" fill="#4b5563">vision traces</text>
 <line x1="1336.0" y1="635" x2="1336.0" y2="647" stroke="#6b7280" stroke-width="2" marker-end="url(#a)"/>
 <rect x="1182" y="648" width="308" height="104" rx="10" fill="#fff" stroke="#0f766e" stroke-width="1.6" />
 <rect x="1182" y="648" width="6" height="104" rx="3" fill="#0f766e"/>
 <text x="1200" y="678" font-size="18" font-weight="700" fill="#1f2937">R8 · Explain failures</text>
-<text x="1200" y="704" font-size="14.5" fill="#4b5563">failure category + one-line summary per</text>
-<text x="1200" y="724" font-size="14.5" fill="#4b5563">episode</text>
+<text x="1200" y="704" font-size="14.5" fill="#4b5563">failure category + one-line summary</text>
+<text x="1200" y="724" font-size="14.5" fill="#4b5563">per episode</text>
 <line x1="1506" y1="444" x2="1541" y2="444" stroke="#374151" stroke-width="3" marker-end="url(#a)"/>
 <rect x="1544" y="112" width="336" height="658" rx="16" fill="#fffbeb" stroke="#b45309" stroke-opacity=".35"/>
 <rect x="1544" y="112" width="336" height="48" rx="16" fill="#b45309"/><rect x="1544" y="142" width="336" height="18" fill="#b45309"/>
@@ -145,39 +145,40 @@
 <rect x="1558" y="294" width="308" height="104" rx="10" fill="#fff" stroke="#b45309" stroke-width="1.6" />
 <rect x="1558" y="294" width="6" height="104" rx="3" fill="#b45309"/>
 <text x="1576" y="324" font-size="18" font-weight="700" fill="#1f2937">R7 · Model card</text>
-<text x="1576" y="350" font-size="14.5" fill="#4b5563">results with CIs, failures, limitations,</text>
-<text x="1576" y="370" font-size="14.5" fill="#4b5563">comparison</text>
+<text x="1576" y="350" font-size="14.5" fill="#4b5563">results with CIs, failures,</text>
+<text x="1576" y="370" font-size="14.5" fill="#4b5563">limitations, comparison</text>
 <line x1="1712.0" y1="399" x2="1712.0" y2="411" stroke="#6b7280" stroke-width="2" marker-end="url(#a)"/>
 <rect x="1558" y="412" width="308" height="104" rx="10" fill="#fff" stroke="#b45309" stroke-width="1.6" />
 <rect x="1558" y="412" width="6" height="104" rx="3" fill="#b45309"/>
 <text x="1576" y="442" font-size="18" font-weight="700" fill="#1f2937">R10 · Deploy</text>
-<text x="1576" y="468" font-size="14.5" fill="#4b5563">smoke test, deployment record, one-step</text>
-<text x="1576" y="488" font-size="14.5" fill="#4b5563">rollback</text>
+<text x="1576" y="468" font-size="14.5" fill="#4b5563">smoke test, deployment record, one-</text>
+<text x="1576" y="488" font-size="14.5" fill="#4b5563">step rollback</text>
 <line x1="1712.0" y1="517" x2="1712.0" y2="529" stroke="#6b7280" stroke-width="2" marker-end="url(#a)"/>
 <rect x="1558" y="530" width="308" height="104" rx="10" fill="#fff" stroke="#b45309" stroke-width="1.6" />
 <rect x="1558" y="530" width="6" height="104" rx="3" fill="#b45309"/>
 <text x="1576" y="560" font-size="18" font-weight="700" fill="#1f2937">Hub publish</text>
 <text x="1576" y="586" font-size="14.5" fill="#4b5563">model + card only (private) — the</text>
 <text x="1576" y="606" font-size="14.5" fill="#4b5563">dataset never leaves Drive</text>
-<path d="M1336.0 770 V812 H584.0 V772" fill="none" stroke="#dc2626" stroke-width="3" stroke-dasharray="9 6" marker-end="url(#a)"/>
-<rect x="460.0" y="797" width="1000" height="30" rx="15" fill="#fef2f2" stroke="#dc2626"/>
-<text x="960.0" y="818" font-size="15.5" font-weight="600" fill="#b91c1c" text-anchor="middle">R11 · Option B self-improving loop: weak scenario categories → ~20 targeted demos each → ds-v(N+1) → m-v(N+1) → same test suite</text>
-<text x="40" y="854" font-size="15" font-weight="700" fill="#4b5563" letter-spacing="1.5">SHARED PLATFORM — USED BY EVERY STAGE</text>
-<rect x="40.0" y="870" width="442.0" height="112" rx="12" fill="#f9fafb" stroke="#374151" stroke-width="1.5"/>
-<text x="60.0" y="904" font-size="18" font-weight="700" fill="#1f2937">SQLite registry</text>
-<text x="60.0" y="932" font-size="14.5" fill="#4b5563">demos · datasets · models · evals · deployments; one</text>
-<text x="60.0" y="953" font-size="14.5" fill="#4b5563">writer at a time</text>
-<rect x="506.0" y="870" width="442.0" height="112" rx="12" fill="#f9fafb" stroke="#374151" stroke-width="1.5"/>
-<text x="526.0" y="904" font-size="18" font-weight="700" fill="#1f2937">Background job runner</text>
-<text x="526.0" y="932" font-size="14.5" fill="#4b5563">every long step runs as a job with its own log;</text>
-<text x="526.0" y="953" font-size="14.5" fill="#4b5563">secrets only as env vars</text>
-<rect x="972.0" y="870" width="442.0" height="112" rx="12" fill="#f9fafb" stroke="#374151" stroke-width="1.5"/>
-<text x="992.0" y="904" font-size="18" font-weight="700" fill="#1f2937">Web console + hackpipe CLI</text>
-<text x="992.0" y="932" font-size="14.5" fill="#4b5563">Streamlit pages: Data · Train · Evaluate · Deploy ·</text>
-<text x="992.0" y="953" font-size="14.5" fill="#4b5563">Improve</text>
-<rect x="1438.0" y="870" width="442.0" height="112" rx="12" fill="#f9fafb" stroke="#374151" stroke-width="1.5"/>
-<text x="1458.0" y="904" font-size="18" font-weight="700" fill="#1f2937">Storage: Google Drive (15 GB)</text>
-<text x="1458.0" y="932" font-size="14.5" fill="#4b5563">datasets as zips · last 2 checkpoints · nothing on</text>
-<text x="1458.0" y="953" font-size="14.5" fill="#4b5563">HF / Kaggle / GitHub</text>
+<path d="M1712.0 770 V804 H584.0 V772" fill="none" stroke="#dc2626" stroke-width="3" stroke-dasharray="9 6" marker-end="url(#a)"/>
+<path d="M1336.0 770 V804" fill="none" stroke="#dc2626" stroke-width="3" stroke-dasharray="9 6"/>
+<rect x="460.0" y="816" width="1000" height="30" rx="15" fill="#fef2f2" stroke="#dc2626"/>
+<text x="960.0" y="837" font-size="15.5" font-weight="600" fill="#b91c1c" text-anchor="middle">R11 · Option B self-improving loop: weak scenario categories → ~20 targeted demos each → ds-v(N+1) → m-v(N+1) → same test suite</text>
+<text x="40" y="876" font-size="15" font-weight="700" fill="#4b5563" letter-spacing="1.5">SHARED PLATFORM — USED BY EVERY STAGE</text>
+<rect x="40.0" y="892" width="442.0" height="112" rx="12" fill="#f9fafb" stroke="#374151" stroke-width="1.5"/>
+<text x="60.0" y="926" font-size="18" font-weight="700" fill="#1f2937">SQLite registry</text>
+<text x="60.0" y="954" font-size="14.5" fill="#4b5563">demos · datasets · models · evals · deployments; one</text>
+<text x="60.0" y="975" font-size="14.5" fill="#4b5563">writer at a time</text>
+<rect x="506.0" y="892" width="442.0" height="112" rx="12" fill="#f9fafb" stroke="#374151" stroke-width="1.5"/>
+<text x="526.0" y="926" font-size="18" font-weight="700" fill="#1f2937">Background job runner</text>
+<text x="526.0" y="954" font-size="14.5" fill="#4b5563">every long step runs as a job with its own log;</text>
+<text x="526.0" y="975" font-size="14.5" fill="#4b5563">secrets only as env vars</text>
+<rect x="972.0" y="892" width="442.0" height="112" rx="12" fill="#f9fafb" stroke="#374151" stroke-width="1.5"/>
+<text x="992.0" y="926" font-size="18" font-weight="700" fill="#1f2937">Web console + hackpipe CLI</text>
+<text x="992.0" y="954" font-size="14.5" fill="#4b5563">Streamlit pages: Data · Train · Evaluate · Deploy ·</text>
+<text x="992.0" y="975" font-size="14.5" fill="#4b5563">Improve</text>
+<rect x="1438.0" y="892" width="442.0" height="112" rx="12" fill="#f9fafb" stroke="#374151" stroke-width="1.5"/>
+<text x="1458.0" y="926" font-size="18" font-weight="700" fill="#1f2937">Storage: Google Drive (15 GB)</text>
+<text x="1458.0" y="954" font-size="14.5" fill="#4b5563">datasets as zips · last 2 checkpoints · no datasets</text>
+<text x="1458.0" y="975" font-size="14.5" fill="#4b5563">on HF / Kaggle / GitHub</text>
 <text x="1880" y="1058" font-size="13" fill="#9ca3af" text-anchor="end">23 Oct 2026 · SHS Hackathon 2026 · CathCrew</text>
 </svg>
