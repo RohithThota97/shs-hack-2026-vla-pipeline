@@ -324,8 +324,12 @@ def main(argv: list[str] | None = None) -> None:
             _print({k: rec.get(k) for k in ("model_version", "dataset_version", "output_dir", "exit_code")})
             if args.then_eval and not args.dry_run and args.purpose == "model" and rec.get("exit_code") == 0:
                 from hackpipe.evaluation.offline import offline_eval
-                r = offline_eval(rec["model_version"], reg)
-                _print({"offline_eval": r["file"], "executed_arm_mean": (r.get("executed") or {}).get("arm_mean")})
+                try:                          # training succeeded; an eval failure must not fail the job
+                    r = offline_eval(rec["model_version"], reg)
+                    _print({"offline_eval": r["file"], "executed_arm_mean": (r.get("executed") or {}).get("arm_mean")})
+                except Exception as e:  # noqa: BLE001
+                    print(f"training finished, but the offline eval failed: {type(e).__name__}: {e} — run it again "
+                          f"from the Evaluate page (hackpipe eval --model {rec['model_version']} --offline)", flush=True)
     elif args.cmd == "sim":
         if args.action == "reference":
             from hackpipe.sim.reference import write_reference

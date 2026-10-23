@@ -12,7 +12,7 @@ from hackpipe.common.config import REPO_ROOT, gates_config
 from hackpipe.common.registry import Registry
 from hackpipe.console.components.shell import machine_info
 from hackpipe.console.theme import TOKENS, badge
-from hackpipe.evaluation.offline import pending
+from hackpipe.evaluation.offline import is_running, pending
 from hackpipe.evaluation.runner import load_results
 from hackpipe.gates.verdict import offline_result, sim_result, verdict
 from hackpipe.jobs import runner
@@ -22,8 +22,9 @@ st.markdown("### Evaluate")
 st.caption("04 Evaluate — offline on the held-out test source (lighting10, never trained on), closed loop from "
            "Isaac Sim runs, then the gates in `configs/gates.yaml` decide: DEPLOY · MORE TRAINING · HOLD.")
 gpus = machine_info()["gpus"]
-FINISHED = ("trained", "evaluated", "deployed", "rolled_back")
+from hackpipe.training.ranking import FINISHED  # noqa: E402 — same "finished" as the ranking and pending()
 models = [m for m in reg.models() if m["meta"].get("purpose") != "timing" and m["status"] in FINISHED]
+dataset_of = {m["version"]: m["dataset_version"] for m in models}
 
 
 def writer_ok() -> tuple[bool, str]:
@@ -57,13 +58,20 @@ if not models:
     st.stop()
 
 todo = pending(reg)
-verdicts = {m["version"]: verdict(m["version"], reg, write=False) for m in models}
+offs = {m["version"]: offline_result(m["version"]) for m in models}         # each file read once per rerun
+deployed = reg.current_deployed_model()
+ref = offs.get(deployed) if deployed in offs else (offline_result(deployed) if deployed else None)
+verdicts = {v: verdict(v, reg, write=False, off=o, deployed=deployed, ref=ref) for v, o in offs.items()}
+busy = {m["version"] for m in models if is_running(m["version"])}
+busy_jobs = bool([j for j in running if j["kind"] == "eval_offline"])
 c1, c2 = st.columns([2, 1])
 pick = c1.selectbox("Model", [m["version"] for m in models][::-1],
-                    format_func=lambda v: f"{v} · {reg.get_model(v)['dataset_version']} · {verdicts[v]['verdict']}")
+                    format_func=lambda v: f"{v} · {dataset_of[v]} · {verdicts[v]['verdict']}"
+                    + (" · evaluating …" if v in busy else ""))
 model = reg.get_model(pick)
 c2.markdown("&nbsp;")
-if c2.button(f"Evaluate all pending ({len(todo)})", disabled=not todo or not ok, help=why or None,
+if c2.button(f"Evaluate all pending ({len(todo)})", disabled=not todo or not ok or busy_jobs,
+             help=why or ("an offline eval job is already queued or running" if busy_jobs else None),
              use_container_width=True):
     jid = runner.submit("eval_offline", runner.hackpipe_cmd("eval", "--model", "pending", "--offline"),
                         needs="gpu" if gpus else "cpu", label=f"Offline eval · {', '.join(todo)}", registry=reg,
@@ -78,8 +86,10 @@ with st.container(border=True):
               + (f" · regression reference: deployed {v['reference']}" if v.get("reference") else ""))
     for t in v["todo"]:
         a.markdown(f"- {t}")
-    if b.button("Run offline eval (test split)", type="primary", use_container_width=True, disabled=not ok,
-                help=why or ("" if gpus else "no GPU here: runs on the CPU (slow — about an hour or more)")):
+    if b.button("Run offline eval (test split)", type="primary", use_container_width=True,
+                disabled=not ok or pick in busy or busy_jobs,
+                help=why or ("an offline eval is already running" if pick in busy or busy_jobs else
+                             "" if gpus else "no GPU here: runs on the CPU (slow — about an hour or more)")):
         jid = runner.submit("eval_offline", runner.hackpipe_cmd("eval", "--model", pick, "--offline"),
                             needs="gpu" if gpus else "cpu", label=f"Offline eval · {pick}", registry=reg,
                             extra_meta={"models": [pick]})
@@ -94,7 +104,7 @@ tabs = st.tabs(["Offline (test split)", "Isaac Sim", "Compare models"])
 
 # ---------- offline ----------
 with tabs[0]:
-    off = offline_result(pick)
+    off = offs[pick]
     if off is None:
         st.info("No offline eval yet. **Run offline eval** above (the test split is the held-out lighting10 source; "
                 "about 15–30 min on a T4 with the robustness variants).")
@@ -132,12 +142,14 @@ with tabs[0]:
                 st.markdown(f"**Robustness** (× baseline {rob['baseline_chunk_arm_rad']} rad, "
                             f"{rob['episodes_per_source']} episodes)")
                 lim = gates_config()["offline"]["block"]["robustness_ratio_max"]
-                ks = list(rob["variants"])
+                ks = [k for k in rob["variants"] if rob["variants"][k].get("ratio") is not None]
                 chart(go.Figure(go.Bar(x=ks, y=[rob["variants"][k]["ratio"] for k in ks],
                                        marker_color=[TOKENS["bad"] if rob["variants"][k]["ratio"] > lim
                                                      else TOKENS["info"] for k in ks])),
                       yaxis_title="error ÷ baseline", shapes=[{"type": "line", "xref": "paper", "x0": 0, "x1": 1,
                                                                "y0": lim, "y1": lim, "line": {"dash": "dot"}}])
+                for k, why_skip in (rob.get("skipped") or {}).items():
+                    st.caption(f"`{k}` not measured: {why_skip}")
             else:
                 st.caption("Robustness not measured (run without `--no-robustness`).")
         sm = off.get("smoothness") or {}
@@ -152,7 +164,8 @@ with tabs[0]:
 
 # ---------- Isaac Sim ----------
 with tabs[1]:
-    evs = [e for e in reg.evals(pick) if e["metrics"].get("stage_counts_0to4") is not None]
+    evs = [e for e in reg.evals(pick) if e["metrics"].get("stage_counts_0to4") is not None
+           and not e["metrics"].get("fake_results")]                         # same rule as the verdict
     with st.expander("Import an Isaac Sim run (eval_isaac.py on the site PC)", expanded=not evs):
         st.caption("Run eval_isaac.py with `--ref` from `hackpipe sim reference` (held-out lighting) — see the runbook. "
                    "Paths are on this machine.")
@@ -206,7 +219,7 @@ with tabs[1]:
 with tabs[2]:
     rows = []
     for m in models:
-        off = offline_result(m["version"])
+        off = offs[m["version"]]
         ex = (off or {}).get("executed") or {}
         allrow = next((r for r in (off or {}).get("rows", []) if r["instruction"] == "full"
                        and r["subtask"].endswith("· all")), {})

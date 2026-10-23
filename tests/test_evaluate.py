@@ -136,3 +136,62 @@ def test_evaluate_page(workspace, dataset, monkeypatch):
     assert not at.exception, [e.message for e in at.exception]
     assert any("DEPLOY" in m.value for m in at.markdown)
     assert {m.label for m in at.metric} >= {"Arm error, executed", "Gripper events caught", "Re-plan latency"}
+
+
+def _dtw_ref(a, b):
+    n, m = len(a), len(b)
+    c = np.abs(a[:, None] - b[None]).mean(-1)
+    acc = np.full((n + 1, m + 1), np.inf)
+    acc[0, 0] = 0
+    st = np.zeros((n + 1, m + 1), int)
+    for i in range(1, n + 1):
+        for j in range(1, m + 1):
+            p = min((acc[i - 1, j - 1], st[i - 1, j - 1]), (acc[i - 1, j], st[i - 1, j]), (acc[i, j - 1], st[i, j - 1]))
+            acc[i, j], st[i, j] = c[i - 1, j - 1] + p[0], p[1] + 1
+    return acc[n, m] / st[n, m]
+
+
+def test_dtw_vectorised_matches_reference():
+    from hackpipe.evaluation.offline import dtw
+    rng = np.random.default_rng(1)
+    for n, m in ((7, 11), (13, 5), (1, 4)):
+        a, b = rng.normal(size=(n, 3)), rng.normal(size=(m, 3))
+        assert dtw(a, b) == pytest.approx(_dtw_ref(a, b))
+
+
+def test_review_fixes(workspace, dataset, monkeypatch):
+    import os
+    from hackpipe.cli import main
+    from hackpipe.common.config import project_config, resolve
+    from hackpipe.evaluation.offline import pending, running_marker
+    from hackpipe.gates.verdict import verdict
+    tmp, reg = _models(workspace, dataset)
+    runs = resolve(project_config()["project"]["outputs_dir"]) / "runs"
+    (runs / "m-v1").mkdir(parents=True)
+    (runs / "m-v1" / "offline_eval_test.json").write_text(json.dumps({"rows": []}))   # made before these metrics
+    v = verdict("m-v1", reg)
+    assert v["verdict"] == "NOT EVALUATED" and "predates" in v["todo"][0] and "m-v1" in pending(reg)
+    running_marker("m-v2").parent.mkdir(parents=True, exist_ok=True)
+    running_marker("m-v2").write_text(f"{os.getpid()} now")                           # an eval is running
+    assert pending(reg) == ["m-v1"]
+    running_marker("m-v2").write_text("999999999 old")                                # stale marker: dead pid
+    assert "m-v2" in pending(reg)
+    _offline("m-v1")
+    off = json.loads((runs / "m-v1" / "offline_eval_test.json").read_text())
+    off["robustness"] = {}                                                            # --no-robustness
+    v = verdict("m-v1", reg, off=off)
+    assert v["verdict"] == "NOT EVALUATED" and "not measured" in v["todo"][0]
+    off["executed"]["arm_p99"] = float("nan")                                         # non-finite: no crash
+    assert verdict("m-v1", reg, off=off)["verdict"] == "NOT EVALUATED"
+    off = json.loads((runs / "m-v1" / "offline_eval_test.json").read_text())
+    off["robustness"]["skipped"] = {"reworded_instruction": "no paraphrase matches"}
+    del off["robustness"]["variants"]["reworded_instruction"]
+    v = verdict("m-v1", reg, off=off)
+    row = next(r for r in v["offline_gates"] if "reworded" in r["gate"])
+    assert v["verdict"] == "HOLD: SIM UNVERIFIED" and row["value"] == "not applicable" and not row["blocking"]
+    reg.set_model_status("m-v2", "rolled_back")
+    assert "m-v2" in pending(reg)
+    monkeypatch.setattr("hackpipe.training.train.train", lambda *a, **k: {"model_version": "m-v2", "exit_code": 0})
+    monkeypatch.setattr("hackpipe.evaluation.offline.offline_eval",
+                        lambda *a, **k: (_ for _ in ()).throw(KeyError("camera")))
+    main(["train", "--config", "configs/train/smolvla_fr3_duo.yaml", "--dataset", "ds-v1", "--then-eval"])  # no raise

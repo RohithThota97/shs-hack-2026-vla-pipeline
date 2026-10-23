@@ -106,11 +106,14 @@ def dtw(a: np.ndarray, b: np.ndarray) -> float:
     acc = np.full((n + 1, m + 1), np.inf)
     acc[0, 0] = 0.0
     steps = np.zeros((n + 1, m + 1), np.int64)
-    for i in range(1, n + 1):
-        for j in range(1, m + 1):
-            prev = min((acc[i - 1, j - 1], steps[i - 1, j - 1]), (acc[i - 1, j], steps[i - 1, j]),
-                       (acc[i, j - 1], steps[i, j - 1]))
-            acc[i, j], steps[i, j] = cost[i - 1, j - 1] + prev[0], prev[1] + 1
+    for d in range(2, n + m + 1):             # cells on one anti-diagonal depend only on the two before it
+        i = np.arange(max(1, d - m), min(n, d - 1) + 1)
+        j = d - i
+        cand = np.stack([acc[i - 1, j - 1], acc[i - 1, j], acc[i, j - 1]])
+        cs = np.stack([steps[i - 1, j - 1], steps[i - 1, j], steps[i, j - 1]])
+        k = cand.argmin(0)
+        acc[i, j] = cost[i - 1, j - 1] + cand[k, np.arange(len(i))]
+        steps[i, j] = cs[k, np.arange(len(i))] + 1
     return float(acc[n, m] / steps[n, m])
 
 
@@ -312,17 +315,40 @@ def latency(predict: Callable[..., np.ndarray], table: dict[str, Any], rate_hz: 
 
 
 def pending(reg: Registry, split: str = "test") -> list[str]:
-    """Finished models (not timing runs) with a checkpoint here and no offline eval of this split yet."""
+    """Finished models (not timing runs) with a checkpoint here, no current offline eval of this split (none, or
+    one from before the executed-stream metrics) and none running."""
+    from hackpipe.training.ranking import FINISHED
     out_dir = resolve(project_config()["project"]["outputs_dir"]) / "runs"
+
+    def done(v: str) -> bool:
+        f = out_dir / v / f"offline_eval_{split}.json"
+        return f.is_file() and is_current(json.loads(f.read_text()))
+
     return [m["version"] for m in reg.models()
-            if m["meta"].get("purpose") != "timing" and m["status"] in ("trained", "evaluated", "deployed")
+            if m["meta"].get("purpose") != "timing" and m["status"] in FINISHED
             and (resolve(m["checkpoint_dir"] or ".") / "config.json").is_file()
-            and not (out_dir / m["version"] / f"offline_eval_{split}.json").is_file()]
+            and not done(m["version"]) and not is_running(m["version"], split)]
 
 
 def offline_eval(model_version: str, registry: Registry | None = None, split: str = "test", every: int = 3,
                  batch: int = 8, device: str | None = None, progress: Callable[[str], None] | None = print,
                  robustness: bool = True, robust_eps: int = 3) -> dict[str, Any]:
+    """Runs once per model at a time: a marker with this process ID is kept while it runs."""
+    import os
+    if is_running(model_version, split):
+        raise RuntimeError(f"an offline eval of {model_version} is already running")
+    marker = running_marker(model_version, split)
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(f"{os.getpid()} {now_iso()}")
+    try:
+        return _offline_eval(model_version, registry, split, every, batch, device, progress, robustness, robust_eps)
+    finally:
+        marker.unlink(missing_ok=True)
+
+
+def _offline_eval(model_version: str, registry: Registry | None, split: str, every: int, batch: int,
+                  device: str | None, progress: Callable[[str], None] | None, robustness: bool,
+                  robust_eps: int) -> dict[str, Any]:
     from hackpipe.common.lerobot_io import DatasetFolder
     from hackpipe.dataset.versioning import load_manifest
     reg = registry or Registry()
@@ -342,8 +368,16 @@ def offline_eval(model_version: str, registry: Registry | None = None, split: st
     rate, chunk = model_rate(model, DatasetFolder(resolve(srcs[0])).fps)
     tables = eval_tables(m, split, rate, names)
     predict, ck_chunk = lerobot_predictor(ckpt, tables, device)
+    variants, skipped = dict(ROBUSTNESS), {}
+    from hackpipe.training.curriculum import reword
+    texts = {str(x) for t in tables for x in t["full_text"][t["rows"]]}
+    if not any(reword(x, 1) != x for x in texts):        # no paraphrase applies: the variant would be the baseline
+        variants.pop("reworded_instruction")
+        skipped["reworded_instruction"] = "no paraphrase pattern matches the test instructions"
     res = score(tables, predict, int(chunk or ck_chunk or 50), every, batch, progress, hz=rate,
-                robust=ROBUSTNESS if robustness else None, robust_eps=robust_eps)
+                robust=variants if robustness else None, robust_eps=robust_eps)
+    if robustness:
+        res["robustness"]["skipped"] = skipped
     res["latency_ms"] = latency(predict, tables[0], rate)
     res.update({"model": model_version, "checkpoint": str(ckpt), "dataset_version": model["dataset_version"],
                 "split": split, "rate_hz": rate, "every": every, "episodes": {t["source"]: len(set(t["ep"][t["rows"]]))
@@ -355,3 +389,23 @@ def offline_eval(model_version: str, registry: Registry | None = None, split: st
     out.write_text(json.dumps(res, indent=1))
     res["file"] = str(out)
     return res
+
+
+def running_marker(model_version: str, split: str = "test") -> Path:
+    return resolve(project_config()["project"]["outputs_dir"]) / "runs" / model_version / f"offline_eval_{split}.running"
+
+
+def is_running(model_version: str, split: str = "test") -> bool:
+    """An offline eval of this model is in progress (marker with a live process ID on this machine)."""
+    import os
+    f = running_marker(model_version, split)
+    try:
+        os.kill(int(f.read_text().split()[0]), 0)
+        return True
+    except (OSError, ValueError, IndexError):
+        return False
+
+
+def is_current(res: dict[str, Any] | None) -> bool:
+    """The eval has the metrics the gates need (evals made before the executed-stream metrics don't)."""
+    return bool(res and (res.get("executed") or {}).get("arm_mean") is not None)
