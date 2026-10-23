@@ -1,6 +1,7 @@
 """Add demonstrations from anywhere: discovery of nested folders, local folder / zip fetch, naming, one version
 for several new folders."""
 import base64
+import shutil
 import subprocess
 import zipfile
 
@@ -22,7 +23,7 @@ def test_find_roots_nested_and_not_inside_a_dataset(tmp_path):
 @pytest.mark.parametrize("src,name", [
     ("/content/drive/MyDrive/shs/data/fr3_duo_rand500/fr3_duo_rand500", "fr3_duo_rand500"),
     ("FR3Duo_Handover_Dataset_lerobot3.zip", "FR3Duo_Handover_Dataset_lerobot3"),
-    ("lerobot/aloha sim", "aloha_sim"), ("https://github.com/owner/repo.git", "repo"), ("s3://b/x/ds/", "ds")])
+    ("lerobot/aloha sim", "aloha_sim"), ("https://drive.google.com/drive/folders/1QVc?usp=drive_link", "1QVc"), ("https://github.com/owner/repo.git", "repo"), ("s3://b/x/ds/", "ds")])
 def test_dataset_name(src, name):
     assert sources.dataset_name(src) == name
 
@@ -146,3 +147,67 @@ def test_github_lfs_without_git_lfs_fails_clearly(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError, match="git-lfs"):
         sources.fetch("github", f"file://{src}", name="g", base=tmp_path / "repo")
     assert not (tmp_path / "repo" / "data" / "incoming" / "g").exists()
+
+
+def _fake_gdown(monkeypatch, tmp_path, *, folder_name=None, zip_of=None, error=None):
+    import sys
+    import types
+    exc = types.ModuleType("gdown.exceptions")
+
+    class DownloadError(Exception):
+        pass
+
+    class FileURLRetrievalError(DownloadError):
+        pass
+    exc.DownloadError, exc.FileURLRetrievalError = DownloadError, FileURLRetrievalError
+    g = types.ModuleType("gdown")
+
+    def download_folder(id, output, quiet):
+        if error:
+            raise DownloadError(f"Failed to retrieve folder contents for folder ID: {id} (status code 401).")
+        shutil.copytree(make_dataset(tmp_path / "drive" / folder_name, n_episodes=2), output + folder_name)
+        return ["x"]
+
+    def download(id, output, quiet):
+        if error:
+            raise FileURLRetrievalError("Cannot retrieve the public link of the file.")
+        z = output + zip_of
+        with zipfile.ZipFile(z, "w") as f:
+            ds = make_dataset(tmp_path / "zsrc", n_episodes=2)
+            for p in ds.rglob("*"):
+                f.write(p, p.relative_to(ds.parent).as_posix())
+        return z
+    g.download_folder, g.download, g.exceptions = download_folder, download, exc
+    monkeypatch.setitem(sys.modules, "gdown", g)
+    monkeypatch.setitem(sys.modules, "gdown.exceptions", exc)
+
+
+def test_gdrive_folder_link_named_after_drive_folder(tmp_path, monkeypatch):
+    _fake_gdown(monkeypatch, tmp_path, folder_name="night_set")
+    repo = tmp_path / "repo"
+    roots = sources.fetch("gdrive", "https://drive.google.com/drive/folders/1QVcgaNooB0MHn6Dj?usp=drive_link",
+                          base=repo)
+    assert roots == [repo / "data" / "incoming" / "night_set" / "night_set"]
+    assert [p.name for p in (repo / "data" / "incoming").iterdir()] == ["night_set"]
+
+
+def test_gdrive_zip_link_named_after_zip(tmp_path, monkeypatch):
+    _fake_gdown(monkeypatch, tmp_path, zip_of="fr3_more.zip")
+    repo = tmp_path / "repo"
+    roots = sources.fetch("gdrive", "https://drive.google.com/file/d/1XyZ0123456789abcdefg/view", base=repo)
+    assert roots == [repo / "data" / "incoming" / "fr3_more" / "zsrc"]
+
+
+@pytest.mark.parametrize("link", ["https://drive.google.com/drive/folders/1QVcgaNooB0MHn6Dj",
+                                  "https://drive.google.com/file/d/1XyZ0123456789abcdefg/view"])
+def test_gdrive_no_access_says_what_to_do(tmp_path, monkeypatch, link):
+    _fake_gdown(monkeypatch, tmp_path, error=True)
+    with pytest.raises(RuntimeError, match="Anyone with the link"):
+        sources.fetch("gdrive", link, base=tmp_path / "repo")
+    assert list((tmp_path / "repo" / "data" / "incoming").iterdir()) == []
+
+
+def test_missing_packages(monkeypatch):
+    monkeypatch.setitem(sources.CLOUD_NEEDS, "s3", "definitely_not_installed_xyz")
+    assert sources.missing_packages("local") == []
+    assert "definitely_not_installed_xyz" in sources.missing_packages("cloud", "s3://b/x")
