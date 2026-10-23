@@ -195,9 +195,14 @@ def create_dataset_version(registry: Registry | None = None, cfg: dict[str, Any]
     sources = sorted({d["source"] for d in splits["train"] + splits["val"]})
     records = {s: preprocessing_record(s, cfg) for s in sources}
     schemas = {s: {k: v for k, v in r["schema"].items() if k != "codebase_version"} for s, r in records.items()}
-    if len({json.dumps(v, sort_keys=True) for v in schemas.values()}) > 1:
-        raise RuntimeError(f"Sources have different schemas (fps / cameras / state / action): {sorted(schemas)}")
+    mixed = len({json.dumps(v, sort_keys=True) for v in schemas.values()}) > 1
+    if mixed and not (cfg.get("versions") or {}).get("allow_mixed_schemas"):
+        raise RuntimeError(f"Sources have different schemas (fps / cameras / state / action): {sorted(schemas)}. "
+                           "To keep them in one version anyway (they can't be merged for training), set "
+                           "versions.allow_mixed_schemas: true in configs/dataset.yaml")
     preprocessing = records[sources[0]]
+    if mixed:                       # recorded per source; part of the fingerprint
+        preprocessing["per_source_schema"] = schemas
     if len(sources) > 1:            # single-source records stay as before, so fingerprints stay comparable
         preprocessing["normalisation_stats"]["per_source"] = {s: r["normalisation_stats"]["sha256"]
                                                               for s, r in records.items()}
@@ -220,6 +225,7 @@ def create_dataset_version(registry: Registry | None = None, cfg: dict[str, Any]
         "sources": sources,
         "test_sources": test_sources,
         "needs_materialize": len(sources) > 1,
+        "mixed_schemas": mixed,     # e.g. 30 fps + 6 fps: kept together as data, not trainable as one folder
         "repo_id": project_config()["dataset"]["repo_id"],
         "revision": project_config()["dataset"].get("revision"),
         # Episode indices per split: valid on `source` (train/val) and the test source; multi-source versions
@@ -300,7 +306,9 @@ def dataset_card(manifest: dict[str, Any], splits: dict[str, list[dict[str, Any]
         f"- Fingerprint: `{manifest['fingerprint']}`",
         f"- Created: {manifest['created_at']}",
         f"- Train/val source(s): {', '.join(f'`{x}`' for x in manifest.get('sources') or [manifest['source']])}"
-        + (" — several sources: train from the merged folder (`hackpipe dataset materialize`)"
+        + (" — sources differ in fps / schema: kept together as data, **not trainable as one folder** "
+           "(LeRobot merges only equal fps)" if manifest.get("mixed_schemas") else
+           " — several sources: train from the merged folder (`hackpipe dataset materialize`)"
            if manifest.get("needs_materialize") else ""),
         f"- Based on: {(manifest.get('lineage') or {}).get('base') or 'nothing (first version)'}",
         f"- Held-out test sources: {', '.join(f'`{t}`' for t in manifest.get('test_sources', [])) or 'none (ratio split)'}",
@@ -309,6 +317,13 @@ def dataset_card(manifest: dict[str, Any], splits: dict[str, list[dict[str, Any]
         f"- Notes: {manifest.get('notes') or '—'}", "",
         "| Split | Episodes | Frames |", "|---|---|---|",
     ]
+    if pre.get("per_source_schema"):
+        rows = ["| Source | fps | cameras | state | action |", "|---|---|---|---|---|"]
+        for src, sc in sorted(pre["per_source_schema"].items()):
+            rows.append(f"| `{src}` | {sc['fps']:g} | {len(sc['cameras'])} | {sc['state']['shape']} | "
+                        f"{sc['action']['shape']} |")
+        at = lines.index("| Split | Episodes | Frames |")
+        lines[at:at] = ["## Sources (different schemas)", "", *rows, ""]
     for k in ("train", "val", "test"):
         frames = sum(int(d["meta"].get("n_frames", 0)) for d in splits[k])
         lines.append(f"| {k} | {len(splits[k])} | {frames} |")

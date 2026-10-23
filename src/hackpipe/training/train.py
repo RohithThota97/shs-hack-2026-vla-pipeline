@@ -74,6 +74,11 @@ def training_input(manifest: dict[str, Any], dataset_root: str | None = None) ->
     mat = manifest.get("materialized")
     if mat:
         return {"repo_id": mat["repo_id"], "root": str(resolve(mat["root"])), "episodes": mat["splits"]["train"]}
+    if manifest.get("mixed_schemas"):
+        raise RuntimeError(f"{manifest['version']} mixes datasets with different fps / schemas "
+                           f"({', '.join(manifest.get('sources') or [])}); LeRobot can't merge them into one "
+                           "training folder. Train from a single-schema version (e.g. ds-v1) — training on the "
+                           "mixed data is not decided yet (docs/decisions.md).")
     if manifest.get("needs_materialize"):
         raise RuntimeError(f"{manifest['version']} has several sources; merge them first: "
                            f"hackpipe dataset materialize {manifest['version']}")

@@ -80,6 +80,14 @@ ds-v1's validated demos; nothing is checked twice; demos that already exist are 
 | `dataset materialize ds-vN` | multi-source versions → one merged LeRobot folder via `lerobot-edit-dataset --operation.type merge`, with the episode mapping in the manifest (runs where LeRobot is installed) |
 | `dataset approve ds-vN --by NAME` | records who approved |
 
+## Sources with different fps (subtask data)
+`versions.allow_mixed_schemas: true` (configs/dataset.yaml) lets a version hold sources whose fps / schema differ —
+here the 6 fps cube-stacking subtask `fr3_duo_rand500` next to the 30 fps handover data. The manifest gets
+`mixed_schemas: true` and a per-source schema (also in the card); Versions shows "kept together as data".
+Such a version can't be merged (`dataset materialize`) or trained (`hackpipe train` refuses with the reason):
+LeRobot merges only equal fps. The flag is outside `splits`/`preprocessing`, so single-source fingerprints
+(ds-v1 `01a77eac94728a96`) don't change.
+
 ## Empty / error states
 - No demos: the Add tab is open, with a one-line explanation.
 - Folder not LeRobot v3: a clear error, nothing is written.

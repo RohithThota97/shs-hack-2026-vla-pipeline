@@ -522,7 +522,11 @@ def versions_tab(reg: Registry) -> None:
             st.markdown(f"Test split {'unchanged (frozen) ✓' if test_ok else 'differs from the frozen test ✗'} · "
                         "leakage guard passed ✓ · " + (f"removed {len(lin['removed'])} demo(s)"
                                                        if lin.get("removed") else "nothing removed"))
-            if m.get("needs_materialize"):
+            if m.get("mixed_schemas"):
+                fps = sorted({f"{s['fps']:g} fps" for s in m["preprocessing"].get("per_source_schema", {}).values()})
+                st.info(f"Sources differ in fps / schema ({', '.join(fps)}): kept together as data — this "
+                        "version can't be merged or trained as one folder (training on it not decided yet).")
+            elif m.get("needs_materialize"):
                 st.info("Several sources: before training, run `hackpipe dataset materialize "
                         f"{d['version']}` on the GPU machine (merges them into one folder)."
                         + (" ✓ done" if m.get("materialized") else ""))
