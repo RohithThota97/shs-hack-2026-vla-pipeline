@@ -242,17 +242,23 @@ else:
                    + (f"**{init_from}** (fine-tune)" if init_from else f"`{args.get('policy.path', '?')}`")
                    + f" · expected **{fmt_duration(est['seconds']) if est else 'n/a'}**"
                    + (f" ({est['basis']})" if est else " — run the timing run first for an estimate"))
+        auto_eval = b.checkbox("Evaluate when done", value=True,
+                               help="After training succeeds, the same GPU job runs the offline eval on the test split; "
+                                    "the verdict shows on the Evaluate page")
         if b.button("Start training", type="primary", use_container_width=True,
                     disabled=not (gpus and ok and target > 0) or bool(blocked),
                     help=why or blocked or (None if gpus else "needs a GPU — open the console on Colab")):
             jid = runner.submit("train", runner.hackpipe_cmd("train", "--config", cfg_path, "--dataset", ds,
-                                                             *init_args, *set_args(ov_list)),
+                                                             *init_args, *set_args(ov_list),
+                                                             *(["--then-eval"] if auto_eval else [])),
                                 needs="gpu", work_units=target,
                                 label=f"Training · {ds}" + (f" from {init_from}" if init_from else ""), registry=reg,
                                 estimate_override=est, extra_meta={"target_steps": target, "dataset": ds,
                                                                    "config": cfg_path, "log_freq": log_freq,
                                                                    "init_from": init_from})
-            st.success(f"Started {jid}. Checkpoints every {save_freq} steps — progress under **Progress & resume**.")
+            st.success(f"Started {jid}. Checkpoints every {save_freq} steps — progress under **Progress & resume**."
+                       + (" The offline eval runs in the same job when training ends (Evaluate page)."
+                          if auto_eval else ""))
         if blocked:
             a.caption(f"Can't start: {blocked}.")
 
