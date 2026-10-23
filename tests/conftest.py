@@ -153,6 +153,7 @@ def test_configs(tmp_path, monkeypatch):
 def workspace(tmp_path, monkeypatch):
     monkeypatch.setenv("HACKPIPE_OUTPUTS_DIR", str(tmp_path / "outputs"))
     monkeypatch.setenv("HACKPIPE_REGISTRY", str(tmp_path / "registry.db"))
+    monkeypatch.setenv("HACKPIPE_WATCH_DIRS", "")             # don't scan the real organiser / Drive folders
     from hackpipe.common.registry import Registry
     reg = Registry()
     yield tmp_path, reg
