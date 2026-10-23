@@ -49,14 +49,26 @@ DEFAULTS = {"chunk": 20, "rate_hz": 6, "batch_size": 8, "steps": 20000, "save_fr
             "val_every": 1000, "val_batches": 4, "num_workers": 2, "subtask_tail": "hold", "paraphrase_prob": 0.3,
             "gripper_lag_fix": True, "bf16": False, "no_curriculum": False, "keep_stage_checkpoints": False,
             "stage_end_eval": True,      # validate + checkpoint at each stage end (off for timing runs)
+            "train_sources": None,       # folder names to train on (e.g. [fr3_duo_handover_84]); None = all labelled
+            "image_aug": False,          # colour jitter + small shifts of the camera images (train samples only)
+            "state_noise_std": 0.0,      # Gaussian noise on the arm joints of the input state (rad)
             "lr": None, "policy_overrides": {}}
 BASES = {"smolvla": "lerobot/smolvla_base", "pi0": "lerobot/pi0_base", "pi05": "lerobot/pi05_base"}
 
 
 # ------------------------------------------------------------------ plan
+def source_names(v: Any) -> list[str] | None:
+    """train_sources as a list of folder names: `--set train_sources=a` gives a str, `[a, b]` a list."""
+    if v is None:
+        return None
+    return [Path(x).name for x in ([v] if isinstance(v, str) else v)]
+
+
 def settings(cfg: dict[str, Any]) -> dict[str, Any]:
     """Train-config `args` with defaults filled in."""
-    return {**DEFAULTS, **(cfg.get("args") or {})}
+    s = {**DEFAULTS, **(cfg.get("args") or {})}
+    s["train_sources"] = source_names(s["train_sources"])
+    return s
 
 
 def plan_of(cfg: dict[str, Any]) -> dict[str, Any]:
@@ -139,7 +151,7 @@ def describe(cfg: dict[str, Any], manifest: dict[str, Any]) -> dict[str, Any]:
         raise RuntimeError(f"{manifest['version']} has no sub-task labels — the curriculum trainer needs them: "
                            f"hackpipe subtasks label --base {manifest['version']} --create (then approve the draft)")
     s, plan = settings(cfg), plan_of(cfg)
-    train_eps = split_episodes(manifest, "train")
+    train_eps = split_episodes(manifest, "train", s["train_sources"])
     groups = []
     for src in sorted(train_eps):
         info = sub["sources"].get(src)
@@ -208,13 +220,19 @@ def fix_gripper_lag(S: np.ndarray, A: np.ndarray, grip: list[int]) -> tuple[np.n
     return A, shifts
 
 
-def split_episodes(manifest: dict[str, Any], split: str) -> dict[str, list[int]]:
-    """Episodes per source of a split, from the version (train / val only — the test split is never read)."""
+def split_episodes(manifest: dict[str, Any], split: str, sources: list[str] | None = None) -> dict[str, list[int]]:
+    """Episodes per source of a split, from the version (train / val only — the test split is never read).
+    sources: only these folder names (train_sources); None = every source."""
     if split not in ("train", "val"):
         raise ValueError("training reads the train and val splits only")
     out: dict[str, list[int]] = {}
     for s, i in manifest["episodes"][split]:
-        out.setdefault(s, []).append(int(i))
+        if sources is None or Path(s).name in sources:
+            out.setdefault(s, []).append(int(i))
+    if sources is not None:
+        unknown = set(sources) - {Path(s).name for s, _ in manifest["episodes"]["train"]}
+        if unknown:
+            raise ValueError(f"train_sources {sorted(unknown)} are not train sources of {manifest.get('version')}")
     return out
 
 
@@ -310,6 +328,24 @@ def norm_stats(tables: list[dict[str, Any]], seed: int) -> dict[str, dict[str, n
 
 
 # ------------------------------------------------------------------ torch parts (Colab / GPU machine)
+def augment(img, max_shift: int = 8, jitter: float = 0.2):
+    """Colour jitter (brightness, contrast, saturation ± jitter) and a random shift of up to max_shift pixels
+    (edge-padded) of one CxHxW image in 0..1. Uses torch's RNG, seeded per DataLoader worker."""
+    import torch
+    b, c, sat = (1 + (torch.rand(3) * 2 - 1) * jitter).tolist()
+    x = img * b
+    mean = x.mean()
+    x = (x - mean) * c + mean
+    gray = x.mean(0, keepdim=True)
+    x = (x - gray) * sat + gray
+    if max_shift:
+        h, w = x.shape[-2:]
+        dy, dx = torch.randint(-max_shift, max_shift + 1, (2,)).tolist()
+        x = torch.nn.functional.pad(x[None], (max_shift,) * 4, mode="replicate")[0]
+        x = x[:, max_shift + dy:max_shift + dy + h, max_shift + dx:max_shift + dx + w]
+    return x.clamp(0, 1)
+
+
 class CurriculumData:
     """torch Dataset over item codes from stage_draws (item * 3 + rewording)."""
 
@@ -318,6 +354,7 @@ class CurriculumData:
 
         from hackpipe.common.config import resolve
         self.tables, self.items, self.cams, self.s = tables, items, cams, s
+        self.arm = [*range(7), *range(8, 15)]
         self.lr = [LeRobotDataset(f"local/{t['name']}", root=resolve(t["source"]), video_backend="pyav")
                    for t in tables]
 
@@ -331,8 +368,11 @@ class CurriculumData:
         t = self.tables[ti]
         item = self.lr[ti][int(t["abs_index"][r])]
         idx, pad, text = chunk_for(t, r, mode, self.s["chunk"], self.s["subtask_tail"])
-        out = {c: item[c] for c in self.cams}
-        out["observation.state"] = torch.from_numpy(t["S"][r])
+        out = {c: augment(item[c]) if self.s["image_aug"] else item[c] for c in self.cams}
+        state = torch.from_numpy(t["S"][r].copy())
+        if self.s["state_noise_std"]:
+            state[self.arm] += torch.randn(len(self.arm)) * float(self.s["state_noise_std"])
+        out["observation.state"] = state
         out["action"] = torch.from_numpy(t["A"][idx])
         out["action_is_pad"] = torch.from_numpy(pad)
         out["task"] = reword(text, alt)
@@ -438,7 +478,7 @@ def run(dataset_version: str, cfg: dict[str, Any], out: Path, resume: bool = Fal
             raise RuntimeError(f"{src} has other cameras than {cams}: one policy needs the same cameras")
 
     _log("loading tables …")
-    tr_eps, va_eps = split_episodes(m, "train"), split_episodes(m, "val")
+    tr_eps, va_eps = split_episodes(m, "train", s["train_sources"]), split_episodes(m, "val", s["train_sources"])
     train_t, val_t = [], []
     for src in sorted(set(tr_eps) | set(va_eps)):           # each source read once, its train + val episodes only
         t = build_table(src, tr_eps.get(src, []) + va_eps.get(src, []),
@@ -481,7 +521,8 @@ def run(dataset_version: str, cfg: dict[str, Any], out: Path, resume: bool = Fal
             sched.load_state_dict(state["scheduler"])
         _log(f"resumed at step {start}")
     data = CurriculumData(train_t, items, cams, s)
-    vdata = CurriculumData(val_t, v_items, cams, {**s, "paraphrase_prob": 0.0})
+    vdata = CurriculumData(val_t, v_items, cams, {**s, "paraphrase_prob": 0.0, "image_aug": False,
+                                                  "state_noise_std": 0.0})
     rng = np.random.default_rng([seed, 99])
     vsets = {}
     for ti, t in enumerate(val_t):

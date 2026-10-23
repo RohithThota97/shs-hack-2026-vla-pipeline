@@ -100,6 +100,22 @@ def main(argv: list[str] | None = None) -> None:
     lb.add_argument("--no-images", action="store_true", help="skip the review images")
     lb.add_argument("--notes", default="")
 
+    s = sub.add_parser("sim", help="Isaac Sim on the site PC: reference file, recordings → dataset, camera check")
+    sim_sub = s.add_subparsers(dest="action", required=True)
+    r = sim_sub.add_parser("reference", help="reference JSON for eval_isaac.py / record_demos.py (held-out lighting)")
+    r.add_argument("--dataset", required=True, help="approved version")
+    r.add_argument("--suite", default="configs/eval/sim_handover_v1.yaml")
+    r.add_argument("--out", required=True)
+    r.add_argument("--demo-episode", type=int, help="episode whose actions are replayed (default: first train episode)")
+    cv = sim_sub.add_parser("convert", help="record_demos.py recordings → LeRobot v3 folder in data/incoming/<name>")
+    cv.add_argument("--recordings", required=True)
+    cv.add_argument("--name", required=True, help="e.g. fr3_duo_handover_sim_render")
+    cv.add_argument("--keep-failed", action="store_true", help="also episodes whose box didn't end on the tray")
+    cg = sim_sub.add_parser("camera-gap", help="sim camera snapshots vs the training frames")
+    cg.add_argument("--snapshots", required=True, help="record_demos.py --mode snapshot output (…/snapshots)")
+    cg.add_argument("--source", default=None, help="training dataset (default: dataset.root)")
+    cg.add_argument("--out", help="side-by-side PNG")
+
     s = sub.add_parser("train", help="R4 reproducible training")
     s.add_argument("--config")
     s.add_argument("--dataset", required=True)
@@ -116,6 +132,9 @@ def main(argv: list[str] | None = None) -> None:
     s = sub.add_parser("eval", help="R5 run the test suite")
     s.add_argument("--model", required=True)
     s.add_argument("--suite", default="configs/eval/test_suite_v1.yaml")
+    s.add_argument("--import", dest="import_results", metavar="RESULTS_JSON",
+                   help="import an Isaac Sim run (eval_isaac.py results.json) instead of running the suite")
+    s.add_argument("--gifs", help="with --import: folder with the run's policy_epXX.gif")
     s.add_argument("--adapter", choices=["organizer", "dummy"], default="organizer",
                    help="'dummy' gives FAKE results for pipeline testing only")
 
@@ -271,6 +290,26 @@ def main(argv: list[str] | None = None) -> None:
             rec = t.train(args.config, args.dataset, args.dry_run, reg, resume_model=args.resume,
                           overrides=t.parse_overrides(args.set), purpose=args.purpose)
             _print({k: rec.get(k) for k in ("model_version", "dataset_version", "output_dir", "exit_code")})
+    elif args.cmd == "sim":
+        if args.action == "reference":
+            from hackpipe.sim.reference import write_reference
+            p = write_reference(args.dataset, args.suite, args.out, reg, args.demo_episode)
+            ref = json.loads(p.read_text())
+            _print({"reference": str(p), "eval_lighting_from": ref["hackpipe"]["lighting_source"],
+                    "eval_episodes": len(ref["val_lighting"]), "record_episodes": len(ref["record_episodes"])})
+        elif args.action == "convert":
+            from hackpipe.ingest.sim_recording import convert
+            _print(convert(args.recordings, Path("data") / "incoming" / args.name, keep_failed=args.keep_failed))
+        else:
+            from hackpipe.common.config import project_config
+            from hackpipe.sim.camera_gap import camera_gap
+            _print(camera_gap(args.snapshots, args.source or project_config()["dataset"]["root"], args.out))
+    elif args.cmd == "eval" and args.import_results:
+        from hackpipe.evaluation.sim_import import import_results
+        r = import_results(args.model, args.suite, args.import_results, args.gifs, reg)
+        m = r["metrics"]
+        _print({"eval_id": r["eval_id"], "results_dir": r["results_dir"], "task_success": m["task_success"],
+                "stage_counts_0to4": m["stage_counts_0to4"]})
     elif args.cmd == "eval":
         from hackpipe.evaluation.runner import run_suite
         from hackpipe.sim.adapter import DummySimAdapter, OrganizerSimAdapter

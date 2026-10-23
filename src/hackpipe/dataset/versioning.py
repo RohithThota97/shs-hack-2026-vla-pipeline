@@ -56,15 +56,33 @@ def split_demos(demos: list[dict[str, Any]], cfg: dict[str, Any],
     if held_out:
         explicit_test = explicit_test or {None}     # test split is fixed; no ratio-based test from `rest`
 
+    test_ids = {d["demo_id"] for d in test}
+    if any(d["meta"].get("derived_from") in test_ids for d in rest):
+        raise LeakageError("demos that are copies of test demos can't be in train / val")
+    # copies (sim re-renders, perturbed replays: meta.derived_from) join their original's unit, so an original and
+    # its copies always land in the same split
+    by_id = {d["demo_id"]: d for d in rest}
+
+    def root(d: dict[str, Any]) -> str:
+        seen = set()
+        while d["meta"].get("derived_from") in by_id and d["demo_id"] not in seen:
+            seen.add(d["demo_id"])
+            d = by_id[d["meta"]["derived_from"]]
+        return d["demo_id"]
+
+    copies: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for d in rest:
+        copies[root(d)].append(d)
+    originals = [by_id[k] for k in copies]
     if group_key:
         groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
-        for d in rest:
-            groups[str(_get(d["meta"], group_key))].append(d)
+        for d in originals:
+            groups[str(_get(d["meta"], group_key))] += copies[d["demo_id"]]
         keys = sorted(groups)
         rng.shuffle(keys)
         units = [groups[k] for k in keys]
     else:
-        units = [[d] for d in sorted(rest, key=lambda d: (d["source"], d["episode_index"]))]
+        units = [copies[d["demo_id"]] for d in sorted(originals, key=lambda d: (d["source"], d["episode_index"]))]
         rng.shuffle(units)
 
     n_total = sum(len(u) for u in units) + (0 if held_out else len(test))
@@ -261,7 +279,25 @@ def create_dataset_version(registry: Registry | None = None, cfg: dict[str, Any]
         if not added and not removed and subtasks is None:
             raise NothingNewError(f"Nothing new since {base}: no added or removed demos, so no new version.")
         new_cfg = {**cfg, "splits": {**cfg["splits"], "test": 0.0, "test_episodes": []}}
-        new = split_demos(added, new_cfg) if added else {"train": [], "val": [], "test": []}
+        # copies of a demo (sim re-renders, perturbed replays) go where their original is, never across splits
+        follow = {k: [d for d in added if d["meta"].get("derived_from") in base_ids[k]] for k in ("train", "val", "test")}
+        if follow["test"]:
+            raise LeakageError(f"{len(follow['test'])} added demos are copies of test demos: they can't be trained on")
+        followers = {d["demo_id"] for d in follow["train"] + follow["val"]}
+        # copies of a copy that follows the base go with it too (chains are rare: a DART replay of a re-render)
+        changed = True
+        while changed:
+            changed = False
+            for k in ("train", "val"):
+                ids_k = base_ids[k] | {d["demo_id"] for d in follow[k]}
+                for d in added:
+                    if d["demo_id"] not in followers and d["meta"].get("derived_from") in ids_k:
+                        follow[k].append(d)
+                        followers.add(d["demo_id"])
+                        changed = True
+        rest = [d for d in added if d["demo_id"] not in followers]   # copies of added originals: split_demos
+        new = split_demos(rest, new_cfg) if rest else {"train": [], "val": [], "test": []}
+        new = {"train": follow["train"] + new["train"], "val": follow["val"] + new["val"], "test": new["test"]}
         splits = {
             "train": [by_id[i] for i in sorted(base_ids["train"]) if i in by_id] + new["train"],
             "val": [by_id[i] for i in sorted(base_ids["val"]) if i in by_id] + new["val"],
@@ -271,6 +307,10 @@ def create_dataset_version(registry: Registry | None = None, cfg: dict[str, Any]
                         "added": sorted(d["demo_id"] for d in added), "removed": removed,
                         "added_split": {k: sorted(d["demo_id"] for d in new[k]) for k in ("train", "val")}})
     else:
+        held_ids = {d["demo_id"] for d in held_out}
+        bad = [d for d in pool if d["meta"].get("derived_from") in held_ids]
+        if bad:
+            raise LeakageError(f"{len(bad)} demos are copies of held-out test demos: they can't be trained on")
         splits = split_demos(pool, cfg, held_out)
     sources = sorted({d["source"] for d in splits["train"] + splits["val"]})
     records = {s: preprocessing_record(s, cfg) for s in sources}

@@ -1,0 +1,41 @@
+# Curriculum SmolVLA on the handover sources only, with image augmentation and state noise (plan phases A-5 / C).
+# Same as smolvla_curriculum.yaml otherwise. Tests whether mixing in the cube task hurts the handover (the team's
+# 10k mixed model hovered in Isaac Sim), and adds robustness to small camera / state differences in the sim.
+# Add re-rendered / recovery sources (fr3_duo_handover_sim_render, …_sim_dart) to train_sources once they are in
+# an approved version with sub-task labels.
+
+trainer: curriculum
+policy_name: smolvla_curriculum_handover
+args:
+  policy.path: lerobot/smolvla_base
+  policy.device: cuda
+  train_sources: [fr3_duo_handover_84]
+  image_aug: true
+  state_noise_std: 0.01       # rad on arm joints; the policy sees slightly perturbed states, as in closed loop
+  batch_size: 8
+  steps: 20000                # placeholder — set from the timing run, then frozen
+  chunk: 20
+  rate_hz: 6
+  save_freq: 1000
+  log_freq: 50
+  val_every: 1000
+  val_batches: 4
+  num_workers: 2
+  subtask_tail: hold
+  paraphrase_prob: 0.3
+  gripper_lag_fix: true
+  bf16: false
+  no_curriculum: false
+  keep_stage_checkpoints: false
+  policy_overrides:
+    freeze_vision_encoder: true
+    train_expert_only: true
+curriculum:
+  new_skill_weight: 0.7
+  stages:
+    - {name: stage1_reach_grasp, frac: 0.15, skills: [reach_grasp]}
+    - {name: stage2_transport_place, frac: 0.20, skills: [reach_grasp, transport_place]}
+    - {name: stage3_bimanual, frac: 0.20, skills: [reach_grasp, transport_place, bimanual]}
+    - {name: stage4_full_task, frac: 0.45, skills: [reach_grasp, transport_place, bimanual, full_task]}
+seed: 1000
+keep_checkpoints: 2

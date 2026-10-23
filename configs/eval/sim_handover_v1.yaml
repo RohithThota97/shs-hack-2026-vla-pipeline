@@ -1,0 +1,25 @@
+# Isaac Sim handover suite v1 — frozen once used; any change creates sim_handover_v2.
+# Run on the site PC with the team's eval_isaac.py + serve_policy.py (github.com/yugalrk/Hack) and a reference
+# file from `hackpipe sim reference --dataset <ds> --suite configs/eval/sim_handover_v1.yaml --out <ref.json>`:
+#   python serve_policy.py --checkpoint <ckpt> --n_action_steps 5
+#   <isaac>/python.sh eval_isaac.py --mode policy --usd <scene> --ref <ref.json> --episodes 10 --out <dir>
+# then `hackpipe eval --model <m-vN> --suite configs/eval/sim_handover_v1.yaml --import <dir>/results.json`.
+# Lighting of every episode = one lighting10 episode (held-out test source, never trained or validated on).
+
+version: sim-handover-v1
+env_version: isaac-fr3duo-flattened-v1     # Hackathon_FR3Duo_flattened.usd + eval_isaac.py scene fixes
+default_time_limit_s: 90
+sim:
+  lighting_source: data/raw/fr3_duo_handover_lighting10
+  policy_hz: 6
+  n_action_steps: 5          # actions executed per prediction (serve_policy --n_action_steps); checked on import
+  max_seconds: 90
+  success: "box resting on the serving tray (eval_isaac.py stage 4)"
+scenarios:
+  - id: handover-lighting10
+    category: environment_variation
+    seen: false
+    instruction: "Hand the box from the left gripper to the right gripper and place it on the serving tray."
+    n_runs: 10               # one per lighting10 lighting
+    seed_base: 0
+    time_limit_s: 90
