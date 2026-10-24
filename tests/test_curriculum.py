@@ -303,3 +303,22 @@ def test_stats_refuse_a_source_without_samples():
     t = {"name": "x", "rows": np.array([], int), "S": np.zeros((3, 2)), "A": np.zeros((3, 2))}
     with pytest.raises(ValueError, match="no train samples from"):
         cur.norm_stats([t], 0)
+
+
+def test_label_reuses_the_base_labels(approved, monkeypatch):
+    """Relabelling a version whose sources are already labelled reuses them (no data needed for those sources)."""
+    from hackpipe.dataset import subtasks as sub
+    from hackpipe.dataset.versioning import approve, create_dataset_version, load_manifest
+    tmp, reg = approved
+    v1 = load_manifest("ds-v1", reg)
+    create_dataset_version(reg, base="ds-v1", subtasks=_fake_labels(tmp / "labels", v1))
+    approve("ds-v2", reg, by="t")
+    monkeypatch.setattr(sub, "kind_of", lambda s, cfg=None: "handover")
+    monkeypatch.setattr(sub, "label_source", lambda *a, **k: (_ for _ in ()).throw(AssertionError("relabelled")))
+    msgs = []
+    out = sub.label("ds-v2", reg, review_images=False, progress=msgs.append)
+    idx = json.loads((out / "labels.json").read_text())
+    src = next(iter(idx["sources"].values()))
+    assert any(m.startswith("reusing the labels of") for m in msgs) and src["reused_from"]["code_sha256"] == "c" * 64
+    n = sum(len(load_manifest("ds-v2", reg)["episodes"][k]) for k in ("train", "val"))
+    assert len(pd.read_csv(out / src["episodes_file"])) == n

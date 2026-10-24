@@ -247,7 +247,11 @@ def step_compare(reg: Registry, cfg: dict[str, Any], log: Callable[[str], None])
     log(f"compare: {summary}")
 
 
-def run(registry: Registry | None = None, log: Callable[[str], None] = print, until: str | None = None,
+def _print(msg: str) -> None:
+    print(msg, flush=True)                      # a job's log is a file: show each step as it happens
+
+
+def run(registry: Registry | None = None, log: Callable[[str], None] = _print, until: str | None = None,
         train_overrides: dict[str, Any] | None = None, eval_every: int | None = None,
         eval_robustness: bool | None = None) -> list[dict[str, Any]]:
     """Run every step that can run now, in order; stop at the first that has to wait (or after `until`)."""

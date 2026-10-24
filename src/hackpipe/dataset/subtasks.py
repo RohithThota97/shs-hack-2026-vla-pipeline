@@ -406,10 +406,24 @@ def label(base: str, registry: Any = None, review_images: bool | None = None, pr
     tmp.mkdir(parents=True)
     index: dict[str, Any] = {"label_version": LABEL_VERSION, "code_sha256": code_sha(), "base": base,
                              "created_at": now_iso(), "sources": {}}
+    # the base's labels are reused for the sources they already cover (same label version): only new sources /
+    # episodes are labelled, and a source whose data isn't on this machine doesn't have to be (e.g. a cloud GPU)
+    prev_dir = (m.get("subtasks") or {}).get("dir")
+    prev = load_labels(prev_dir) if prev_dir and (resolve(prev_dir) / "labels.json").is_file() else None
     for s in sorted(eps):
         kind = kind_of(s, cfg)
-        progress(f"labelling {s} ({kind}, {len(eps[s])} episodes)")
-        r = label_source(s, kind, sorted(eps[s]), cfg, progress)
+        pi = (prev["index"]["sources"].get(s) if prev and prev["index"].get("label_version") == LABEL_VERSION
+              else None)
+        covered = set(prev[s]["episodes"].episode_index) | set(pi.get("unlabelled") or []) if pi else set()
+        if pi and pi.get("kind") == kind and set(eps[s]) <= covered:
+            seg, epi = prev[s]["segments"], prev[s]["episodes"]
+            r = {"segments": seg[seg.episode_index.isin(eps[s])].reset_index(drop=True),
+                 "episodes": epi[epi.episode_index.isin(eps[s])].reset_index(drop=True), "fps": pi["fps"]}
+            progress(f"reusing the labels of {s} from {prev_dir} ({len(eps[s])} episodes)")
+        else:
+            progress(f"labelling {s} ({kind}, {len(eps[s])} episodes)")
+            r = label_source(s, kind, sorted(eps[s]), cfg, progress)
+            pi = None
         name = Path(s).name
         r["segments"].to_csv(tmp / f"{name}_segments.csv", index=False)
         r["episodes"].to_csv(tmp / f"{name}_episodes.csv", index=False)
@@ -422,9 +436,10 @@ def label(base: str, registry: Any = None, review_images: bool | None = None, pr
                                       sha256_file(tmp / f"{name}_episodes.csv")).encode()).hexdigest(),
             "subtask_seconds": {int(k): {"median": float(g.duration_s.median()), "min": float(g.duration_s.min()),
                                          "max": float(g.duration_s.max())}
-                                for k, g in r["segments"].groupby("subtask_order")}}
+                                for k, g in r["segments"].groupby("subtask_order")},
+            **({"reused_from": {"dir": str(prev_dir), "code_sha256": prev["index"].get("code_sha256")}} if pi else {})}
         progress(f"  {name}: {len(eps[s]) - len(flagged)}/{len(eps[s])} clean, flagged {flagged}")
-        if review_images if review_images is not None else cfg.get("review_images", True):
+        if not pi and (review_images if review_images is not None else cfg.get("review_images", True)):
             ok = sorted(set(r["segments"].episode_index) - set(flagged))
             rng = np.random.default_rng(0)
             sample = sorted(rng.choice(ok, min(8 if kind == "cubes" else 3, len(ok)), replace=False).tolist()) if ok else []
