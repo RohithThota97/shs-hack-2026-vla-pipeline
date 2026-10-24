@@ -109,7 +109,7 @@ def test_verdicts(workspace, dataset):
     _offline("m-v2", arm=0.03, hit=0.5, rob=2.0)
     v = verdict("m-v2", reg)
     failed = {r["gate"].split(":")[0] for r in v["offline_gates"] if not r["pass"]}
-    assert v["verdict"] == "NEEDS MORE TRAINING" and {"arm error ÷ doing nothing", "robustness",
+    assert v["verdict"] == "NEEDS MORE TRAINING" and {"arm error ÷ doing nothing (3.3 s prediction)", "robustness",
                                                       "gripper close / open on time (±1 s)"} <= failed
     assert any("image_aug" in t for t in v["todo"])
     reg.add_deployment("dep-1", "m-v1", "deployed", {})                   # regression vs the deployed model

@@ -65,16 +65,17 @@ def _hold_still(off: dict[str, Any]) -> dict[str, float]:
 def offline_gates(off: dict[str, Any], ref: dict[str, Any] | None, cfg: dict[str, Any]) -> list[dict[str, Any]]:
     b, w, rows = cfg["block"], cfg["warn"], []
     ex = off.get("executed") or {}
-    still = _hold_still(off)
-    # doing nothing on the same executed steps as the model (results before that metric: the chunk-level value)
-    base = ex.get("hold_still_arm_mean") or next((v for k, v in still.items() if k.endswith("· all")), None)
+    # model vs doing nothing over the whole predicted chunk (3.3 s at 6 Hz), both on the same steps: over the next
+    # 0.5 s alone the arm barely moves, so standing still scores almost like a perfect model
+    chunk = {r["subtask"]: r for r in off.get("rows") or [] if r["instruction"] == "full"
+             and r.get("hold_still_arm_rad") and r.get("chunk_arm_rad") is not None}
+    allrow = next((r for k, r in chunk.items() if k.endswith("· all")), None)
     train = "train longer (more steps), or give the weak sub-task more weight in the curriculum"
-    arm = ex.get("arm_mean")
-    _check(rows, "arm error ÷ doing nothing", round(arm / base, 3) if arm is not None and base else None,
+    arm = ex.get("arm_mean")                     # executed actions: the regression check against the served model
+    _check(rows, "arm error ÷ doing nothing (3.3 s prediction)",
+           round(allrow["chunk_arm_rad"] / allrow["hold_still_arm_rad"], 3) if allrow else None,
            lambda x: x <= b["max_ratio_to_hold_still"], f"≤ {b['max_ratio_to_hold_still']}", hint=train)
-    subs = [(s["subtask"], s["arm_rad"] / (s.get("hold_still_rad") or still[s["subtask"]]))
-            for s in ex.get("per_subtask") or []
-            if s.get("arm_rad") is not None and (s.get("hold_still_rad") or still.get(s["subtask"]))]
+    subs = [(k, r["chunk_arm_rad"] / r["hold_still_arm_rad"]) for k, r in chunk.items() if not k.endswith("· all")]
     if subs:
         name, ratio = max(subs, key=lambda x: x[1])
         _check(rows, f"worst sub-task ÷ doing nothing: {name.split(' · ', 1)[-1]}", round(ratio, 3),
@@ -99,9 +100,12 @@ def offline_gates(off: dict[str, Any], ref: dict[str, Any] | None, cfg: dict[str
                lambda x: x <= b["regression_vs_deployed_max"], f"≤ {b['regression_vs_deployed_max']}",
                hint="worse than the model being served: keep that one")
     lat = (off.get("latency_ms") or {}).get("replan_median")
-    if lat is not None:
-        _check(rows, "time for one prediction (ms)", lat, lambda x: x <= w["replan_latency_budget_ms"],
-               f"≤ {w['replan_latency_budget_ms']}", blocking=False)
+    if lat is not None:                 # the robot asks again every n_action_steps steps: that is the time budget
+        from hackpipe.common.config import project_config
+        n = int((project_config().get("deploy") or {}).get("n_action_steps") or 1)
+        budget = round(1000 * n / float(off.get("rate_hz") or 6), 1)
+        _check(rows, f"time for one prediction (ms; re-plan every {n} steps)", lat, lambda x: x <= budget,
+               f"≤ {budget}", blocking=False)
     sm = off.get("smoothness") or {}
     if sm.get("at_replan_p95") is not None and sm.get("demo_p95"):
         _check(rows, "jump when re-planning (× demo step)", round(sm["at_replan_p95"] / sm["demo_p95"], 2),

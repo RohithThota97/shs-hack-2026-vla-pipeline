@@ -23,14 +23,15 @@ improve:
 # block = decides the verdict, warn = shown only. Edit the numbers here.
 offline:
   block:
-    max_ratio_to_hold_still: 0.5       # model's arm error ÷ the error of doing nothing (keeping the current pose)
+    max_ratio_to_hold_still: 0.5       # model's arm error ÷ doing nothing (keeping the current pose), both over the
+                                       # whole 3.3 s prediction (over the next 0.5 s the arm barely moves)
     max_worst_subtask_ratio: 0.8       # the same ratio for the worst sub-task (reach, grasp, handover, place …)
     gripper_event_hit_rate_min: 0.8    # demo's gripper close / open moments matched within ±1 s
     robustness_ratio_max: 1.5          # error with darker / brighter images, noisy joints, reworded task ÷ normal
     robustness_variants: [images_darker_x0.6, images_brighter_x1.4, state_noise_0.01rad, reworded_instruction]
     regression_vs_deployed_max: 1.05   # not worse than the model being served now
   warn:
-    replan_latency_budget_ms: 166.7    # one prediction must fit a 6 Hz step on the robot
+    # one prediction must fit the re-plan interval: deploy.n_action_steps (configs/project.yaml) ÷ the policy rate
     replan_jump_vs_demo_max: 2.5       # jump at re-plan ÷ the demo's own step size
     gripper_timing_error_s_max: 0.5
 

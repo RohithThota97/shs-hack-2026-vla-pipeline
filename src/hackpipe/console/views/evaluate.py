@@ -61,9 +61,11 @@ def step_summary(path: str, mtime: float) -> str:          # cached by file + mt
     ex_ = r.get("executed") or {}
     if not ex_.get("arm_mean"):
         return ""
-    base, g = ex_.get("hold_still_arm_mean"), (r.get("gripper_events") or {}).get("hit_rate")
-    return (f"{ex_['arm_mean'] / base:.0%} of doing nothing" if base else f"{ex_['arm_mean']} rad") + (
-        f", gripper {g:.0%}" if g is not None else "")
+    a = next((x for x in r.get("rows") or [] if x["instruction"] == "full" and x["subtask"].endswith("· all")), {})
+    g = (r.get("gripper_events") or {}).get("hit_rate")
+    ratio = (f"{a['chunk_arm_rad'] / a['hold_still_arm_rad']:.0%} of doing nothing"   # 3.3 s, as the checks
+             if a.get("hold_still_arm_rad") and a.get("chunk_arm_rad") is not None else f"{ex_['arm_mean']} rad")
+    return ratio + (f", gripper {g:.0%}" if g is not None else "")
 
 
 def chart(fig: go.Figure, height: int = 260, **layout) -> None:
@@ -165,33 +167,34 @@ if not is_current(off, model):
 
 ex = off["executed"]
 allrow = next((r for r in off["rows"] if r["instruction"] == "full" and r["subtask"].endswith("· all")), {})
-still = ex.get("hold_still_arm_mean") or allrow.get("hold_still_arm_rad")      # on the same executed steps
+still = allrow.get("hold_still_arm_rad")      # doing nothing over the whole 3.3 s prediction (as the checks)
+pred_err = allrow.get("chunk_arm_rad")
 ge = off.get("gripper_events") or {}
 lat = off.get("latency_ms") or {}
 m = st.columns(4)
-m[0].metric("Arm error", f"{ex['arm_mean']:.3f} rad",
-            help="mean difference between the joints the model commands and the demo's, over the actions it "
-                 "would execute (the first 3 of each prediction)")
+m[0].metric("Arm error", f"{pred_err:.3f} rad" if pred_err is not None else "n/a",
+            help="mean difference between the joints the model predicts and the demo's, over its whole 3.3 s "
+                 f"prediction (the actions it would execute: {ex['arm_mean']:.3f} rad)")
 m[1].metric("Doing nothing", f"{still:.3f} rad" if still else "n/a",
-            help="error of just keeping the current pose, on the same steps")
+            help="error of just keeping the current pose, over the same 3.3 s")
 m[2].metric("Gripper on time", f"{ge['hit_rate']:.0%}" if ge.get("hit_rate") is not None else "n/a",
             help="share of the demo's grasps (close) and releases (open) the model matches within ±1 s")
 m[3].metric("One prediction", f"{lat['replan_median']:.0f} ms" if lat else "n/a",
             help=f"time to predict once (batch 1); a 6 Hz robot has {lat.get('budget_ms', 167)} ms")
-if still:
-    ratio = ex["arm_mean"] / still
+if still and pred_err is not None:
+    ratio = pred_err / still
     need = gates_config()["offline"]["block"]["max_ratio_to_hold_still"]
     st.markdown(f"The model's error is **{ratio:.0%} of doing nothing** "
                 + (f"— clearly better than standing still (needed: ≤ {need:.0%})." if ratio <= need else
                    "— not yet much better than standing still." if ratio < 1 else "— worse than standing still."))
 
-subs = [s for s in ex.get("per_subtask") or [] if s.get("arm_rad") is not None]
+subs = [{"subtask": r["subtask"], "arm_rad": r["chunk_arm_rad"]} for r in off["rows"]
+        if r["instruction"] == "full" and not r["subtask"].endswith("· all")]
 stills = {r["subtask"]: r["hold_still_arm_rad"] for r in off["rows"] if r["instruction"] == "full"}
-stills.update({s["subtask"]: s["hold_still_rad"] for s in subs if s.get("hold_still_rad")})
 c = st.columns(2)
 with c[0]:
     if subs:
-        st.markdown("**Per sub-task** (model vs doing nothing)")
+        st.markdown("**Per sub-task** (model vs doing nothing, 3.3 s prediction)")
         names = [s["subtask"].split(" · ", 1)[-1] for s in subs]
         chart(go.Figure([go.Bar(name="model", x=names, y=[s["arm_rad"] for s in subs], marker_color=TOKENS["info"]),
                          go.Bar(name="doing nothing", x=names, y=[stills.get(s["subtask"]) for s in subs],

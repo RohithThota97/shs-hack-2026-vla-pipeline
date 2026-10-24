@@ -69,3 +69,11 @@ Newest first. One line for the decision, one for the reason.
 - Serving a READY FOR SIM TEST model is allowed: the sim test needs a served model.
 - A100 run (RunPod): SmolVLA curriculum handover, batch 32, bf16, 6500 steps, checkpoints + validation every 500
   steps, all kept (1.3 GB each) — the best one is picked afterwards.
+
+## 2026-10-24 — "Doing nothing" over the whole prediction; latency against the re-plan interval
+- m-v2 (A100, best step 6000) on lighting10: 10/10 episodes follow the demo (mean grasp-point gap 1.1 cm), 40/40
+  grasps and releases on time, robust — but "arm error ÷ doing nothing" over the executed 0.5 s was 0.74 (fail):
+  in 0.5 s the arm barely moves, so standing still scores almost like a perfect model.
+- The check now compares both over the whole 3.3 s prediction (m-v2: 0.21, worst sub-task 0.32). The executed-
+  stream error stays in the results (and the regression check against the served model).
+- Latency budget = deploy.n_action_steps ÷ policy rate (5 steps at 6 Hz = 833 ms), not one 6 Hz step.
