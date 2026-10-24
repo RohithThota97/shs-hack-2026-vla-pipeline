@@ -93,10 +93,13 @@ def deploy(model_version: str, registry: Registry | None = None, allow_supervise
         raise KeyError(model_version)
     v = verdict(model_version, reg)
     smoke = smoke_test(model["checkpoint_dir"])
+    from hackpipe.evaluation.offline import step_of
+    training = model["status"] == "training"
     ok_verdict = v["verdict"] in ("READY TO DEPLOY", "READY FOR SIM TEST")
     allowed = ok_verdict or allow_supervised
     dep_id = _dep_id(model_version)
-    purpose = "deployment" if v["verdict"] == "READY TO DEPLOY" else "sim test"
+    # a model still training is only served for a sim test: the trainer sets its status when it ends
+    purpose = "deployment" if v["verdict"] == "READY TO DEPLOY" and not training else "sim test"
     meta: dict[str, Any] = {"verdict": v["verdict"], "todo": v["todo"], "smoke_test": smoke, "purpose": purpose,
                             "supervised": bool(allow_supervised and not ok_verdict), "by": by,
                             "launch": "hackpipe serve" if serve else LAUNCH_COMMAND}
@@ -105,6 +108,8 @@ def deploy(model_version: str, registry: Registry | None = None, allow_supervise
         error = f"verdict {v['verdict']}: serve it only with an override (--override, recorded)"
     elif allow_supervised and not ok_verdict and not by:
         error = "an override needs the name of who decides it (--by)"
+    elif training and step_of(model["checkpoint_dir"]) is None:
+        error = "the model is still training: pick a saved checkpoint first (Evaluate → Use this checkpoint)"
     elif not smoke["passed"]:
         error = "smoke test failed (checkpoint files missing)"
     elif serve:

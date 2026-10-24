@@ -75,7 +75,7 @@ def _offline(v, arm=0.01, hit=1.0, rob=1.1, rows=None):
     (d / "offline_eval_test.json").write_text(json.dumps({
         "model": v, "rows": rows or [{"instruction": "full", "subtask": "h · all", "n": 3, "first_arm_rad": arm,
                                       "chunk_arm_rad": arm, "gripper": 0.1, "hold_still_arm_rad": 0.05}],
-        "executed": {"arm_mean": arm, "arm_p99": arm * 3, "per_subtask": [{"subtask": "h · Pick", "arm_rad": arm}]},
+        "metrics_version": 2, "executed": {"arm_mean": arm, "arm_p99": arm * 3, "per_subtask": [{"subtask": "h · Pick", "arm_rad": arm}]},
         "gripper_events": {"n": 4, "hit_rate": hit, "mean_abs_timing_error_s": 0.1, "events": []},
         "robustness": {"episodes_per_source": 3, "baseline_chunk_arm_rad": arm,
                        "variants": {k: {"ratio": rob} for k in ("images_darker_x0.6", "images_brighter_x1.4",
@@ -123,7 +123,7 @@ def test_then_eval(workspace, dataset, monkeypatch):
     calls = []
     monkeypatch.setattr("hackpipe.training.train.train", lambda *a, **k: {"model_version": "m-v3", "exit_code": 0})
     monkeypatch.setattr("hackpipe.evaluation.offline.offline_eval",
-                        lambda mv, r, *a, **k: calls.append(mv) or {"file": "x", "executed": {"arm_mean": 0.1}})
+                        lambda mv, r, *a, **k: calls.append(mv) or {"file": "x", "metrics_version": 2, "executed": {"arm_mean": 0.1}})
     main(["train", "--config", "configs/train/smolvla_fr3_duo.yaml", "--dataset", "ds-v1", "--then-eval"])
     main(["train", "--config", "configs/train/smolvla_fr3_duo.yaml", "--dataset", "ds-v1"])
     assert calls == ["m-v3"]

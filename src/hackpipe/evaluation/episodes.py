@@ -45,7 +45,9 @@ def summarize(ep: dict[str, Any], hz: float = 6.0, drift_cm: float = DRIFT_CM,
            "mean_cm": round(float(both.mean()), 1) if len(both) else None,
            "max_cm": round(float(both.max()), 1) if len(both) else None,
            "max_at_s": round(worst / hz, 1), "max_arm": arm, "max_subtask": str(ep["sub"][worst]) if len(both) else "",
-           "drift_at_s": round(first / hz, 1) if first is not None else None,
+           "drift_at_s": round(first / hz, 1) if first is not None else None, "drift_step": first,
+           "drift_arm": (("left" if err["left"][first] >= err["right"][first] else "right") if first is not None
+                         else None),
            "drift_subtask": str(ep["sub"][first]) if first is not None else None,
            "missed_gripper": missed}
     out["follows_demo"] = first is None and not missed

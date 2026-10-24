@@ -13,7 +13,9 @@ from hackpipe.console.components.shell import machine_info
 from hackpipe.console.components.data_views import writer_ok
 from hackpipe.console.theme import TOKENS, badge
 from hackpipe.evaluation import episodes as ep_explain
-from hackpipe.evaluation.offline import is_current, is_running, load_result, result_for, trajectories
+from hackpipe.common.config import resolve
+from hackpipe.evaluation.offline import (is_current, is_running, load_result, result_for, result_path, step_of,
+                                         trajectories)
 from hackpipe.evaluation.runner import load_results
 from hackpipe.gates.verdict import offline_result, sim_result, verdict
 from hackpipe.jobs import runner
@@ -37,16 +39,31 @@ with st.expander("How the test works", expanded=False):
         "4. **Isaac Sim** (site PC) then measures real success: does the box end up on the tray?")
 gpus = machine_info()["gpus"]
 models = [m for m in reg.models() if m["meta"].get("purpose") != "timing" and m["status"] in (*FINISHED, "training")]
-training_now = any(j["kind"] == "train" and j["status"] == "running" for j in reg.jobs(limit=20))
-# a test next to a running training shares the GPU (no GPU lock); otherwise it waits for the GPU like any job
-TEST_NEEDS = "cpu" if training_now or not gpus else "gpu"
+training_now = bool(reg.jobs(kind="train", status="running"))
+shared_busy = any(j["kind"] == "eval_offline" and j["status"] in ("running", "queued") and j["meta"].get("shared_gpu")
+                  for j in reg.jobs(kind="eval_offline", limit=50))
 
 
-def submit_test(model_version: str, step: int | None = None) -> str:
+def submit_test(model_version: str, step: int | None = None, shared: bool = False) -> str:
+    """shared: a step test of the model being trained runs next to the training (no GPU lock, one at a time);
+    every other test waits for the GPU like any job."""
     args = ["eval", "--model", model_version, "--offline"] + (["--step", str(step)] if step is not None else [])
     label = f"Test on lighting10 · {model_version}" + (f" step {step}" if step is not None else "")
-    return runner.submit("eval_offline", runner.hackpipe_cmd(*args), needs=TEST_NEEDS, label=label, registry=reg,
-                         extra_meta={"models": [model_version], "step": step})
+    return runner.submit("eval_offline", runner.hackpipe_cmd(*args), needs="cpu" if shared or not gpus else "gpu",
+                         label=label, registry=reg, extra_meta={"models": [model_version], "step": step,
+                                                                "shared_gpu": shared})
+
+
+@st.cache_data(show_spinner=False)
+def step_summary(path: str, mtime: float) -> str:          # cached by file + mtime: the table re-reads nothing
+    import json as _json
+    r = _json.loads(Path(path).read_text())
+    ex_ = r.get("executed") or {}
+    if not ex_.get("arm_mean"):
+        return ""
+    base, g = ex_.get("hold_still_arm_mean"), (r.get("gripper_events") or {}).get("hit_rate")
+    return (f"{ex_['arm_mean'] / base:.0%} of doing nothing" if base else f"{ex_['arm_mean']} rad") + (
+        f", gripper {g:.0%}" if g is not None else "")
 
 
 def chart(fig: go.Figure, height: int = 260, **layout) -> None:
@@ -100,14 +117,10 @@ else:
         else:
             st.caption("No saved checkpoint matches a validation step yet.")
     def tested(step: int) -> str:
-        r = load_result(pick, step=step)
-        ex_ = (r or {}).get("executed") or {}
-        if not ex_.get("arm_mean"):
-            return "testing …" if is_running(pick, step=step) else ""
-        base = ex_.get("hold_still_arm_mean")
-        g = ((r.get("gripper_events") or {}).get("hit_rate"))
-        return (f"{ex_['arm_mean'] / base:.0%} of doing nothing" if base else f"{ex_['arm_mean']} rad") + (
-            f", gripper {g:.0%}" if g is not None else "")
+        f = result_path(pick, step=step)
+        if is_running(pick, step=step):
+            return "testing …"
+        return step_summary(str(f), f.stat().st_mtime) if f.is_file() else ""
     st.dataframe(pd.DataFrame([{"step": r["step"], "stage": r["stage"], "val error, full task (rad)":
                                 r["val_full_arm_rad"], "val error, sub-task (rad)": r["val_sub_arm_rad"],
                                 "saved": "yes" if r["checkpoint"] else "deleted",
@@ -119,15 +132,19 @@ else:
         t = st.columns([2, 1])
         step_pick = t[0].selectbox("Test a saved checkpoint now (also while training)", saved[::-1],
                                    format_func=lambda x: f"step {x:,}" + (" (best so far)" if b and x == b["step"] else ""))
+        shared = model["status"] == "training" and training_now
         if t[1].button("Test this checkpoint", use_container_width=True,
-                       disabled=not ok or is_running(pick, step=step_pick), help=why or "~15–25 min on the A100"):
-            st.success(f"Started {submit_test(pick, step_pick)} — the result appears in the table.")
+                       disabled=not ok or is_running(pick, step=step_pick) or (shared and shared_busy),
+                       help=why or ("one test at a time runs next to the training — wait for it" if shared and
+                                    shared_busy else "~15–25 min on the A100")):
+            st.success(f"Started {submit_test(pick, step_pick, shared)} — the result appears in the table.")
 
 # ---------- 2. test ----------
 st.markdown("#### 2 · Test on lighting10 (held out)")
 off = result_for(model)                 # the test of the checkpoint in use (also one made during training)
-busy = is_running(pick) or any(pick in (j["meta"].get("models") or []) and j["meta"].get("step") is None
-                               for j in running)
+cur_step = step_of(resolve(model["checkpoint_dir"] or ".").resolve())
+busy = is_running(pick, step=cur_step) or any(pick in (j["meta"].get("models") or []) and
+                                               j["meta"].get("step") in (None, cur_step) for j in running)
 c = st.columns([3, 1])
 c[0].caption(f"Checkpoint: `{model['checkpoint_dir']}`" + (f" (step {chosen})" if chosen else ""))
 if c[1].button("Run the test" if off is None else "Test again", type="primary", use_container_width=True,
@@ -235,9 +252,11 @@ else:
                                        name="demo grasp / release", showlegend=False), row=1, col=col)
         fig.add_trace(go.Scatter3d(x=[d[0, 0]], y=[d[0, 1]], z=[d[0, 2]], mode="markers+text", text=["start"],
                                    marker={"size": 6, "color": "#000"}, showlegend=False), row=1, col=col)
-    if sm["drift_at_s"] is not None:
-        t = int(round(sm["drift_at_s"] * hz))
+    if sm["drift_step"] is not None:                     # on the arm that drifts, at the step summarize() found
+        t = sm["drift_step"]
         for col, side in ((1, "left"), (2, "right")):
+            if side != sm["drift_arm"]:
+                continue
             q = P["model"][side][t]
             fig.add_trace(go.Scatter3d(x=[q[0]], y=[q[1]], z=[q[2]], mode="markers+text", text=["drifts here"],
                                        marker={"size": 9, "color": TOKENS["bad"], "symbol": "x"},

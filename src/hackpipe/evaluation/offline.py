@@ -117,6 +117,7 @@ def dtw(a: np.ndarray, b: np.ndarray) -> float:
     return float(acc[n, m] / steps[n, m])
 
 
+METRICS_VERSION = 2       # 2: grasp / release events (< 0.25) and doing nothing on the executed steps
 GRIP_CLOSED_BELOW = 0.25   # FR3 Duo gripper command: 1.0 start, 0.48 open (pre-grasp), 0.0 closed on the box
 
 
@@ -346,10 +347,14 @@ def load_result(model_version: str, split: str = "test", step: int | None = None
 
 def trajectories(result: dict[str, Any]) -> list[dict[str, Any]]:
     """The executed streams saved next to a result: per episode name, ep, pred, gt, still (n, 16), sub, replan."""
-    if not result or not result.get("file"):
+    if not result:
         return []
-    f = Path(result["file"]).with_suffix(".npz")
-    if not f.is_file():
+    found = [Path(result["file"]).with_suffix(".npz")] if result.get("file") else []
+    if result.get("model"):             # after a state import the stored absolute path is another machine's
+        found += [result_path(result["model"], result.get("split") or "test", s).with_suffix(".npz")
+                  for s in (None, result.get("step"))]
+    f = next((x for x in found if x.is_file()), None)
+    if f is None:
         return []
     z = np.load(f, allow_pickle=False)
     meta = json.loads(str(z["meta"]))
@@ -369,7 +374,7 @@ def result_for(model: dict[str, Any], split: str = "test") -> dict[str, Any] | N
     main = load_result(model["version"], split)
     if is_current(main, model):
         return main
-    step = step_of(model["checkpoint_dir"])
+    step = step_of(resolve(model["checkpoint_dir"] or ".").resolve())      # `last` → its step
     by_step = load_result(model["version"], split, step) if step is not None else None
     return by_step if is_current(by_step, model) else main
 
@@ -391,16 +396,19 @@ def offline_eval(model_version: str, registry: Registry | None = None, split: st
     checkpoint (checkpoints/<step>/pretrained_model, e.g. while the run still trains) instead of the model's current
     one; the result goes to its own file and does not change the model."""
     import os
-    if is_running(model_version, split, step):
-        raise RuntimeError(f"an offline eval of {model_version}" + (f" step {step}" if step is not None else "")
-                           + " is already running")
-    marker = running_marker(model_version, split, step)
+    reg = registry or Registry()
+    m = reg.get_model(model_version)
+    # the marker names the checkpoint, so a main test and a step test of the same checkpoint never run together
+    mark_step = step if step is not None else step_of(resolve((m or {}).get("checkpoint_dir") or ".").resolve())
+    if is_running(model_version, split, mark_step):
+        raise RuntimeError(f"an offline eval of {model_version}" + (f" step {mark_step}" if mark_step is not None
+                                                                   else "") + " is already running")
+    marker = running_marker(model_version, split, mark_step)
     marker.parent.mkdir(parents=True, exist_ok=True)
     import socket
     marker.write_text(f"{os.getpid()} {socket.gethostname()} {now_iso()}")
     try:
-        return _offline_eval(model_version, registry, split, every, batch, device, progress, robustness, robust_eps,
-                             step)
+        return _offline_eval(model_version, reg, split, every, batch, device, progress, robustness, robust_eps, step)
     finally:
         marker.unlink(missing_ok=True)
 
@@ -414,7 +422,7 @@ def _offline_eval(model_version: str, registry: Registry | None, split: str, eve
     model = reg.get_model(model_version)
     if model is None:
         raise KeyError(f"Unknown model {model_version}")
-    ckpt = resolve(model["checkpoint_dir"] or "")
+    ckpt = resolve(model["checkpoint_dir"] or "").resolve()         # `last` → the step it points at now
     if step is not None:
         ckpt = resolve(model["meta"].get("output_dir") or ".") / "checkpoints" / f"{int(step):06d}" / "pretrained_model"
     if not (ckpt / "config.json").exists():
@@ -443,7 +451,8 @@ def _offline_eval(model_version: str, registry: Registry | None, split: str, eve
         res["robustness"]["skipped"] = skipped
     res["latency_ms"] = latency(predict, tables[0], rate)
     streams = res.pop("_streams", [])
-    res.update({"model": model_version, "checkpoint": str(ckpt), "step": step if step is not None else step_of(ckpt),
+    res.update({"model": model_version, "checkpoint": str(ckpt.resolve()), "metrics_version": METRICS_VERSION,
+                "step": step if step is not None else step_of(ckpt),
                 "dataset_version": model["dataset_version"],
                 "split": split, "rate_hz": rate, "every": every, "episodes": {t["source"]: len(set(t["ep"][t["rows"]]))
                                                                             for t in tables},
@@ -494,6 +503,10 @@ def is_current(res: dict[str, Any] | None, model: dict[str, Any] | None = None) 
     model, tested the checkpoint the model points at now (a new best checkpoint needs a new test)."""
     if not (res and (res.get("executed") or {}).get("arm_mean") is not None):
         return False
+    version = res.get("metrics_version") or (2 if "hold_still_arm_mean" in res["executed"] else 1)
+    if int(version) < METRICS_VERSION:                              # measured the old way: test again
+        return False
     if model is None or not res.get("checkpoint"):
         return True
-    return resolve(res["checkpoint"]).resolve() == resolve(model["checkpoint_dir"] or ".").resolve()
+    # stored resolved: a test of `last` goes stale once training moves `last` on
+    return Path(res["checkpoint"]) == resolve(model["checkpoint_dir"] or ".").resolve()

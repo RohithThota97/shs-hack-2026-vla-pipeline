@@ -60,10 +60,75 @@ def test_saved_trajectories_and_step_results(workspace):
     f.parent.mkdir(parents=True, exist_ok=True)
     ep = _episode()
     save_trajectories(f.with_suffix(".npz"), [ep])
-    f.write_text(json.dumps({"model": "m-v1", "rows": [], "executed": {"arm_mean": 0.01}, "checkpoint": str(ck),
+    f.write_text(json.dumps({"model": "m-v1", "rows": [], "metrics_version": 2, "executed": {"arm_mean": 0.01}, "checkpoint": str(ck),
                              "file": str(f)}))
     r = result_for(reg.get_model("m-v1"))                        # no main result: the step test of the checkpoint
     assert r["checkpoint"] == str(ck) and load_result("m-v1") is None
     t = trajectories(r)
     assert len(t) == 1 and t[0]["ep"] == 3 and np.allclose(t[0]["gt"], ep["gt"]) and list(t[0]["sub"][:2]) == ["Pick"] * 2
     assert trajectories({"rows": []}) == []
+
+
+def test_review_fixes_29(workspace, dataset, monkeypatch):
+    import os
+    from hackpipe.evaluation.offline import is_current, result_path, save_trajectories, trajectories
+    from hackpipe.training.train import prune_checkpoints
+    tmp, reg = workspace
+    out = tmp / "train" / "m-v1"
+    cks = out / "checkpoints"
+    for s in (1000, 2000, 3000):
+        (cks / f"{s:06d}" / "pretrained_model").mkdir(parents=True)
+    (cks / "last").symlink_to("002000")
+    last = cks / "last" / "pretrained_model"
+    reg.add_model("m-v1", "ds-v1", "smolvla", "training", str(last), None, {"output_dir": str(out)})
+    res = {"model": "m-v1", "metrics_version": 2, "executed": {"arm_mean": 0.01},
+           "checkpoint": str(last.resolve())}                                       # stored resolved (step 2000)
+    assert is_current(res, reg.get_model("m-v1"))
+    (cks / "last").unlink()
+    (cks / "last").symlink_to("003000")                                              # training moved on
+    assert not is_current(res, reg.get_model("m-v1"))
+    assert not is_current({**res, "metrics_version": 1, "checkpoint": str(last.resolve())}, reg.get_model("m-v1"))
+
+    calls = []                                                                       # protect re-read every round
+    prune_checkpoints(out, keep=1, protect=lambda: calls.append(1) or {"001000"})
+    assert calls and (cks / "001000").exists() and not (cks / "002000").exists()
+
+    f = result_path("m-v1")                                                          # after a state import
+    f.parent.mkdir(parents=True, exist_ok=True)
+    save_trajectories(f.with_suffix(".npz"), [_episode()])
+    assert len(trajectories({"model": "m-v1", "file": "/other/machine/offline_eval_test.json"})) == 1
+
+
+def test_deploy_a_training_model(workspace, dataset):
+    from hackpipe.dataset.versioning import approve, create_dataset_version
+    from hackpipe.deploy.deploy import deploy
+    from hackpipe.evaluation.offline import result_path
+    from hackpipe.ingest.importer import ingest
+    from hackpipe.quality.report import run_qc
+    tmp, reg = workspace
+    ingest(dataset, reg)
+    run_qc(dataset, reg)
+    create_dataset_version(reg)
+    approve("ds-v1", reg, by="t")
+    out = tmp / "train" / "m-v1"
+    ck = out / "checkpoints" / "002000" / "pretrained_model"
+    ck.mkdir(parents=True)
+    for f in ("config.json", "model.safetensors"):
+        (ck / f).write_text("{}")
+    (out / "checkpoints" / "last").symlink_to("002000")
+    reg.add_model("m-v1", "ds-v1", "smolvla", "training", str(out / "checkpoints" / "last" / "pretrained_model"),
+                  None, {"output_dir": str(out)})
+    good = {"model": "m-v1", "metrics_version": 2, "rows": [], "executed": {"arm_mean": 0.01, "hold_still_arm_mean": 0.1,
+            "per_subtask": []}, "gripper_events": {"n": 0}, "robustness": {"variants": {k: {"ratio": 1.0} for k in (
+            "images_darker_x0.6", "images_brighter_x1.4", "state_noise_0.01rad", "reworded_instruction")}}}
+    f = result_path("m-v1")
+    f.parent.mkdir(parents=True, exist_ok=True)
+    import json
+    f.write_text(json.dumps({**good, "checkpoint": str(ck.resolve())}))
+    r = deploy("m-v1", reg, by="r")                                       # still `last`: refused
+    assert r["status"] == "rejected" and "pick a saved checkpoint" in r["error"]
+    with reg.conn:
+        reg.conn.execute("UPDATE models SET checkpoint_dir=? WHERE version='m-v1'", (str(ck),))
+    r = deploy("m-v1", reg, by="r")
+    assert r["status"] == "serving" and reg.deployments()[-1]["meta"]["purpose"] == "sim test"
+    assert reg.get_model("m-v1")["status"] == "training"                  # the trainer still owns the status
