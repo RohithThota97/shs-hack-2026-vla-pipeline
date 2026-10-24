@@ -88,6 +88,9 @@ def test_init_leakage(workspace, dataset, monkeypatch):
 
 
 def test_train_page_automatic_mode(workspace, dataset, monkeypatch):
+    import hackpipe.console.components.shell as shell
+    real = shell.machine_info
+    monkeypatch.setattr(shell, "machine_info", lambda: {**real(), "gpus": []})   # same result on GPU machines
     from streamlit.testing.v1 import AppTest
     monkeypatch.setenv("HACKPIPE_MACHINE", "laptop-test")
     tmp, reg = _approved(workspace, dataset)

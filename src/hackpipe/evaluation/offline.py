@@ -8,6 +8,17 @@ Reported per instruction kind and sub-task:
 - `gripper`: mean gripper error (0 = open … 1 = closed scale)
 - `hold_still_arm_rad`: the same error for a do-nothing policy that repeats the current state, as scale
 
+Executed stream (complete-task instruction): the first `every` actions of each prediction, as a policy that
+re-plans every `every` steps would send them (teacher-forced: it always sees the recorded frame). From it:
+- `executed`: arm error mean / p50 / p95 / p99, per sub-task error + DTW shape distance
+- `gripper_events`: every crossing of 0.5 in the demo's gripper command — caught within ±1 s? timing error
+- `smoothness`: largest joint jump per step, within a prediction vs at re-plan, next to the demo's own jumps
+- `horizon_arm_rad`: error by how far ahead the step is (1 … chunk)
+- `robustness`: the same chunk error with darker / brighter images, noisy joint readings, reworded or no
+  instruction (first `robust_eps` episodes per source) — as a ratio to the unchanged baseline
+- `latency_ms`: one prediction, batch 1 (the re-plan cost on the robot)
+Metrics after the team's eval_offline.py (AI-project-work); gates in configs/gates.yaml → offline.
+
 Low numbers here are necessary, not sufficient: closed-loop success needs the sim (configs/eval/sim_*.yaml).
 The test split is the frozen held-out source; use split="val" while tuning.
 """
@@ -27,6 +38,9 @@ from hackpipe.common.registry import Registry
 
 ARM = [*range(7), *range(8, 15)]
 GRIP = [7, 15]
+ROBUSTNESS = {"images_darker_x0.6": {"img_scale": 0.6}, "images_brighter_x1.4": {"img_scale": 1.4},
+              "state_noise_0.01rad": {"state_noise": 0.01}, "state_noise_0.05rad": {"state_noise": 0.05},
+              "reworded_instruction": {"task": "reworded"}, "no_instruction": {"task": ""}}
 
 
 def model_rate(model: dict[str, Any], fps: float) -> tuple[float, int | None]:
@@ -79,21 +93,109 @@ def eval_tables(manifest: dict[str, Any], split: str, rate_hz: float,
     return tables
 
 
-def score(tables: list[dict[str, Any]], predict: Callable[[dict[str, Any], np.ndarray, str], np.ndarray],
-          chunk: int, every: int = 3, batch: int = 8, progress: Callable[[str], None] | None = None) -> dict[str, Any]:
-    """predict(table, rows, mode) → (len(rows), chunk, 16) actions; mode "full" or "sub". Pure numpy otherwise."""
+def _r(x: float | None, n: int = 4) -> float | None:
+    return None if x is None or not np.isfinite(x) else round(float(x), n)
+
+
+def dtw(a: np.ndarray, b: np.ndarray) -> float:
+    """Dynamic-time-warping distance between two joint trajectories, per step of the warping path (rad)."""
+    n, m = len(a), len(b)
+    if not n or not m:
+        return float("nan")
+    cost = np.abs(a[:, None, :] - b[None, :, :]).mean(-1)
+    acc = np.full((n + 1, m + 1), np.inf)
+    acc[0, 0] = 0.0
+    steps = np.zeros((n + 1, m + 1), np.int64)
+    for d in range(2, n + m + 1):             # cells on one anti-diagonal depend only on the two before it
+        i = np.arange(max(1, d - m), min(n, d - 1) + 1)
+        j = d - i
+        cand = np.stack([acc[i - 1, j - 1], acc[i - 1, j], acc[i, j - 1]])
+        cs = np.stack([steps[i - 1, j - 1], steps[i - 1, j], steps[i, j - 1]])
+        k = cand.argmin(0)
+        acc[i, j] = cost[i - 1, j - 1] + cand[k, np.arange(len(i))]
+        steps[i, j] = cs[k, np.arange(len(i))] + 1
+    return float(acc[n, m] / steps[n, m])
+
+
+def gripper_events(a: np.ndarray, g: int) -> list[tuple[int, str]]:
+    """(step, "up" | "down") wherever the gripper command crosses 0.5."""
+    hi = a[:, g] > 0.5
+    return [(int(i), "up" if hi[i] else "down") for i in np.flatnonzero(np.diff(hi.astype(int))) + 1]
+
+
+def stream_metrics(streams: list[dict[str, Any]], hz: float) -> dict[str, Any]:
+    """Executed-stream metrics over episodes: {pred, gt (n, 16), sub (n,), replan (n,) bool, name}."""
+    if not streams:
+        return {}
+    E = np.concatenate([np.abs(x["pred"] - x["gt"]) for x in streams])
+    subs = np.concatenate([x["sub"] for x in streams])
+    names = np.concatenate([np.full(len(x["sub"]), x["name"], object) for x in streams])
+    per_sub = []
+    for key in sorted({(n, t) for n, t in zip(names, subs)}):
+        m = (names == key[0]) & (subs == key[1])
+        d = [dtw(x["pred"][x["sub"] == key[1]][:, ARM], x["gt"][x["sub"] == key[1]][:, ARM])
+             for x in streams if x["name"] == key[0]]
+        per_sub.append({"subtask": f"{key[0]} · {key[1]}", "n": int(m.sum()), "arm_rad": _r(E[m][:, ARM].mean()),
+                        "gripper": _r(E[m][:, GRIP].mean()), "dtw_rad": _r(np.nanmean(d) if d else None)})
+    events = []
+    tol = int(round(hz))                                  # ±1 s
+    for x in streams:
+        for g, side in ((GRIP[0], "left"), (GRIP[1], "right")):
+            pred = gripper_events(x["pred"], g)
+            for t, kind in gripper_events(x["gt"], g):
+                cand = [p for p, k in pred if k == kind and abs(p - t) <= tol]
+                best = min(cand, key=lambda p: abs(p - t)) if cand else None
+                events.append({"source": x["name"], "ep": x["ep"], "gripper": side, "kind": kind,
+                               "t_demo_s": round(t / hz, 2), "hit": best is not None,
+                               "timing_error_s": round((best - t) / hz, 2) if best is not None else None})
+    jumps_in, jumps_re, demo = [], [], []
+    for x in streams:
+        j = np.abs(np.diff(x["pred"][:, ARM], axis=0)).max(1)
+        jumps_re += j[x["replan"][1:]].tolist()
+        jumps_in += j[~x["replan"][1:]].tolist()
+        demo += np.abs(np.diff(x["gt"][:, ARM], axis=0)).max(1).tolist()
+    pct = lambda v, q: _r(np.percentile(v, q)) if len(v) else None       # noqa: E731
+    hits = [e for e in events if e["hit"]]
+    return {
+        "executed": {"arm_mean": _r(E[:, ARM].mean()), "arm_p50": pct(E[:, ARM], 50), "arm_p95": pct(E[:, ARM], 95),
+                     "arm_p99": pct(E[:, ARM], 99), "left_arm": _r(E[:, 0:7].mean()), "right_arm": _r(E[:, 8:15].mean()),
+                     "gripper_mean": _r(E[:, GRIP].mean()), "steps": int(len(E)), "per_subtask": per_sub},
+        "gripper_events": {"n": len(events), "hit_rate": _r(len(hits) / len(events), 3) if events else None,
+                           "mean_abs_timing_error_s": _r(np.mean([abs(e["timing_error_s"]) for e in hits]), 3)
+                           if hits else None, "events": events},
+        "smoothness": {"within_prediction_p95": pct(jumps_in, 95), "at_replan_p95": pct(jumps_re, 95),
+                       "demo_p95": pct(demo, 95)},
+    }
+
+
+def score(tables: list[dict[str, Any]], predict: Callable[..., np.ndarray], chunk: int, every: int = 3,
+          batch: int = 8, progress: Callable[[str], None] | None = None, hz: float = 6.0,
+          robust: dict[str, dict[str, Any]] | None = None, robust_eps: int = 3) -> dict[str, Any]:
+    """predict(table, rows, mode[, variant=…]) → (len(rows), chunk, 16) actions; mode "full" or "sub"; variant only
+    for robustness (img_scale, state_noise, task). Pure numpy otherwise."""
     from hackpipe.training.curriculum import chunk_for
+    if every > chunk:
+        raise ValueError(f"every={every} is longer than the chunk ({chunk}): the executed stream would have gaps")
     acc: dict[tuple[str, str], dict[str, list[float]]] = defaultdict(lambda: defaultdict(list))
+    hor_sum, hor_n = np.zeros(chunk), np.zeros(chunk)
+    streams: dict[tuple[str, int], dict[str, list]] = {}
+    full_err: dict[tuple[str, int], float] = {}        # chunk error per row, complete task: the robustness baseline
     n_pred, t0 = 0, time.time()
+
+    def call(t, rs, mode, variant=None):
+        pred = np.asarray(predict(t, rs, mode, variant=variant) if variant is not None else predict(t, rs, mode),
+                          np.float64)
+        if pred.ndim != 3 or pred.shape[1] < chunk:
+            raise ValueError(f"the policy returned {pred.shape[1:2]} actions per prediction, expected "
+                             f"{chunk}: set the chunk to the checkpoint's chunk_size")
+        return pred
+
     for t in tables:
         rows = t["rows"][::max(1, every)]
         for mode, m in (("full", 1), ("sub", 0)):
             for b in range(0, len(rows), batch):
                 rs = rows[b:b + batch]
-                pred = np.asarray(predict(t, rs, mode), np.float64)
-                if pred.ndim != 3 or pred.shape[1] < chunk:
-                    raise ValueError(f"the policy returned {pred.shape[1:2]} actions per prediction, expected "
-                                     f"{chunk}: set the chunk to the checkpoint's chunk_size")
+                pred = call(t, rs, mode)
                 for k, r in enumerate(rs):
                     idx, pad, _ = chunk_for(t, r, m, chunk, "mask")
                     valid = ~pad
@@ -106,13 +208,57 @@ def score(tables: list[dict[str, Any]], predict: Callable[[dict[str, Any], np.nd
                         acc[kk]["gripper"].append(float(np.abs(p[valid][:, GRIP] - gt[valid][:, GRIP]).mean()))
                         acc[kk]["hold_still_arm_rad"].append(
                             float(np.abs(t["S"][r][ARM].astype(np.float64) - gt[valid][:, ARM]).mean()))
+                    if mode == "full":
+                        full_err[(t["name"], int(r))] = float(np.abs(p[valid][:, ARM] - gt[valid][:, ARM]).mean())
+                    if mode == "full":
+                        err = np.abs(p - gt)[:, ARM].mean(1)
+                        hor_sum[:len(err)][valid] += err[valid]
+                        hor_n[:len(err)][valid] += 1
+                        ex = valid.copy()
+                        ex[every:] = False
+                        st = streams.setdefault((t["name"], int(t["ep"][r])), {"pred": [], "gt": [], "sub": [],
+                                                                               "replan": []})
+                        n_ex = int(ex.sum())
+                        st["pred"].append(p[ex])
+                        st["gt"].append(gt[ex])
+                        st["sub"] += [str(t["sub_text"][i]) for i in idx[ex]]
+                        st["replan"] += [True] + [False] * (n_ex - 1)
                 n_pred += len(rs)
                 if progress and (b // batch) % 25 == 0:
                     progress(f"{t['name']} {mode}: {b + len(rs)}/{len(rows)} frames, {time.time() - t0:.0f}s")
     rows_out = [{"instruction": mode, "subtask": key, "n": len(v["first_arm_rad"]),
                  **{m: round(float(np.mean(x)), 4) for m, x in v.items()}}
                 for (mode, key), v in sorted(acc.items())]
-    return {"rows": rows_out, "predictions": n_pred, "seconds": round(time.time() - t0, 1)}
+    out: dict[str, Any] = {"rows": rows_out, "predictions": n_pred,
+                           "horizon_arm_rad": [_r(x) for x in hor_sum / np.maximum(hor_n, 1)]}
+    out.update(stream_metrics([{"name": n, "ep": e, "pred": np.concatenate(v["pred"]), "gt": np.concatenate(v["gt"]),
+                                "sub": np.array(v["sub"], object), "replan": np.array(v["replan"], bool)}
+                               for (n, e), v in sorted(streams.items()) if v["pred"]], hz))
+    if robust:
+        res: dict[str, list[float]] = defaultdict(list)
+        for t in tables:
+            eps = sorted(set(t["ep"][t["rows"]].tolist()))[:robust_eps]
+            rows = t["rows"][::max(1, every)]
+            rows = rows[np.isin(t["ep"][rows], eps)]
+            res["baseline"] += [full_err[(t["name"], int(r))] for r in rows]   # already predicted above
+            for name, var in robust.items():
+                for b in range(0, len(rows), batch):
+                    rs = rows[b:b + batch]
+                    pred = call(t, rs, "full", var)
+                    for k, r in enumerate(rs):
+                        idx, pad, _ = chunk_for(t, r, 1, chunk, "mask")
+                        p, gt = pred[k][:len(idx)], t["A"][idx].astype(np.float64)
+                        res[name].append(float(np.abs(p[~pad][:, ARM] - gt[~pad][:, ARM]).mean()))
+                    n_pred += len(rs)
+                if progress:
+                    progress(f"{t['name']} robustness {name}: done, {time.time() - t0:.0f}s")
+        base = float(np.mean(res["baseline"]))
+        out["robustness"] = {"episodes_per_source": robust_eps, "baseline_chunk_arm_rad": _r(base),
+                             "variants": {k: {"chunk_arm_rad": _r(np.mean(v)),
+                                              "ratio": _r(np.mean(v) / base, 3) if base > 0 else None}
+                                          for k, v in res.items() if k != "baseline"}}
+    out.update(predictions=n_pred, seconds=round(time.time() - t0, 1))
+    return out
 
 
 def lerobot_predictor(checkpoint: Path, tables: list[dict[str, Any]], device: str | None = None):
@@ -131,16 +277,28 @@ def lerobot_predictor(checkpoint: Path, tables: list[dict[str, Any]], device: st
           for t in tables}
     cams = [k for k in cfg.input_features if "image" in k]
 
+    from hackpipe.training.curriculum import reword
+    rng = np.random.default_rng(0)
+
     @torch.no_grad()
-    def predict(t: dict[str, Any], rows: np.ndarray, mode: str) -> np.ndarray:
+    def predict(t: dict[str, Any], rows: np.ndarray, mode: str, variant: dict[str, Any] | None = None) -> np.ndarray:
+        v = variant or {}
         items = [lr[t["name"]][int(t["abs_index"][r])] for r in rows]
         missing = [c for c in cams if c not in items[0]]
         if missing:
             raise KeyError(f"the policy expects cameras {missing}, {t['name']} has "
                            f"{[k for k in items[0] if 'image' in k]}")
         batch = {c: torch.stack([it[c] for it in items]) for c in cams}
-        batch["observation.state"] = torch.from_numpy(np.stack([t["S"][r] for r in rows]))
-        batch["task"] = [str(t["full_text"][r] if mode == "full" else t["sub_text"][r]) for r in rows]
+        if v.get("img_scale"):                                          # darker / brighter cameras
+            batch = {c: (x * float(v["img_scale"])).clamp(0, 1) for c, x in batch.items()}
+        state = np.stack([t["S"][r] for r in rows]).astype(np.float32)
+        if v.get("state_noise"):                                        # noisy joint readings (arms only)
+            state[:, ARM] += rng.normal(0, float(v["state_noise"]), (len(rows), len(ARM))).astype(np.float32)
+        batch["observation.state"] = torch.from_numpy(state)
+        texts = [str(t["full_text"][r] if mode == "full" else t["sub_text"][r]) for r in rows]
+        if "task" in v:
+            texts = [reword(x, 1) for x in texts] if v["task"] == "reworded" else [v["task"]] * len(rows)
+        batch["task"] = texts
         policy.reset()
         out = post(policy.predict_action_chunk(pre(batch)))
         return out.float().cpu().numpy()
@@ -148,9 +306,58 @@ def lerobot_predictor(checkpoint: Path, tables: list[dict[str, Any]], device: st
     return predict, getattr(cfg, "chunk_size", None)
 
 
+def latency(predict: Callable[..., np.ndarray], table: dict[str, Any], rate_hz: float, n: int = 6) -> dict[str, Any]:
+    """One prediction with batch 1 (what a re-plan costs on the robot); the first call is warm-up."""
+    ms = []
+    for r in table["rows"][:: max(1, len(table["rows"]) // n)][: n + 1]:
+        t0 = time.perf_counter()
+        predict(table, np.array([r]), "full")
+        ms.append((time.perf_counter() - t0) * 1000)
+    ms = ms[1:] or ms
+    return {"replan_median": round(float(np.median(ms)), 1), "replan_max": round(float(np.max(ms)), 1),
+            "budget_ms": round(1000 / rate_hz, 1), "calls": len(ms)}
+
+
+def result_path(model_version: str, split: str = "test") -> Path:
+    """outputs/runs/<model>/offline_eval_<split>.json — the one place that names the file."""
+    return resolve(project_config()["project"]["outputs_dir"]) / "runs" / model_version / f"offline_eval_{split}.json"
+
+
+def load_result(model_version: str, split: str = "test") -> dict[str, Any] | None:
+    f = result_path(model_version, split)
+    return json.loads(f.read_text()) if f.is_file() else None
+
+
+def pending(reg: Registry, split: str = "test") -> list[str]:
+    """Finished models (not timing runs) with a checkpoint here, no current offline eval of this split (none, one
+    from before the executed-stream metrics, or one of another checkpoint) and none running."""
+    from hackpipe.training.ranking import FINISHED
+    return [m["version"] for m in reg.models()
+            if m["meta"].get("purpose") != "timing" and m["status"] in FINISHED
+            and (resolve(m["checkpoint_dir"] or ".") / "config.json").is_file()
+            and not is_current(load_result(m["version"], split), m) and not is_running(m["version"], split)]
+
+
 def offline_eval(model_version: str, registry: Registry | None = None, split: str = "test", every: int = 3,
-                 batch: int = 8, device: str | None = None, progress: Callable[[str], None] | None = print
-                 ) -> dict[str, Any]:
+                 batch: int = 8, device: str | None = None, progress: Callable[[str], None] | None = print,
+                 robustness: bool = True, robust_eps: int = 3) -> dict[str, Any]:
+    """Runs once per model at a time: a marker with this process ID is kept while it runs."""
+    import os
+    if is_running(model_version, split):
+        raise RuntimeError(f"an offline eval of {model_version} is already running")
+    marker = running_marker(model_version, split)
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    import socket
+    marker.write_text(f"{os.getpid()} {socket.gethostname()} {now_iso()}")
+    try:
+        return _offline_eval(model_version, registry, split, every, batch, device, progress, robustness, robust_eps)
+    finally:
+        marker.unlink(missing_ok=True)
+
+
+def _offline_eval(model_version: str, registry: Registry | None, split: str, every: int, batch: int,
+                  device: str | None, progress: Callable[[str], None] | None, robustness: bool,
+                  robust_eps: int) -> dict[str, Any]:
     from hackpipe.common.lerobot_io import DatasetFolder
     from hackpipe.dataset.versioning import load_manifest
     reg = registry or Registry()
@@ -170,14 +377,55 @@ def offline_eval(model_version: str, registry: Registry | None = None, split: st
     rate, chunk = model_rate(model, DatasetFolder(resolve(srcs[0])).fps)
     tables = eval_tables(m, split, rate, names)
     predict, ck_chunk = lerobot_predictor(ckpt, tables, device)
-    res = score(tables, predict, int(chunk or ck_chunk or 50), every, batch, progress)
+    from hackpipe.common.config import gates_config
+    gated = set((gates_config().get("offline") or {}).get("block", {}).get("robustness_variants") or ROBUSTNESS)
+    variants, skipped = {k: v for k, v in ROBUSTNESS.items() if k in gated}, {}   # only what the checks use
+    from hackpipe.training.curriculum import reword
+    texts = {str(x) for t in tables for x in t["full_text"][t["rows"]]}
+    if "reworded_instruction" in variants and not any(reword(x, 1) != x for x in texts):   # = the baseline
+        variants.pop("reworded_instruction")
+        skipped["reworded_instruction"] = "no paraphrase pattern matches the test instructions"
+    res = score(tables, predict, int(chunk or ck_chunk or 50), every, batch, progress, hz=rate,
+                robust=variants if robustness else None, robust_eps=robust_eps)
+    if robustness:
+        res["robustness"]["skipped"] = skipped
+    res["latency_ms"] = latency(predict, tables[0], rate)
     res.update({"model": model_version, "checkpoint": str(ckpt), "dataset_version": model["dataset_version"],
                 "split": split, "rate_hz": rate, "every": every, "episodes": {t["source"]: len(set(t["ep"][t["rows"]]))
                                                                             for t in tables},
                 "created_at": now_iso()})
-    run_dir = resolve(project_config()["project"]["outputs_dir"]) / "runs" / model_version
-    run_dir.mkdir(parents=True, exist_ok=True)
-    out = run_dir / f"offline_eval_{split}.json"
+    out = result_path(model_version, split)
+    out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(res, indent=1))
     res["file"] = str(out)
     return res
+
+
+def running_marker(model_version: str, split: str = "test") -> Path:
+    return result_path(model_version, split).with_suffix(".running")
+
+
+def is_running(model_version: str, split: str = "test") -> bool:
+    """An offline eval of this model is in progress: a marker written on this machine whose process still runs (a
+    marker that came with a state import from another machine, or whose process ended, doesn't count)."""
+    import os
+    import socket
+    f = running_marker(model_version, split)
+    try:
+        parts = f.read_text().split()
+        if len(parts) > 2 and parts[1] != socket.gethostname():
+            return False
+        os.kill(int(parts[0]), 0)
+        return True
+    except (OSError, ValueError, IndexError):
+        return False
+
+
+def is_current(res: dict[str, Any] | None, model: dict[str, Any] | None = None) -> bool:
+    """The eval has the metrics the gates need (evals made before the executed-stream metrics don't) and, given the
+    model, tested the checkpoint the model points at now (a new best checkpoint needs a new test)."""
+    if not (res and (res.get("executed") or {}).get("arm_mean") is not None):
+        return False
+    if model is None or not res.get("checkpoint"):
+        return True
+    return resolve(res["checkpoint"]).resolve() == resolve(model["checkpoint_dir"] or ".").resolve()

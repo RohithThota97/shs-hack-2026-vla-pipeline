@@ -53,7 +53,9 @@ connect() {
   echo "Tunnel open — console at $url"
   echo "(keep this window open; Ctrl+C closes the tunnel, training on the GPU machine keeps running)"
   ( sleep 3; command -v open >/dev/null && open "$url" || xdg-open "$url" 2>/dev/null || true ) &
-  ssh -N -o ExitOnForwardFailure=yes -L "$PORT:127.0.0.1:$REMOTE_PORT" "$host"
+  # its own connection: with a shared ControlMaster the forward would move into the master and close with it
+  ssh -N -o ControlMaster=no -o ControlPath=none -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 \
+    -L "$PORT:127.0.0.1:$REMOTE_PORT" "$host"
 }
 
 fetch() {

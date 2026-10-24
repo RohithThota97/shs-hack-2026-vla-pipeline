@@ -19,7 +19,9 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 ALIAS=hackpipe-gpu
 REPO_URL=https://github.com/RohithThota97/shs-hack-2026-vla-pipeline.git
-DATASETS=(fr3_duo_handover_84 fr3_duo_handover_lighting10 fr3_duo_rand500)
+# datasets copied to the pod; e.g. HACKPIPE_DATASETS="fr3_duo_handover_84 fr3_duo_handover_lighting10" for a
+# handover-only run (the two pinned sources are required, the cube data only for runs that train on it)
+read -r -a DATASETS <<< "${HACKPIPE_DATASETS:-fr3_duo_handover_84 fr3_duo_handover_lighting10 fr3_duo_rand500}"
 PORT=${PORT:-8501}
 MARKER="$HOME/.hackpipe/cloud_writer"
 CONSOLE_PATTERN="streamlit run .*hackpipe"      # same pattern as laptop.sh's no_local_console

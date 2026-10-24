@@ -40,3 +40,32 @@ Newest first. One line for the decision, one for the reason.
   the rate (6 Hz vs 30 fps) and chunk length stay consistent.
 - Guard: no fine-tune from a model that saw the target version's test episodes (its test scores would be leaked).
   Normalisation statistics are recomputed from the new data, as for any run.
+
+## 2026-10-23 — Evaluation after the team's post-training pipeline (AI-project-work)
+- Ported into our pipeline instead of copying their Windows UI: metrics into `evaluation/offline.py`, gates into
+  `configs/gates.yaml`, verdict into `gates/verdict.py`, page into the console. Their scripts stay outside the repo.
+- Test set stays lighting10. Their held-out episodes (night84 0, 1, 8, 11, 46, 56, 69, 74, 77, 78) are in our
+  train split: their scores of our models would be leaked.
+- Their gate numbers are adopted unchanged and live in configs/gates.yaml; they are strict (m-v2 reached
+  0.034 rad on validation vs the 0.015 rad gate).
+- Auto-evaluate runs inside the training job (`train --then-eval`), not as a second queued job: two GPU jobs
+  submitted together race for the GPU lock, so a separate eval could start before training and find nothing.
+- Branches r1-r3-integrity-validation and training-preparation are not merged (r1-r3: 6 conflicts with the
+  reworked import/QC and it would change QC outcomes of approved data; training-preparation holds dataset files in
+  Git LFS on GitHub). r1-r3's checks get ported later in their own PR.
+
+## 2026-10-23 — Deploy = serving for the Isaac Sim bridge, gated by the verdict
+- `hackpipe serve` speaks the team's fr3duo_policy_server protocol, so their Isaac Sim client works unchanged
+  against our deployed model on 8090. Staging on 8091 + a health check on a recorded frame before any swap (their
+  design); process handling is POSIX (own session, pid files) instead of their Windows WMI / wsl.exe calls.
+- Deploy requires verdict DEPLOY; HOLD: SIM UNVERIFIED only with explicit supervision and a name. The old R6
+  gates (sim success with CI) stay for the model card; the verdict now includes the sim gates.
+- Only servers hackpipe started are ever stopped (the team's UI killed whatever held the port).
+
+## 2026-10-24 — Evaluate / serve again, simpler
+- The first version (#24/#25, reverted in #26) was too strict and hard to read (absolute rad gates the T4 model
+  could not reach, five verdict words). Now: checks relative to doing nothing, four verdicts with plain names, the
+  best checkpoint by validation error instead of the last one, explanations on the pages.
+- Serving a READY FOR SIM TEST model is allowed: the sim test needs a served model.
+- A100 run (RunPod): SmolVLA curriculum handover, batch 32, bf16, 6500 steps, checkpoints + validation every 500
+  steps, all kept (1.3 GB each) — the best one is picked afterwards.

@@ -122,9 +122,10 @@ class PreflightError(RuntimeError):
     pass
 
 
-def prune_checkpoints(output_dir: Path, keep: int) -> list[str]:
-    """Delete all but the newest `keep` step checkpoints (and never the one `last` points to), so a run fits a
-    15 GB Drive. lerobot-train writes checkpoints/<step>/ and then moves the `last` link to it."""
+def prune_checkpoints(output_dir: Path, keep: int, protect: set[str] | None = None) -> list[str]:
+    """Delete all but the newest `keep` step checkpoints (and never the one `last` points to, nor the step folders in
+    `protect`, e.g. the model's chosen best checkpoint), so a run fits a 15 GB Drive. lerobot-train writes
+    checkpoints/<step>/ and then moves the `last` link to it."""
     ck = Path(output_dir) / "checkpoints"
     if keep < 1 or not ck.is_dir():
         return []
@@ -133,18 +134,19 @@ def prune_checkpoints(output_dir: Path, keep: int) -> list[str]:
     last = (ck / "last").resolve() if (ck / "last").exists() else None
     removed = []
     for d in steps[:-keep]:
-        if last is not None and d.resolve() == last:
+        if (last is not None and d.resolve() == last) or d.name in (protect or set()):
             continue
         shutil.rmtree(d, ignore_errors=True)
         removed.append(d.name)
     return removed
 
 
-def _pruner(output_dir: Path, keep: int, stop: threading.Event, every_s: float = 60) -> threading.Thread:
+def _pruner(output_dir: Path, keep: int, stop: threading.Event, every_s: float = 60,
+            protect: set[str] | None = None) -> threading.Thread:
     def loop() -> None:
         while not stop.wait(every_s):
             try:
-                prune_checkpoints(output_dir, keep)
+                prune_checkpoints(output_dir, keep, protect)
             except OSError as e:     # e.g. lerobot renaming files right now: try again next round
                 print(f"checkpoint pruning skipped this round: {e}", flush=True)
     t = threading.Thread(target=loop, daemon=True)
@@ -284,9 +286,11 @@ def train(config_path: str, dataset_version: str, dry_run: bool = False, registr
           f"`hackpipe train --dataset {dataset_version} --resume {version}`", flush=True)
     t0 = time.time()
     keep = int(cfg.get("keep_checkpoints") or 0)          # 0 = keep all
+    best_step = ((reg.get_model(version) or {}).get("meta") or {}).get("best_step")
+    protect = {f"{int(best_step):06d}"} if best_step is not None else set()   # a resumed run keeps its chosen best
     stop = threading.Event()
     if keep:
-        _pruner(output_dir, keep, stop)
+        _pruner(output_dir, keep, stop, protect=protect)
     try:
         proc = subprocess.run(cmd)
     except BaseException as e:                 # lerobot-train missing, Ctrl+C, …: never leave 'training' behind
@@ -298,7 +302,7 @@ def train(config_path: str, dataset_version: str, dry_run: bool = False, registr
     finally:
         stop.set()
         if keep:
-            prune_checkpoints(output_dir, keep)
+            prune_checkpoints(output_dir, keep, protect)
     record.update({"ended_at": now_iso(), "duration_s": round(time.time() - t0, 1), "exit_code": proc.returncode})
     record_path.write_text(json.dumps(record, indent=2))
     reg.set_model_status(version, "trained" if proc.returncode == 0 else "failed")

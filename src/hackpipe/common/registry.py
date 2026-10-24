@@ -281,11 +281,16 @@ class Registry:
         self.conn.commit()
 
     def deployments(self) -> list[dict[str, Any]]:
-        return self._rows("SELECT * FROM deployments ORDER BY created_at")
+        return self._rows("SELECT * FROM deployments ORDER BY created_at, rowid")
+
+    def current_deployment(self) -> dict[str, Any] | None:
+        """The latest 'deployed' row (ties within one second: the later insert)."""
+        rows = self._rows("SELECT * FROM deployments WHERE status='deployed' ORDER BY created_at DESC, rowid DESC LIMIT 1")
+        return rows[0] if rows else None
 
     def current_deployed_model(self) -> str | None:
-        rows = self._rows("SELECT * FROM deployments WHERE status='deployed' ORDER BY created_at DESC LIMIT 1")
-        return rows[0]["model_version"] if rows else None
+        cur = self.current_deployment()
+        return cur["model_version"] if cur else None
 
     # ---------- jobs ----------
     def add_job(self, job_id: str, kind: str, needs: str, machine: str, meta: dict[str, Any],

@@ -42,10 +42,11 @@ def _sim(model: str, reg: Registry) -> float | None:
 
 def _offline(model: str) -> tuple[float, float] | None:
     """(chunk arm error, hold-still error) on the test split, averaged over its sources."""
-    f = resolve(project_config()["project"]["outputs_dir"]) / "runs" / model / "offline_eval_test.json"
-    if not f.is_file():
+    from hackpipe.evaluation.offline import load_result
+    res = load_result(model)
+    if res is None:
         return None
-    rows = [r for r in json.loads(f.read_text()).get("rows") or []
+    rows = [r for r in res.get("rows") or []
             if r["instruction"] == "full" and r["subtask"].endswith("· all")]
     if not rows:
         return None

@@ -22,7 +22,11 @@ TOKENS = {
 STATUS_COLOURS = {"done": "ok", "active": "info", "running": "info", "queued": "muted", "waiting": "warn",
                   "todo": "muted", "failed": "bad", "draft": "warn", "approved": "ok", "VALID": "ok",
                   "REVIEW": "warn", "INVALID": "bad", "DUPLICATE": "muted", "imported": "muted", "trained": "ok",
-                  "training": "info"}
+                  "training": "info", "evaluated": "ok", "deployed": "ok", "rolled_back": "muted",
+                  "READY TO DEPLOY": "ok", "NEEDS MORE TRAINING": "bad", "READY FOR SIM TEST": "info",
+                  "NOT TESTED": "muted", "best": "ok",
+                  "pass": "ok", "FAIL": "bad", "warn": "warn", "unverified": "warn", "skipped": "muted",
+                  "fail": "bad"}
 
 CSS = """
 <style>

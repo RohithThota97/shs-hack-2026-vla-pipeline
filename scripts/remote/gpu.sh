@@ -103,7 +103,8 @@ console() {
     versions
     .venv/bin/python -c "import secrets; print(secrets.token_urlsafe(16))" > "$STATE_DIR/console_token"
     chmod 600 "$STATE_DIR/console_token"
-    HACKPIPE_CONSOLE_TOKEN=$(cat "$STATE_DIR/console_token") STREAMLIT_SERVER_ADDRESS=127.0.0.1 \
+    # jobs started from the console inherit its PATH: the venv's lerobot-train must be on it
+    PATH="$PWD/.venv/bin:$PATH" HACKPIPE_CONSOLE_TOKEN=$(cat "$STATE_DIR/console_token") STREAMLIT_SERVER_ADDRESS=127.0.0.1 \
       STREAMLIT_SERVER_HEADLESS=true nohup $HP console --port "$PORT" > "$STATE_DIR/console.log" 2>&1 &
     echo $! > "$STATE_DIR/console.pid"
     sleep 5

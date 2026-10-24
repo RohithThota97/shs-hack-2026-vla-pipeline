@@ -17,3 +17,25 @@ evaluation:
 improve:
   target_success_rate: 0.8
   demos_per_gap: 20                  # suggested number of targeted demos per weak scenario category
+
+# Post-training verdict (gates/verdict.py), on the held-out test source (lighting10, never trained on):
+#   NOT TESTED → NEEDS MORE TRAINING → READY FOR SIM TEST (offline checks pass) → READY TO DEPLOY (sim passes too)
+# block = decides the verdict, warn = shown only. Edit the numbers here.
+offline:
+  block:
+    max_ratio_to_hold_still: 0.5       # model's arm error ÷ the error of doing nothing (keeping the current pose)
+    max_worst_subtask_ratio: 0.8       # the same ratio for the worst sub-task (reach, grasp, handover, place …)
+    gripper_event_hit_rate_min: 0.8    # demo's gripper close / open moments matched within ±1 s
+    robustness_ratio_max: 1.5          # error with darker / brighter images, noisy joints, reworded task ÷ normal
+    robustness_variants: [images_darker_x0.6, images_brighter_x1.4, state_noise_0.01rad, reworded_instruction]
+    regression_vs_deployed_max: 1.05   # not worse than the model being served now
+  warn:
+    replan_latency_budget_ms: 166.7    # one prediction must fit a 6 Hz step on the robot
+    replan_jump_vs_demo_max: 2.5       # jump at re-plan ÷ the demo's own step size
+    gripper_timing_error_s_max: 0.5
+
+online:                                # Isaac Sim run imported from the site PC (Evaluate → Isaac Sim)
+  block:
+    success_rate_min: 0.8
+    median_stage_min: 3                # eval_isaac stages 0 not lifted … 4 on the tray
+  require_replay_ok: true              # the recorded demo must succeed in the same scene, else the run is unverified

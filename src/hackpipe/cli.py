@@ -31,7 +31,7 @@ def _writes(args) -> bool:
         return not args.offline
     if args.cmd == "state":
         return False                  # import takes the writer role itself; export only reads
-    if args.cmd in ("ingest", "qc", "auto", "demo", "gates", "deploy", "rollback"):
+    if args.cmd in ("ingest", "qc", "auto", "demo", "gates", "deploy", "rollback", "best"):
         return True
     if args.cmd == "dataset":
         return args.action in ("create", "approve") or (args.action == "materialize" and not args.plan)
@@ -132,11 +132,14 @@ def main(argv: list[str] | None = None) -> None:
                    help="'timing' = short speed measurement, labelled 'timing run, not a result'")
     s.add_argument("--set", action="append", default=[], metavar="KEY=VALUE",
                    help="override a train-config value, e.g. --set steps=200 (repeatable; stored in the run record)")
+    s.add_argument("--then-eval", action="store_true",
+                   help="after a successful run: offline eval on the test split (same job, same GPU)")
     s.add_argument("--init-from", metavar="MODEL_VERSION",
                    help="fine-tune: start from this model's checkpoint (config defaults to the model's own)")
 
     s = sub.add_parser("eval", help="R5 run the test suite")
-    s.add_argument("--model", required=True)
+    s.add_argument("--model", required=True, help="model version; with --offline also 'pending' = every finished "
+                                                   "model without an offline eval yet")
     s.add_argument("--suite", default="configs/eval/test_suite_v1.yaml")
     s.add_argument("--import", dest="import_results", metavar="RESULTS_JSON",
                    help="import an Isaac Sim run (eval_isaac.py results.json) instead of running the suite")
@@ -146,6 +149,9 @@ def main(argv: list[str] | None = None) -> None:
     s.add_argument("--split", choices=["test", "val"], default="test", help="with --offline")
     s.add_argument("--every", type=int, default=3, help="with --offline: every N-th frame on the policy's rate grid")
     s.add_argument("--batch", type=int, default=8, help="with --offline")
+    s.add_argument("--no-robustness", action="store_true", help="with --offline: skip the robustness variants")
+    s.add_argument("--replay", metavar="REPLAY_JSON",
+                   help="with --import: eval_isaac.py --mode replay result of the same scene (sim sanity check)")
     s.add_argument("--adapter", choices=["organizer", "dummy"], default="organizer",
                    help="'dummy' gives FAKE results for pipeline testing only")
 
@@ -162,10 +168,39 @@ def main(argv: list[str] | None = None) -> None:
         s = sub.add_parser(name, help=helptext)
         s.add_argument("--eval", required=True, dest="eval_id")
 
-    s = sub.add_parser("deploy", help="R10 gated deployment")
+    s = sub.add_parser("best", help="point a curriculum model at its best checkpoint (lowest validation error)")
     s.add_argument("--model", required=True)
-    s.add_argument("--allow-supervised", action="store_true")
-    sub.add_parser("rollback", help="R10 roll back to the previous deployed model")
+
+    s = sub.add_parser("verdict", help="post-training verdict: NOT TESTED / NEEDS MORE TRAINING / READY FOR SIM TEST / READY TO DEPLOY")
+    s.add_argument("--model", required=True)
+
+    s = sub.add_parser("deploy", help="R10 gated deployment / serving (verdict READY…, or --override with --by)")
+    s.add_argument("--model", required=True)
+    s.add_argument("--override", "--allow-supervised", dest="allow_supervised", action="store_true",
+                   help="serve although the verdict does not allow it (recorded with --by)")
+    s.add_argument("--serve", action="store_true", help="stage + health-check, then serve it on the deploy port")
+    s.add_argument("--n-action-steps", type=int, help="with --serve (default: configs/project.yaml deploy)")
+    s.add_argument("--grasp-extend", type=float, default=0.0, help="with --serve: inference-time grasp shaping (s)")
+    s.add_argument("--by", default="", help="who deploys (recorded)")
+    s = sub.add_parser("rollback", help="R10 roll back to the previous deployed model")
+    s.add_argument("--serve", action="store_true", help="also serve it (staged + health-checked)")
+    s.add_argument("--by", default="")
+    s = sub.add_parser("serve", help="policy server for the Isaac Sim bridge (foreground; GET /info, POST /reset, /act)")
+    src = s.add_mutually_exclusive_group(required=True)
+    src.add_argument("--model", help="registered model version")
+    src.add_argument("--checkpoint", help="pretrained_model folder")
+    src.add_argument("--dummy", action="store_true", help="holds the start pose — bridge tests only, FAKE")
+    s.add_argument("--host", default=None)
+    s.add_argument("--port", type=int, default=None)
+    s.add_argument("--n-action-steps", type=int)
+    s.add_argument("--grasp-extend", type=float, default=0.0)
+    s.add_argument("--grasp-hold", type=float, default=0.7)
+    s.add_argument("--device", default="auto")
+    s.add_argument("--probe-source", help="recorded dataset for POST /probe (the deploy health check)")
+    s.add_argument("--any-robot", action="store_true", help="serve a checkpoint outside the FR3 Duo contract (tests)")
+    s = sub.add_parser("serving", help="the deploy port: status / stop / start (the deployed model, detached)")
+    s.add_argument("action", choices=["status", "stop", "start"])
+    s.add_argument("--port", type=int, default=None)
     s = sub.add_parser("publish", help="push a model + model card to the Hugging Face Hub (never the dataset)")
     s.add_argument("--model", required=True)
     s.add_argument("--repo", help="<hf-user>/<name>; default hub.model_repo_id in configs/project.yaml")
@@ -313,6 +348,21 @@ def main(argv: list[str] | None = None) -> None:
             rec = t.train(args.config, args.dataset, args.dry_run, reg, resume_model=args.resume,
                           overrides=t.parse_overrides(args.set), purpose=args.purpose, init_from=args.init_from)
             _print({k: rec.get(k) for k in ("model_version", "dataset_version", "output_dir", "exit_code")})
+            if args.then_eval and not args.dry_run and args.purpose == "model" and rec.get("exit_code") == 0:
+                from hackpipe.evaluation.offline import offline_eval
+                if rec.get("trainer") == "curriculum":
+                    from hackpipe.training.best import select
+                    try:
+                        b = select(rec["model_version"], reg)
+                        print(f"best checkpoint: step {b['step']} (val arm error {b['val_full_arm_rad']} rad)", flush=True)
+                    except (RuntimeError, OSError, ValueError) as e:        # still test the last checkpoint
+                        print(f"no best checkpoint ({e}); testing the last one", flush=True)
+                try:                          # training succeeded; an eval failure must not fail the job
+                    r = offline_eval(rec["model_version"], reg)
+                    _print({"offline_eval": r["file"], "executed_arm_mean": (r.get("executed") or {}).get("arm_mean")})
+                except Exception as e:  # noqa: BLE001
+                    print(f"training finished, but the offline eval failed: {type(e).__name__}: {e} — run it again "
+                          f"from the Evaluate page (hackpipe eval --model {rec['model_version']} --offline)", flush=True)
     elif args.cmd == "sim":
         if args.action == "reference":
             from hackpipe.sim.reference import write_reference
@@ -328,13 +378,36 @@ def main(argv: list[str] | None = None) -> None:
             from hackpipe.sim.camera_gap import camera_gap
             _print(camera_gap(args.snapshots, args.source or project_config()["dataset"]["root"], args.out))
     elif args.cmd == "eval" and args.offline:
-        from hackpipe.evaluation.offline import offline_eval
-        r = offline_eval(args.model, reg, args.split, args.every, args.batch)
-        _print({"file": r["file"], "predictions": r["predictions"], "seconds": r["seconds"],
-                "summary": [x for x in r["rows"] if x["subtask"].endswith("· all")]})
+        from hackpipe.evaluation.offline import offline_eval, pending
+        todo = pending(reg, args.split) if args.model == "pending" else [args.model]
+        if not todo:
+            print("nothing pending: every finished model has an offline eval")
+        failed = []
+        for mv in todo:
+            try:
+                r = offline_eval(mv, reg, args.split, args.every, args.batch, robustness=not args.no_robustness)
+            except Exception as e:  # noqa: BLE001 — one broken model must not stop the others
+                if len(todo) == 1:
+                    raise
+                failed.append(mv)
+                print(f"{mv}: offline eval failed: {type(e).__name__}: {e}", flush=True)
+                continue
+            _print({"model": mv, "file": r["file"], "predictions": r["predictions"], "seconds": r["seconds"],
+                    "executed_arm_mean": (r.get("executed") or {}).get("arm_mean"),
+                    "gripper_hit_rate": (r.get("gripper_events") or {}).get("hit_rate"),
+                    "summary": [x for x in r["rows"] if x["subtask"].endswith("· all")]})
+        if failed:
+            sys.exit(f"offline eval failed for {failed}")
+    elif args.cmd == "best":
+        from hackpipe.training.best import select
+        _print(select(args.model, reg))
+    elif args.cmd == "verdict":
+        from hackpipe.gates.verdict import verdict
+        v = verdict(args.model, reg)
+        _print({k: v[k] for k in ("model", "verdict", "online_state", "todo")})
     elif args.cmd == "eval" and args.import_results:
         from hackpipe.evaluation.sim_import import import_results
-        r = import_results(args.model, args.suite, args.import_results, args.gifs, reg)
+        r = import_results(args.model, args.suite, args.import_results, args.gifs, reg, replay=args.replay)
         m = r["metrics"]
         _print({"eval_id": r["eval_id"], "results_dir": r["results_dir"], "task_success": m["task_success"],
                 "stage_counts_0to4": m["stage_counts_0to4"]})
@@ -357,12 +430,43 @@ def main(argv: list[str] | None = None) -> None:
         _print(recommend(args.eval_id, reg))
     elif args.cmd == "deploy":
         from hackpipe.deploy.deploy import deploy
-        r = deploy(args.model, reg, args.allow_supervised)
-        _print({k: r[k] for k in ("dep_id", "status", "smoke_test", "launch")} |
-               {"recommendation": r["gates"]["recommendation"]})
+        r = deploy(args.model, reg, args.allow_supervised, args.serve, args.n_action_steps, args.grasp_extend, args.by)
+        _print({k: r[k] for k in ("dep_id", "status", "verdict", "error", "serving", "launch")})
+        if r["status"] != "deployed":
+            sys.exit(1)
     elif args.cmd == "rollback":
         from hackpipe.deploy.deploy import rollback
-        _print(rollback(reg))
+        _print(rollback(reg, args.serve, args.by))
+    elif args.cmd == "serve":
+        from hackpipe.deploy import server
+        from hackpipe.deploy.serving import settings
+        cfg = settings()
+        ckpt, hz = args.checkpoint, 6.0
+        if args.model:
+            from hackpipe.deploy.serving import policy_rate
+            m = reg.get_model(args.model)
+            if m is None:
+                sys.exit(f"Unknown model {args.model}")
+            from hackpipe.common.config import resolve
+            ckpt, hz = str(resolve(m["checkpoint_dir"])), policy_rate(m, reg)
+        policy = server.build_policy(ckpt, args.model, args.dummy, args.n_action_steps, args.grasp_extend,
+                                     args.grasp_hold, hz, args.device, args.any_robot)
+        reg.close()
+        server.serve(policy, args.host or cfg["host"], args.port or cfg["port"], hz, args.probe_source)
+    elif args.cmd == "serving":
+        from hackpipe.deploy import serving
+        port = args.port or serving.settings()["port"]
+        if args.action == "status":
+            _print(serving.status(port))
+        elif args.action == "stop":
+            print(f"stopped the server on {port}" if serving.stop(port) else f"nothing of ours serves {port}")
+        else:
+            cur = next((d for d in reversed(reg.deployments()) if d["status"] in ("deployed", "serving")), None)
+            if cur is None:
+                sys.exit("nothing deployed yet: hackpipe deploy --model … --serve")
+            srv = (cur["meta"] or {}).get("serving") or {}
+            _print(serving.start(port, model=cur["model_version"], n_action_steps=srv.get("n_action_steps"),
+                                 grasp_extend=srv.get("grasp_extend") or 0.0))
     elif args.cmd == "publish":
         from hackpipe.hub.publish import publish
         _print(publish(args.model, args.repo, private=not args.public, dry_run=args.dry_run, registry=reg))
