@@ -123,3 +123,18 @@ cd ~/shs-hack-2026-vla-pipeline && ./scripts/remote/gpu.sh setup ~/hackpipe_data
 ```
 The console listens on 127.0.0.1 only and needs the token in `~/.hackpipe/console_token`. Training jobs keep
 running when the console (`gpu.sh stop`) or the tunnel closes. Checkpoints stay on the GPU machine.
+
+## Rented cloud GPU (RunPod / Lambda), one script
+```bash
+ssh-keygen -t ed25519 -f ~/.ssh/hackpipe_gpu          # once; add ~/.ssh/hackpipe_gpu.pub to the cloud account
+# create the pod (e.g. RunPod: 1x A100 80GB, "RunPod PyTorch" template, 30 GB container + 50 GB volume,
+# "SSH over exposed TCP"), then on the laptop:
+./scripts/remote/cloud_gpu.sh up "ssh root@IP -p PORT -i ~/.ssh/hackpipe_gpu"   # setup + data + console + tunnel
+./scripts/remote/cloud_gpu.sh connect                 # reopen http://localhost:8501 later
+./scripts/remote/cloud_gpu.sh status
+./scripts/remote/cloud_gpu.sh down                    # BEFORE deleting the pod: checkpoints + registry back
+```
+Data goes from the laptop to the pod over SSH (rsync, ~4.4 GB). Repo, data, uv and Python live in `/workspace` (RunPod's
+volume, kept when the pod is stopped) or, without it, the remote home (Lambda: `ubuntu@IP`, picked automatically;
+`REMOTE_BASE=/abs/path` overrides). The pod runs this laptop's commit (push it first). The registry is handed over
+once (marker `~/.hackpipe/cloud_writer` on the laptop); after that the pod is the writer until `down`.
