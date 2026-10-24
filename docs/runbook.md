@@ -134,5 +134,7 @@ ssh-keygen -t ed25519 -f ~/.ssh/hackpipe_gpu          # once; add ~/.ssh/hackpip
 ./scripts/remote/cloud_gpu.sh status
 ./scripts/remote/cloud_gpu.sh down                    # BEFORE deleting the pod: checkpoints + registry back
 ```
-Data goes from the laptop to the pod over SSH (rsync, ~4.4 GB); repo and data live on the volume (`/workspace`),
-so a stopped pod keeps them. The registry is sent once; after that the pod is the writer until `down`.
+Data goes from the laptop to the pod over SSH (rsync, ~4.4 GB). Repo, data, uv and Python live in `/workspace` (RunPod's
+volume, kept when the pod is stopped) or, without it, the remote home (Lambda: `ubuntu@IP`, picked automatically;
+`REMOTE_BASE=/abs/path` overrides). The pod runs this laptop's commit (push it first). The registry is handed over
+once (marker `~/.hackpipe/cloud_writer` on the laptop); after that the pod is the writer until `down`.

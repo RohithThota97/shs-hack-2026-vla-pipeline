@@ -46,6 +46,9 @@ setup() {
   nvidia-smi --query-gpu=name,memory.total --format=csv
   command -v "$PY" >/dev/null || die "$PY not found (Python 3.12 needed; or run with PYTHON=/path/to/python3.12)"
   command -v ffmpeg >/dev/null || echo "WARNING: no ffmpeg on PATH (sudo apt install ffmpeg) — video decoding may fail"
+  if [[ -d .venv ]] && ! .venv/bin/python -c "" 2>/dev/null; then   # its interpreter is gone (e.g. restarted pod)
+    echo "rebuilding .venv (its Python no longer runs)"; rm -rf .venv
+  fi
   [[ -d .venv ]] || "$PY" -m venv .venv
   .venv/bin/pip install -q --upgrade pip
   .venv/bin/pip install -q -e ".[dev,video,hub,console]" "$LEROBOT_SPEC" matplotlib
