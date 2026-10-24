@@ -53,3 +53,11 @@ Newest first. One line for the decision, one for the reason.
 - Branches r1-r3-integrity-validation and training-preparation are not merged (r1-r3: 6 conflicts with the
   reworked import/QC and it would change QC outcomes of approved data; training-preparation holds dataset files in
   Git LFS on GitHub). r1-r3's checks get ported later in their own PR.
+
+## 2026-10-23 — Deploy = serving for the Isaac Sim bridge, gated by the verdict
+- `hackpipe serve` speaks the team's fr3duo_policy_server protocol, so their Isaac Sim client works unchanged
+  against our deployed model on 8090. Staging on 8091 + a health check on a recorded frame before any swap (their
+  design); process handling is POSIX (own session, pid files) instead of their Windows WMI / wsl.exe calls.
+- Deploy requires verdict DEPLOY; HOLD: SIM UNVERIFIED only with explicit supervision and a name. The old R6
+  gates (sim success with CI) stay for the model card; the verdict now includes the sim gates.
+- Only servers hackpipe started are ever stopped (the team's UI killed whatever held the port).

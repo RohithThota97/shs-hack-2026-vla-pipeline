@@ -50,3 +50,12 @@ demo_defaults:
 hub:
   model_repo_id: RohithThota/smolvla-fr3duo-handover   # private model repo (Hugging Face user RohithThota)
   private: true
+
+# Serving for the Isaac Sim bridge (hackpipe serve / deploy --serve; the team's client uses port 8090).
+deploy:
+  host: 127.0.0.1                      # 0.0.0.0 only when Isaac Sim runs on another machine (then firewall the port)
+  port: 8090
+  stage_port: 8091                     # a new model is loaded and health-checked here before it replaces 8090
+  probe_source: data/raw/fr3_duo_handover_lighting10   # recorded frame for the health check
+  n_action_steps: 5                    # = configs/eval/sim_handover_v1.yaml → sim.n_action_steps
+  start_timeout_s: 240                 # model load (SmolVLA on a T4: ~1 min)
