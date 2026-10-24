@@ -83,8 +83,9 @@ def _swap(model_version: str, n_action_steps: int | None, grasp_extend: float) -
 def deploy(model_version: str, registry: Registry | None = None, allow_supervised: bool = False,
            serve: bool = False, n_action_steps: int | None = None, grasp_extend: float = 0.0,
            by: str = "") -> dict[str, Any]:
-    """Gated by the post-training verdict (gates/verdict.py): DEPLOY, or HOLD: SIM UNVERIFIED with
-    allow_supervised. serve: also stage + health-check + serve it on the production port (deploy/serving.py)."""
+    """Gated by the post-training verdict (gates/verdict.py): READY TO DEPLOY → a deployment; READY FOR SIM TEST →
+    served for the Isaac Sim test; anything else only with allow_supervised (= override, recorded with the name).
+    serve: also stage + health-check + serve it on the production port (deploy/serving.py)."""
     from hackpipe.gates.verdict import verdict
     reg = registry or Registry()
     model = reg.get_model(model_version)
@@ -92,15 +93,18 @@ def deploy(model_version: str, registry: Registry | None = None, allow_supervise
         raise KeyError(model_version)
     v = verdict(model_version, reg)
     smoke = smoke_test(model["checkpoint_dir"])
-    allowed = v["verdict"] == "DEPLOY" or (allow_supervised and v["verdict"].startswith("HOLD"))
+    ok_verdict = v["verdict"] in ("READY TO DEPLOY", "READY FOR SIM TEST")
+    allowed = ok_verdict or allow_supervised
     dep_id = _dep_id(model_version)
-    meta: dict[str, Any] = {"verdict": v["verdict"], "todo": v["todo"], "smoke_test": smoke,
-                            "supervised": allow_supervised and v["verdict"] != "DEPLOY", "by": by,
+    purpose = "deployment" if v["verdict"] == "READY TO DEPLOY" else "sim test"
+    meta: dict[str, Any] = {"verdict": v["verdict"], "todo": v["todo"], "smoke_test": smoke, "purpose": purpose,
+                            "supervised": bool(allow_supervised and not ok_verdict), "by": by,
                             "launch": "hackpipe serve" if serve else LAUNCH_COMMAND}
     error = None
     if not allowed:
-        error = f"verdict {v['verdict']}" + (" — deploy it only with supervision (--allow-supervised)"
-                                              if v["verdict"].startswith("HOLD") else "")
+        error = f"verdict {v['verdict']}: serve it only with an override (--override, recorded)"
+    elif allow_supervised and not ok_verdict and not by:
+        error = "an override needs the name of who decides it (--by)"
     elif not smoke["passed"]:
         error = "smoke test failed (checkpoint files missing)"
     elif serve:

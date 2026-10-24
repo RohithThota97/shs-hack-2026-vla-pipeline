@@ -15,9 +15,18 @@ reg = Registry()
 cfg = serving.settings()
 PORT, STAGE = int(cfg["port"]), int(cfg["stage_port"])
 st.markdown("### Deploy")
-st.caption(f"05 Deploy — a model is served for the Isaac Sim bridge on port {PORT} (`hackpipe serve`, the team's "
-           f"client protocol) only after its verdict allows it; it is loaded on port {STAGE} and checked on a recorded "
-           "frame first, so a broken model never replaces a working one.")
+st.caption(f"05 Deploy — serve a tested model for Isaac Sim on port {PORT}. The team's Isaac Sim client (site PC) "
+           "sends camera images + joint state there and gets the robot's next action back.")
+with st.expander("How serving works", expanded=False):
+    st.markdown(
+        f"1. **Who may be served:** a model whose verdict (Evaluate page) is **READY FOR SIM TEST** (to run the sim "
+        "test) or **READY TO DEPLOY**. Anything else only with an override and your name — recorded in the history.\n"
+        f"2. **Safe switch:** the new model is first loaded on a spare port ({STAGE}) and checked on a recorded "
+        f"lighting10 frame (it must return 16 finite joint values). Only then does it replace what serves {PORT}. If "
+        "anything fails, the old model keeps serving.\n"
+        "3. **Actions per prediction:** the model predicts 20 steps ahead (3.3 s); the robot executes this many of "
+        "them, then asks again. 5 = re-plan every 0.8 s (the sim suite's setting).\n"
+        "4. **Roll back** puts the previous served model back, with its settings.")
 
 
 def writer_ok() -> tuple[bool, str]:
@@ -94,21 +103,22 @@ else:
     st.markdown(f"Verdict for **{pick}**: {badge(v['verdict'])}", unsafe_allow_html=True)
     for t in v["todo"]:
         st.markdown(f"- {t}")
-    hold = v["verdict"].startswith("HOLD")
-    supervised = st.checkbox("Deploy with supervision (offline gates pass, closed loop unverified)",
-                             disabled=not hold, help="recorded on the deployment")
+    ready = v["verdict"] in ("READY FOR SIM TEST", "READY TO DEPLOY")
+    override = st.checkbox("Serve anyway (override — recorded with your name)", disabled=ready,
+                           help="e.g. to look at a model in the sim that hasn't passed the offline checks")
     by = st.text_input("Your name (recorded)")
-    allowed = v["verdict"] == "DEPLOY" or (hold and supervised)
-    if st.button(f"Deploy {pick} and serve on {PORT}", type="primary",
+    allowed = ready or override
+    label = "Serve for the sim test" if v["verdict"] != "READY TO DEPLOY" else "Deploy"
+    if st.button(f"{label}: {pick} on port {PORT}", type="primary",
                  disabled=not (allowed and by.strip() and ok) or busy or stt["foreign"],
-                 help=why or ("needs verdict DEPLOY (or HOLD with supervision) and your name" if not allowed or not
-                              by.strip() else None)):
+                 help=why or ("needs a READY verdict (Evaluate page) or the override, and your name"
+                              if not allowed or not by.strip() else None)):
         args = ["deploy", "--model", pick, "--serve", "--n-action-steps", str(int(nas)), "--by", by.strip()]
         args += ["--grasp-extend", str(float(ge))] if ge else []
-        args += ["--allow-supervised"] if supervised else []
+        args += ["--override"] if override and not ready else []
         jid = runner.submit("deploy", runner.hackpipe_cmd(*args), needs="cpu", label=f"Deploy {pick}", registry=reg)
-        st.success(f"Started {jid}: staging on {STAGE}, health check, then port {PORT}. The old server keeps serving "
-                   "if anything fails.")
+        st.success(f"Started {jid}: loading on {STAGE}, checking on a recorded frame, then port {PORT} (about a "
+                   "minute). The old model keeps serving if anything fails.")
     st.caption("The server uses GPU memory while it runs; stop it before a training run on a small GPU.")
 
 # ---------- history ----------
@@ -117,7 +127,8 @@ if deps:
     st.dataframe(pd.DataFrame([{"deployment": d["dep_id"], "model": d["model_version"], "status": d["status"],
                                 "when": d["created_at"], "verdict": (d["meta"] or {}).get("verdict"),
                                 "by": (d["meta"] or {}).get("by"),
-                                "supervised": (d["meta"] or {}).get("supervised"),
+                                "purpose": (d["meta"] or {}).get("purpose"),
+                                "override": (d["meta"] or {}).get("supervised"),
                                 "rollback from": (d["meta"] or {}).get("rollback_from"),
                                 "health check": ((d["meta"] or {}).get("serving") or {}).get("health_check", {})
                                 .get("first_call_ms"), "error": (d["meta"] or {}).get("error")}

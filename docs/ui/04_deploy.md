@@ -40,3 +40,9 @@ model + card to the private Hugging Face repo.
 - Not built here: Hub publishing panel (`hackpipe publish` stays CLI).
 - Verified with a real checkpoint (CPU): served in 14 s, health check on a lighting10 frame passed (16 finite
   values), client-style /act re-planned every 5 calls.
+
+## Simplified (24 Oct)
+- Who may be served: READY FOR SIM TEST (recorded as purpose "sim test") or READY TO DEPLOY ("deployment");
+  anything else only with **Serve anyway (override)** + a name (`hackpipe deploy --override --by NAME`).
+- "How serving works" expander: who may be served, the safe switch (spare port + recorded-frame check), actions
+  per prediction, rollback. History shows purpose and override.

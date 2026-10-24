@@ -71,6 +71,9 @@ def test_set_config_steps(tmp_path):
 
 
 def test_train_page_renders_with_timing_run(workspace, dataset, monkeypatch):
+    import hackpipe.console.components.shell as shell
+    real = shell.machine_info
+    monkeypatch.setattr(shell, "machine_info", lambda: {**real(), "gpus": []})   # same result on GPU machines
     from streamlit.testing.v1 import AppTest
     from hackpipe.dataset.versioning import approve, create_dataset_version
     from hackpipe.ingest.importer import ingest

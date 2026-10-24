@@ -61,3 +61,11 @@ Newest first. One line for the decision, one for the reason.
 - Deploy requires verdict DEPLOY; HOLD: SIM UNVERIFIED only with explicit supervision and a name. The old R6
   gates (sim success with CI) stay for the model card; the verdict now includes the sim gates.
 - Only servers hackpipe started are ever stopped (the team's UI killed whatever held the port).
+
+## 2026-10-24 — Evaluate / serve again, simpler
+- The first version (#24/#25, reverted in #26) was too strict and hard to read (absolute rad gates the T4 model
+  could not reach, five verdict words). Now: checks relative to doing nothing, four verdicts with plain names, the
+  best checkpoint by validation error instead of the last one, explanations on the pages.
+- Serving a READY FOR SIM TEST model is allowed: the sim test needs a served model.
+- A100 run (RunPod): SmolVLA curriculum handover, batch 32, bf16, 6500 steps, checkpoints + validation every 500
+  steps, all kept (1.3 GB each) — the best one is picked afterwards.

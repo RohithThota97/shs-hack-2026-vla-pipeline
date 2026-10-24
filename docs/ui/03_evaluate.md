@@ -44,3 +44,18 @@ job on lighting10.
   offline eval after a successful run. *Evaluate all pending* on this page catches up older models.
 - Not taken from the team's version: their 10 night84 "held-out" episodes (they are in our train split), Windows
   process handling, LeRobot 0.4.4. Their gate numbers are kept (strict: arm mean ≤ 0.015 rad).
+
+## Simplified (24 Oct) — replaces the page above
+Four numbered steps, explained on the page:
+1. **Best checkpoint:** validation error of every saved checkpoint (curriculum_log.json → val, complete-task
+   instruction, arm rad on the val episodes of the trained source), the lowest marked; **Use this checkpoint**
+   (`hackpipe best --model m-vN`, training/best.py) points the model at it, so test, serving and deploy use it.
+   Train with `keep_checkpoints: 0` and `save_freq = val_every`, or older checkpoints are deleted.
+2. **Test on lighting10:** `hackpipe eval --model m-vN --offline` (unchanged metrics). Shown: arm error, doing
+   nothing (hold-still), gripper on time, time per prediction, "x% of doing nothing", per sub-task model vs doing
+   nothing, robustness against the limit.
+3. **Checks and verdict:** model ÷ doing nothing ≤ 0.5, worst sub-task ÷ doing nothing ≤ 0.8, gripper on time ≥ 80 %,
+   robustness ≤ 1.5×, not worse than the served model (configs/gates.yaml). Verdicts: NOT TESTED · NEEDS MORE
+   TRAINING · READY FOR SIM TEST · READY TO DEPLOY (verified Isaac Sim run ≥ 80 % on the tray, median stage ≥ 3).
+4. **Isaac Sim results:** imported runs (success with 95 % CI, stages, replay check, GIFs) and the import form.
+`train --then-eval` selects the best checkpoint before the test.

@@ -94,26 +94,27 @@ def test_verdicts(workspace, dataset):
     from hackpipe.evaluation.offline import pending
     from hackpipe.gates.verdict import verdict
     tmp, reg = _models(workspace, dataset)
-    assert verdict("m-v1", reg)["verdict"] == "NOT EVALUATED" and pending(reg) == ["m-v1", "m-v2"]
+    assert verdict("m-v1", reg)["verdict"] == "NOT TESTED" and pending(reg) == ["m-v1", "m-v2"]
     _offline("m-v1")
     assert pending(reg) == ["m-v2"]
     v = verdict("m-v1", reg)
-    assert v["verdict"] == "HOLD: SIM UNVERIFIED" and v["online_state"] == "skipped"
+    assert v["verdict"] == "READY FOR SIM TEST" and v["online_state"] == "skipped"
     _sim(reg, tmp, "m-v1", 0.9, replay_ok=False)
     assert verdict("m-v1", reg)["online_state"] == "unverified"         # demo replay failed: scene, not model
     _sim(reg, tmp, "m-v1", 0.9)
     v = verdict("m-v1", reg)
-    assert v["verdict"] == "DEPLOY" and Path(v["offline_file"]).name == "offline_eval_test.json"
+    assert v["verdict"] == "READY TO DEPLOY" and Path(v["offline_file"]).name == "offline_eval_test.json"
     _sim(reg, tmp, "m-v1", 0.5)
-    assert verdict("m-v1", reg)["verdict"] == "MORE TRAINING"            # verified sim fails
+    assert verdict("m-v1", reg)["verdict"] == "NEEDS MORE TRAINING"            # verified sim fails
     _offline("m-v2", arm=0.03, hit=0.5, rob=2.0)
     v = verdict("m-v2", reg)
     failed = {r["gate"].split(":")[0] for r in v["offline_gates"] if not r["pass"]}
-    assert v["verdict"] == "MORE TRAINING" and {"arm error, mean (rad)", "robustness",
-                                                "gripper events caught within 1 s"} <= failed
+    assert v["verdict"] == "NEEDS MORE TRAINING" and {"arm error ÷ doing nothing", "robustness",
+                                                      "gripper close / open on time (±1 s)"} <= failed
     assert any("image_aug" in t for t in v["todo"])
     reg.add_deployment("dep-1", "m-v1", "deployed", {})                   # regression vs the deployed model
-    assert any(r["gate"].startswith("vs deployed m-v1") and not r["pass"] for r in verdict("m-v2", reg)["offline_gates"])
+    assert any(r["gate"].startswith("vs served model m-v1") and not r["pass"]
+               for r in verdict("m-v2", reg)["offline_gates"])
 
 
 def test_then_eval(workspace, dataset, monkeypatch):
@@ -138,13 +139,13 @@ def test_evaluate_page(workspace, dataset, monkeypatch):
                            default_timeout=30)
     at.run()
     assert not at.exception, [e.message for e in at.exception]
-    assert [t.label for t in at.tabs] == ["Offline (test split)", "Isaac Sim", "Compare models"]
-    assert any("Evaluate all pending (1)" == b.label for b in at.button)
     at.selectbox[0].select_index(1).run()                                     # newest first: m-v2, m-v1
     assert not at.exception, [e.message for e in at.exception]
-    assert any("DEPLOY" in m.value for m in at.markdown)
-    assert {m.label for m in at.metric} >= {"Arm error, executed", "Gripper events caught", "Re-plan latency"}
-
+    heads = [m.value for m in at.markdown]
+    assert {"#### 1 · Best checkpoint", "#### 2 · Test on lighting10 (held out)", "#### 3 · Checks and verdict",
+            "#### 4 · Isaac Sim results (site PC)"} <= set(heads)
+    assert any("READY TO DEPLOY" in h for h in heads) and any("of doing nothing" in h for h in heads)
+    assert {m.label for m in at.metric} >= {"Arm error", "Doing nothing", "Gripper on time", "One prediction"}
 
 def _dtw_ref(a, b):
     n, m = len(a), len(b)
@@ -178,7 +179,7 @@ def test_review_fixes(workspace, dataset, monkeypatch):
     (runs / "m-v1").mkdir(parents=True)
     (runs / "m-v1" / "offline_eval_test.json").write_text(json.dumps({"rows": []}))   # made before these metrics
     v = verdict("m-v1", reg)
-    assert v["verdict"] == "NOT EVALUATED" and "predates" in v["todo"][0] and "m-v1" in pending(reg)
+    assert v["verdict"] == "NOT TESTED" and "predates" in v["todo"][0] and "m-v1" in pending(reg)
     running_marker("m-v2").parent.mkdir(parents=True, exist_ok=True)
     running_marker("m-v2").write_text(f"{os.getpid()} now")                           # an eval is running
     assert pending(reg) == ["m-v1"]
@@ -188,15 +189,15 @@ def test_review_fixes(workspace, dataset, monkeypatch):
     off = json.loads((runs / "m-v1" / "offline_eval_test.json").read_text())
     off["robustness"] = {}                                                            # --no-robustness
     v = verdict("m-v1", reg, off=off)
-    assert v["verdict"] == "NOT EVALUATED" and "not measured" in v["todo"][0]
+    assert v["verdict"] == "NOT TESTED" and "not measured" in v["todo"][0]
     off["executed"]["arm_p99"] = float("nan")                                         # non-finite: no crash
-    assert verdict("m-v1", reg, off=off)["verdict"] == "NOT EVALUATED"
+    assert verdict("m-v1", reg, off=off)["verdict"] == "NOT TESTED"
     off = json.loads((runs / "m-v1" / "offline_eval_test.json").read_text())
     off["robustness"]["skipped"] = {"reworded_instruction": "no paraphrase matches"}
     del off["robustness"]["variants"]["reworded_instruction"]
     v = verdict("m-v1", reg, off=off)
     row = next(r for r in v["offline_gates"] if "reworded" in r["gate"])
-    assert v["verdict"] == "HOLD: SIM UNVERIFIED" and row["value"] == "not applicable" and not row["blocking"]
+    assert v["verdict"] == "READY FOR SIM TEST" and row["value"] == "not applicable" and not row["blocking"]
     reg.set_model_status("m-v2", "rolled_back")
     assert "m-v2" in pending(reg)
     monkeypatch.setattr("hackpipe.training.train.train", lambda *a, **k: {"model_version": "m-v2", "exit_code": 0})

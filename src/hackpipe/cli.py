@@ -31,7 +31,7 @@ def _writes(args) -> bool:
         return not args.offline
     if args.cmd == "state":
         return False                  # import takes the writer role itself; export only reads
-    if args.cmd in ("ingest", "qc", "auto", "demo", "gates", "deploy", "rollback"):
+    if args.cmd in ("ingest", "qc", "auto", "demo", "gates", "deploy", "rollback", "best"):
         return True
     if args.cmd == "dataset":
         return args.action in ("create", "approve") or (args.action == "materialize" and not args.plan)
@@ -168,12 +168,16 @@ def main(argv: list[str] | None = None) -> None:
         s = sub.add_parser(name, help=helptext)
         s.add_argument("--eval", required=True, dest="eval_id")
 
-    s = sub.add_parser("verdict", help="post-training verdict: offline + sim gates -> DEPLOY / MORE TRAINING / HOLD")
+    s = sub.add_parser("best", help="point a curriculum model at its best checkpoint (lowest validation error)")
     s.add_argument("--model", required=True)
 
-    s = sub.add_parser("deploy", help="R10 gated deployment (verdict DEPLOY, or HOLD with --allow-supervised)")
+    s = sub.add_parser("verdict", help="post-training verdict: NOT TESTED / NEEDS MORE TRAINING / READY FOR SIM TEST / READY TO DEPLOY")
     s.add_argument("--model", required=True)
-    s.add_argument("--allow-supervised", action="store_true")
+
+    s = sub.add_parser("deploy", help="R10 gated deployment / serving (verdict READY…, or --override with --by)")
+    s.add_argument("--model", required=True)
+    s.add_argument("--override", "--allow-supervised", dest="allow_supervised", action="store_true",
+                   help="serve although the verdict does not allow it (recorded with --by)")
     s.add_argument("--serve", action="store_true", help="stage + health-check, then serve it on the deploy port")
     s.add_argument("--n-action-steps", type=int, help="with --serve (default: configs/project.yaml deploy)")
     s.add_argument("--grasp-extend", type=float, default=0.0, help="with --serve: inference-time grasp shaping (s)")
@@ -347,6 +351,10 @@ def main(argv: list[str] | None = None) -> None:
             if args.then_eval and not args.dry_run and args.purpose == "model" and rec.get("exit_code") == 0:
                 from hackpipe.evaluation.offline import offline_eval
                 try:                          # training succeeded; an eval failure must not fail the job
+                    if rec.get("trainer") == "curriculum":
+                        from hackpipe.training.best import select
+                        b = select(rec["model_version"], reg)
+                        print(f"best checkpoint: step {b['step']} (val arm error {b['val_full_arm_rad']} rad)", flush=True)
                     r = offline_eval(rec["model_version"], reg)
                     _print({"offline_eval": r["file"], "executed_arm_mean": (r.get("executed") or {}).get("arm_mean")})
                 except Exception as e:  # noqa: BLE001
@@ -377,6 +385,9 @@ def main(argv: list[str] | None = None) -> None:
                     "executed_arm_mean": (r.get("executed") or {}).get("arm_mean"),
                     "gripper_hit_rate": (r.get("gripper_events") or {}).get("hit_rate"),
                     "summary": [x for x in r["rows"] if x["subtask"].endswith("· all")]})
+    elif args.cmd == "best":
+        from hackpipe.training.best import select
+        _print(select(args.model, reg))
     elif args.cmd == "verdict":
         from hackpipe.gates.verdict import verdict
         v = verdict(args.model, reg)

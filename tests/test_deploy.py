@@ -38,7 +38,8 @@ def _offline(v, arm=0.01):
     rob = {k: {"ratio": 1.0} for k in ("images_darker_x0.6", "images_brighter_x1.4", "state_noise_0.01rad",
                                          "reworded_instruction")}
     (d / "offline_eval_test.json").write_text(json.dumps({
-        "model": v, "rows": [], "executed": {"arm_mean": arm, "arm_p99": arm, "per_subtask": []},
+        "model": v, "rows": [{"instruction": "full", "subtask": "h · all", "hold_still_arm_rad": 0.1}],
+        "executed": {"arm_mean": arm, "arm_p99": arm, "per_subtask": []},
         "gripper_events": {"n": 2, "hit_rate": 1.0}, "robustness": {"variants": rob}}))
 
 
@@ -52,15 +53,18 @@ def test_deploy_follows_the_verdict(workspace, dataset):
     from hackpipe.deploy.deploy import deploy
     tmp, reg = _models(workspace, dataset)
     r = deploy("m-v1", reg)
-    assert r["status"] == "rejected" and r["verdict"] == "NOT EVALUATED"
-    _offline("m-v1")                                                   # offline passes, no sim → HOLD
-    r = deploy("m-v1", reg)
-    assert r["status"] == "rejected" and "supervision" in r["error"]
-    r = deploy("m-v1", reg, allow_supervised=True, by="rohith")
-    assert r["status"] == "deployed" and reg.current_deployed_model() == "m-v1"
-    assert reg.deployments()[-1]["meta"]["supervised"] is True and reg.deployments()[-1]["meta"]["by"] == "rohith"
-    _offline("m-v2", arm=0.5)                                          # MORE TRAINING: never, even supervised
-    assert deploy("m-v2", reg, allow_supervised=True)["status"] == "rejected"
+    assert r["status"] == "rejected" and r["verdict"] == "NOT TESTED" and "--override" in r["error"]
+    _offline("m-v1")                                                   # offline passes, no sim → sim test
+    r = deploy("m-v1", reg, by="rohith")
+    assert r["status"] == "deployed" and reg.deployments()[-1]["meta"]["purpose"] == "sim test"
+    assert reg.deployments()[-1]["meta"]["supervised"] is False and reg.current_deployed_model() == "m-v1"
+    _sim_pass(reg, tmp, "m-v1")
+    assert deploy("m-v1", reg)["status"] == "deployed" and reg.deployments()[-1]["meta"]["purpose"] == "deployment"
+    _offline("m-v2", arm=0.09)                                         # 90% of doing nothing: needs more training
+    assert deploy("m-v2", reg)["status"] == "rejected"
+    assert deploy("m-v2", reg, allow_supervised=True)["error"].startswith("an override needs the name")
+    r = deploy("m-v2", reg, allow_supervised=True, by="rohith")         # override, recorded
+    assert r["status"] == "deployed" and reg.deployments()[-1]["meta"]["supervised"] is True
 
 
 class FakeServing:
@@ -223,20 +227,20 @@ def test_deploy_page(workspace, dataset, monkeypatch):
     monkeypatch.setenv("HACKPIPE_MACHINE", "laptop-test")
     tmp, reg = _models(workspace, dataset)
     _offline("m-v1")
-    reg.add_deployment("dep-1", "m-v1", "deployed", {"verdict": "HOLD: SIM UNVERIFIED", "supervised": True, "by": "r"})
+    reg.add_deployment("dep-1", "m-v1", "deployed", {"verdict": "READY FOR SIM TEST", "purpose": "sim test", "by": "r"})
     at = AppTest.from_file(str(Path(__file__).resolve().parents[1] / "src/hackpipe/console/views/deploy.py"),
                            default_timeout=30)
     at.run()
     assert not at.exception, [e.message for e in at.exception]
     labels = {b.label: b.disabled for b in at.button}
     assert labels["Stop serving"] and labels["Roll back"]                  # nothing ours serving; one deployment
-    deploy_btn = next(k for k in labels if k.startswith("Deploy m-v2"))
-    assert labels[deploy_btn]                                              # m-v2 NOT EVALUATED
-    at.selectbox[0].select_index(1).run()                                  # m-v1: HOLD
-    at.checkbox[0].check().run()
+    serve = next(k for k in labels if k.endswith("m-v2 on port 8090"))
+    assert labels[serve]                                                   # m-v2 NOT TESTED, no override
+    at.selectbox[0].select_index(1).run()                                  # m-v1: READY FOR SIM TEST
     at.text_input[0].input("rohith").run()
     assert not at.exception
-    assert not next(b for b in at.button if b.label.startswith("Deploy m-v1")).disabled
+    btn = next(b for b in at.button if b.label.endswith("m-v1 on port 8090"))
+    assert btn.label.startswith("Serve for the sim test") and not btn.disabled
 
 
 def test_review_fixes_serving(workspace):
@@ -260,7 +264,7 @@ def test_review_fixes_deploy(workspace, dataset, monkeypatch, capsys):
     tmp, reg = _models(workspace, dataset)
     with pytest.raises(SystemExit):                                     # rejected: printed, exit 1, no KeyError
         main(["deploy", "--model", "m-v1"])
-    assert '"verdict": "NOT EVALUATED"' in capsys.readouterr().out
+    assert '"verdict": "NOT TESTED"' in capsys.readouterr().out
     for v in ("m-v1", "m-v2"):
         _offline(v)
         _sim_pass(reg, tmp, v)
