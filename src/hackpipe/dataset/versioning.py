@@ -192,6 +192,25 @@ def frozen_test_ids(registry: Registry) -> tuple[str, list[str]] | None:
     return versions[0]["version"], sorted(first["demo_ids"]["test"])
 
 
+def _has_files(source: str) -> bool:
+    return (resolve(source) / "meta" / "info.json").exists()
+
+
+def _base_record(source: str, bm: dict[str, Any], cfg: dict[str, Any]) -> dict[str, Any]:
+    """A source of the base whose files aren't here (e.g. not copied to a cloud GPU): its record from the base."""
+    pre = bm.get("preprocessing") or {}
+    stats = pre.get("normalisation_stats") or {}
+    schema = (pre.get("per_source_schema") or {}).get(source)
+    sha = (stats.get("per_source") or {}).get(source)
+    if schema is None and source in (bm.get("sources") or [])[:1] and not pre.get("per_source_schema"):
+        schema, sha = pre.get("schema"), stats.get("sha256")      # the base's only source
+    if schema is None:
+        raise FileNotFoundError(f"{resolve(source) / 'meta' / 'info.json'} not found, and the base doesn't record "
+                                "its schema: copy the dataset here first")
+    return {"columns": cfg["columns"], "preprocessing": cfg["preprocessing"], "splits": cfg["splits"],
+            "schema": schema, "normalisation_stats": {"file": "meta/stats.json", "sha256": sha}}
+
+
 def preprocessing_record(source: str, cfg: dict[str, Any]) -> dict[str, Any]:
     """Everything training needs to reproduce the inputs: schema, camera mapping, normalisation stats."""
     ds = DatasetFolder(resolve(source))
@@ -313,7 +332,8 @@ def create_dataset_version(registry: Registry | None = None, cfg: dict[str, Any]
             raise LeakageError(f"{len(bad)} demos are copies of held-out test demos: they can't be trained on")
         splits = split_demos(pool, cfg, held_out)
     sources = sorted({d["source"] for d in splits["train"] + splits["val"]})
-    records = {s: preprocessing_record(s, cfg) for s in sources}
+    records = {s: preprocessing_record(s, cfg) if base is None or _has_files(s) else _base_record(s, bm, cfg)
+               for s in sources}
     schemas = {s: _schema(r) for s, r in records.items()}
     mixed = len({_schema_key(v) for v in schemas.values()}) > 1
     if mixed and not (cfg.get("versions") or {}).get("allow_mixed_schemas"):
@@ -405,7 +425,10 @@ def create_dataset_version(registry: Registry | None = None, cfg: dict[str, Any]
                                 "label_version": labels["label_version"], "base": labels.get("base"),
                                 "sources": {s: {k: v[k] for k in ("kind", "fps", "flagged", "unlabelled")}
                                             for s, v in labels["sources"].items()}}
-    stats = DatasetFolder(resolve(primary)).stats_path()          # normalisation stats of the trained schema
+    if _has_files(primary):
+        stats = DatasetFolder(resolve(primary)).stats_path()      # normalisation stats of the trained schema
+    else:                                                         # the base's copy: same file (sha recorded)
+        stats = resolve(Path(project_config()["project"]["outputs_dir"]) / "datasets" / base / "stats.json")
     if stats.exists():
         shutil.copyfile(stats, out_dir / "stats.json")
     manifest_path = out_dir / "manifest.json"

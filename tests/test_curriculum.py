@@ -322,3 +322,15 @@ def test_label_reuses_the_base_labels(approved, monkeypatch):
     assert any(m.startswith("reusing the labels of") for m in msgs) and src["reused_from"]["code_sha256"] == "c" * 64
     n = sum(len(load_manifest("ds-v2", reg)["episodes"][k]) for k in ("train", "val"))
     assert len(pd.read_csv(out / src["episodes_file"])) == n
+
+
+def test_new_version_without_the_base_sources_files(approved, dataset):
+    """A source the base already recorded needn't be on this machine (e.g. not copied to the cloud GPU)."""
+    from hackpipe.dataset.versioning import create_dataset_version, load_manifest
+    tmp, reg = approved
+    v1 = load_manifest("ds-v1", reg)
+    info = Path(dataset) / "meta" / "info.json"
+    info.rename(info.with_suffix(".away"))
+    m = create_dataset_version(reg, base="ds-v1", subtasks=_fake_labels(tmp / "labels", v1))
+    assert m["preprocessing"]["schema"] == v1["preprocessing"]["schema"]
+    assert m["preprocessing"]["normalisation_stats"]["sha256"] == v1["preprocessing"]["normalisation_stats"]["sha256"]
