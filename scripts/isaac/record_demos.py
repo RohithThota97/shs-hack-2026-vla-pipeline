@@ -10,6 +10,10 @@ snapshot : the 3 cameras at reset, lit like each training episode → out/snapsh
            (`hackpipe sim camera-gap` compares them with the training frames).
 render   : replay the demo actions with each training episode's lighting and record every frame — the training
            data re-rendered by the simulator the policy is evaluated in.
+grid     : the box grid player (src/hackpipe/improve/grid.py): the box is moved over a table-plane grid (default
+           17 × 8 = 136 cells, ±8 cm × ±3.5 cm) and the left arm's pick is bent by inverse kinematics to follow it;
+           each valid cell is replayed with a training episode's lighting and recorded. Before recording, the
+           left arm's base pose is checked against the box (the demo's grasp point must lie at the box).
 dart     : like render, but the executed arm targets get start-pose noise and Ornstein-Uhlenbeck noise while the
            *recorded* action stays the demo's target (DART). The robot drifts off the demo path and the label says
            how to get back, so the policy learns corrections. Episodes whose box doesn't end on the tray are kept
@@ -22,6 +26,7 @@ Usage (site PC):
     <isaac>/python.sh scripts/isaac/record_demos.py --mode snapshot --usd <scene> --ref ref.json --out rec/snap --limit 5
     <isaac>/python.sh scripts/isaac/record_demos.py --mode render --usd <scene> --ref ref.json --out rec/render
     <isaac>/python.sh scripts/isaac/record_demos.py --mode dart --usd <scene> --ref ref.json --out rec/dart --repeats 2
+    <isaac>/python.sh scripts/isaac/record_demos.py --mode grid --usd <scene> --ref ref.json --out rec/grid
 Then on any machine with hackpipe:  hackpipe sim convert --recordings rec/render --name fr3_duo_handover_sim_render
 """
 import argparse
@@ -32,7 +37,7 @@ from pathlib import Path
 import numpy as np
 
 ap = argparse.ArgumentParser()
-ap.add_argument("--mode", choices=["snapshot", "render", "dart"], required=True)
+ap.add_argument("--mode", choices=["snapshot", "render", "dart", "grid"], required=True)
 ap.add_argument("--usd", required=True, help="Hackathon_FR3Duo_flattened.usd")
 ap.add_argument("--ref", required=True, help="reference JSON from `hackpipe sim reference`")
 ap.add_argument("--out", required=True)
@@ -51,6 +56,10 @@ ap.add_argument("--render_updates", type=int, default=2,
 ap.add_argument("--no_tilt", dest="tilt", action="store_false",
                 help="don't apply the episode's rect_tilt_deg to the rect light (eval_isaac.py doesn't)")
 ap.add_argument("--headless", default="true")
+ap.add_argument("--grid_x", default="-8,8,1", help="grid: table-plane x offsets (cm) start,stop,step (world X)")
+ap.add_argument("--grid_y", default="-3.5,3.5,1", help="grid: table-plane y offsets (cm) start,stop,step (world Z)")
+ap.add_argument("--grid_check_cm", type=float, default=6.0,
+                help="grid: the demo's grasp point must be this close to the box at reset, else stop (frame check)")
 args = ap.parse_args()
 
 try:
@@ -270,7 +279,50 @@ A = np.array(REF["demo_actions"], np.float32)
 init0 = np.array(REF["initial_state"], np.float32)
 print(f"{args.mode}: {len(episodes)} episodes x {args.repeats if args.mode == 'dart' else 1}, {len(A)} frames", flush=True)
 
-for ep in episodes:
+
+def quat_to_R(q):
+    w, x, y, z = q
+    return np.array([[1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y)],
+                     [2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)],
+                     [2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)]])
+
+
+def grid_jobs():
+    """Valid grid cells: (lighting episode, bent actions, world offset of the box, cell info)."""
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))   # numpy-only modules of hackpipe
+    from hackpipe.evaluation.kinematics import fk_T
+    from hackpipe.improve.grid import grid_offsets, phases, plan
+    begin(episodes[0], init0)
+    pb, qb = arms["left"].get_world_pose()
+    R_wb = quat_to_R(np.asarray(qb, float))
+    g = phases(A)["grasp"]
+    tcp_world = R_wb @ fk_T(A[g:g + 1, :7])[0][:3, 3] + np.asarray(pb, float)
+    gap = float(np.linalg.norm(tcp_world - box_pose()[0]) * 100)
+    print(f"grid frame check: demo grasp point {gap:.1f} cm from the box", flush=True)
+    if gap > args.grid_check_cm:
+        raise SystemExit(f"the left arm's base pose does not match the box ({gap:.1f} cm > {args.grid_check_cm} cm): "
+                         "the grid offsets would be wrong — check the articulation root prim")
+    M = np.array([[1.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 1.0, 0.0]])      # (dx, dy, 0) → world (dx, 0, dy), Y up
+    offs = grid_offsets(tuple(float(v) for v in args.grid_x.split(",")), tuple(float(v) for v in args.grid_y.split(",")))
+    cells = plan(A, offs, rotate=R_wb.T @ M)
+    ok = [c for c in cells if c["ok"]]
+    print(f"grid: {len(ok)} of {len(cells)} cells valid", flush=True)
+    for c in cells:
+        if not c["ok"]:
+            print("  skip cell", c["cell"], c["dx"], c["dy"], c["reason"], flush=True)
+    train_eps = [e for e in episodes if e["split"] == "train"] or episodes
+    return [(train_eps[i % len(train_eps)], c["actions"], M @ np.array([c["dx"], c["dy"], 0.0]),
+             {k: c[k] for k in ("cell", "dx", "dy", "max_ik_mm", "max_ik_deg")}) for i, c in enumerate(ok)]
+
+
+if args.mode == "grid":
+    jobs = grid_jobs()[: args.limit]
+else:
+    jobs = [(ep, A, None, None) for ep in episodes]
+
+for ep, A_ep, box_shift, cell in jobs:
+    A = A_ep
     if args.mode == "snapshot":
         begin(ep, init0)
         render()
@@ -288,8 +340,13 @@ for ep in episodes:
         if args.mode == "dart":
             init[ARM] += rng.normal(0, args.start_noise, len(ARM)).astype(np.float32)
         begin(ep, init)
-        name = f"{ep['name'] or ep['episode_index']}" + (f"_r{rep}" if args.mode == "dart" else "")
-        d = OUT / f"{args.mode}_{int(ep['episode_index']):03d}_{rep}"
+        if box_shift is not None:                       # grid: move the box to the cell, let it settle
+            p_box, q_box = box.get_world_pose()
+            box.set_world_pose(np.asarray(p_box, float) + box_shift, q_box)
+            settle(30)
+        name = f"{ep['name'] or ep['episode_index']}" + (f"_r{rep}" if args.mode == "dart" else "") + (
+            f"_grid{cell['cell']:03d}" if cell else "")
+        d = OUT / (f"grid_{cell['cell']:03d}" if cell else f"{args.mode}_{int(ep['episode_index']):03d}_{rep}")
         cam_dirs = {key: d / "cams" / key.split(".")[-1] for key in CAMS}
         for p in cam_dirs.values():
             p.mkdir(parents=True, exist_ok=True)
@@ -322,6 +379,7 @@ for ep in episodes:
                 "light_tilt_applied": bool(args.tilt and ep["light"].get("rect_tilt_deg") is not None),
                 "noise": {"start": args.start_noise, "std": args.noise_std, "theta": args.noise_theta, "rep": rep,
                           "seed": args.seed} if args.mode == "dart" else None,
+                "grid": {**cell, "box_shift_world_m": [round(float(v), 4) for v in box_shift]} if cell else None,
                 "recorder": "scripts/isaac/record_demos.py", "usd": Path(args.usd).name,
                 "reference": REF.get("hackpipe"), "wall_s": round(time.time() - t0, 1)}
         (d / "meta.json").write_text(json.dumps(meta, indent=1))

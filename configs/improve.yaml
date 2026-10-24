@@ -1,0 +1,26 @@
+# Improve loop (src/hackpipe/improve/loop.py, Improve page, `hackpipe loop run`): new demos from the box grid
+# player, rendered in Isaac Sim on the site PC, back through the data pipeline into a fine-tuned model.
+grid:
+  x_cm: [-8, 8, 1]                     # table-plane offsets of the box: start, stop, step (cm) → 17 values
+  y_cm: [-3.5, 3.5, 1]                 # → 8 values: 17 × 8 = 136 cells
+  source_name: fr3_duo_handover_sim_grid   # converted recordings land in data/incoming/<source_name>
+  recordings_dir: data/incoming/sim_grid_recordings   # where the site PC's record_demos.py --mode grid output goes
+reference_demo_source: data/raw/fr3_duo_handover_84
+# Versions whose new demos all come from these sources (and pass QC) are approved automatically, recorded as
+# "auto: sim-generated". Everything else still needs a human approval in Data → Versions.
+auto_approve_sources: [fr3_duo_handover_sim_grid, fr3_duo_handover_sim_render, fr3_duo_handover_sim_dart]
+train:
+  config: configs/train/smolvla_curriculum_handover.yaml
+  fine_tune_best: true                 # start from the best model so far (its checkpoint), not from smolvla_base
+  overrides:                           # the A100 settings of m-v2; steps for a fine-tune
+    batch_size: 32
+    bf16: true
+    num_workers: 10
+    steps: 3000
+    save_freq: 500
+    val_every: 500
+    val_batches: 8
+    keep_checkpoints: 0
+evaluate:                              # the test of the best checkpoint (lighting10)
+  every: 3
+  robustness: true

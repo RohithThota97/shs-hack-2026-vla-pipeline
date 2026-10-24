@@ -1,7 +1,7 @@
 """Isaac Sim recordings (`scripts/isaac/record_demos.py`) → a LeRobot v3 folder like the organisers' datasets.
 
 A recording folder holds one sub-folder per episode:
-    meta.json        name, mode (render | dart), source + episode_index it was made from, seed, light, success,
+    meta.json        name, mode (render | dart | grid), source + episode_index it was made from, seed, light, success,
                      stage, final box pose / tilt, noise settings
     state.npy        (T, 16) float32 — measured state at frame k (physics tick 2k)
     action.npy       (T, 16) float32 — target for the next 2 ticks (the demo's action, also under noise)
@@ -126,7 +126,7 @@ def convert(rec_dir: str | Path, out_root: str | Path, template: str | Path | No
                        "final_metrics": {"at_rest": bool(meta.get("success")), "tilt_deg": meta.get("box_tilt_deg")},
                        "derived_from": {"source": source_key(resolve(src)) if src else None,
                                         "episode_index": meta.get("source_episode")},
-                       "sim": {k: meta.get(k) for k in ("mode", "stage", "noise", "recorder", "usd")}})
+                       "sim": {k: meta.get(k) for k in ("mode", "stage", "noise", "grid", "recorder", "usd")}})
         index += n
     (tmp / "data" / "chunk-000").mkdir(parents=True, exist_ok=True)
     df = pd.DataFrame(rows)

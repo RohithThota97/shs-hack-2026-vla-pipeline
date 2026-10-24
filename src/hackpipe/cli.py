@@ -31,6 +31,8 @@ def _writes(args) -> bool:
         return not args.offline
     if args.cmd == "state":
         return False                  # import takes the writer role itself; export only reads
+    if args.cmd == "loop":
+        return args.action == "run"
     if args.cmd in ("ingest", "qc", "auto", "demo", "gates", "deploy", "rollback", "best"):
         return True
     if args.cmd == "dataset":
@@ -168,6 +170,14 @@ def main(argv: list[str] | None = None) -> None:
                            ("improve", "R11/B recommendations")):
         s = sub.add_parser(name, help=helptext)
         s.add_argument("--eval", required=True, dest="eval_id")
+
+    s = sub.add_parser("loop", help="improve loop: box grid → Isaac Sim → dataset → fine-tune → test → compare")
+    s.add_argument("action", choices=["status", "run"])
+    s.add_argument("--until", help="with run: stop after this step (plan, reference, convert, import, version, …)")
+    s.add_argument("--set", action="append", default=[], metavar="KEY=VALUE",
+                   help="with run: training override for this loop run (e.g. steps=200)")
+    s.add_argument("--eval-every", type=int, help="with run: test every N-th step (default configs/improve.yaml)")
+    s.add_argument("--no-robustness", action="store_true", help="with run: skip the robustness variants")
 
     s = sub.add_parser("best", help="point a curriculum model at its best checkpoint (lowest validation error)")
     s.add_argument("--model", required=True)
@@ -400,6 +410,16 @@ def main(argv: list[str] | None = None) -> None:
                     "summary": [x for x in r["rows"] if x["subtask"].endswith("· all")]})
         if failed:
             sys.exit(f"offline eval failed for {failed}")
+    elif args.cmd == "loop":
+        from hackpipe.improve import loop
+        if args.action == "run":
+            from hackpipe.training.train import parse_overrides
+            rows = loop.run(reg, train_overrides=parse_overrides(args.set), until=args.until,
+                            eval_every=args.eval_every, eval_robustness=False if args.no_robustness else None)
+        else:
+            rows = loop.status(reg)
+        for r in rows:
+            print(f"{'✔' if r['done'] else '·'} {r['step']:<10} {r['title']:<40} {r['detail']}")
     elif args.cmd == "best":
         from hackpipe.training.best import select
         _print(select(args.model, reg))
