@@ -118,7 +118,8 @@ def test_deploy_a_training_model(workspace, dataset):
     (out / "checkpoints" / "last").symlink_to("002000")
     reg.add_model("m-v1", "ds-v1", "smolvla", "training", str(out / "checkpoints" / "last" / "pretrained_model"),
                   None, {"output_dir": str(out)})
-    good = {"model": "m-v1", "metrics_version": 2, "rows": [], "executed": {"arm_mean": 0.01, "hold_still_arm_mean": 0.1,
+    good = {"model": "m-v1", "metrics_version": 2, "rows": [{"instruction": "full", "subtask": "h · all",
+            "hold_still_arm_rad": 0.1, "chunk_arm_rad": 0.01}], "executed": {"arm_mean": 0.01, "hold_still_arm_mean": 0.1,
             "per_subtask": []}, "gripper_events": {"n": 0}, "robustness": {"variants": {k: {"ratio": 1.0} for k in (
             "images_darker_x0.6", "images_brighter_x1.4", "state_noise_0.01rad", "reworded_instruction")}}}
     f = result_path("m-v1")
