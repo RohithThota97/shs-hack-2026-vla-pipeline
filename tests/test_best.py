@@ -55,7 +55,7 @@ def test_new_checkpoint_needs_a_new_test(workspace):
     m = reg.get_model("m-v1")
     f = result_path("m-v1")
     f.parent.mkdir(parents=True, exist_ok=True)
-    f.write_text(json.dumps({"model": "m-v1", "rows": [], "executed": {"arm_mean": 0.01},
+    f.write_text(json.dumps({"model": "m-v1", "rows": [], "metrics_version": 2, "executed": {"arm_mean": 0.01},
                              "checkpoint": str(out / "checkpoints" / "000500" / "pretrained_model")}))
     assert not is_current(json.loads(f.read_text()), m)                        # tested 500, uses 1000
     v = verdict("m-v1", reg, write=False)
@@ -96,7 +96,7 @@ def test_pending_batch_continues_after_a_failure(workspace, monkeypatch, capsys)
         calls.append(mv)
         if mv == "m-a":
             raise FileNotFoundError("no checkpoint")
-        return {"file": "x", "predictions": 1, "seconds": 1, "rows": [], "executed": {"arm_mean": 0.1}}
+        return {"file": "x", "predictions": 1, "seconds": 1, "rows": [], "metrics_version": 2, "executed": {"arm_mean": 0.1}}
     monkeypatch.setattr("hackpipe.evaluation.offline.offline_eval", fake)
     with pytest.raises(SystemExit, match="m-a"):
         main(["eval", "--model", "pending", "--offline"])

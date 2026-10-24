@@ -13,7 +13,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import yaml
 
@@ -122,7 +122,8 @@ class PreflightError(RuntimeError):
     pass
 
 
-def prune_checkpoints(output_dir: Path, keep: int, protect: set[str] | None = None) -> list[str]:
+def prune_checkpoints(output_dir: Path, keep: int, protect: set[str] | Callable[[], set[str]] | None = None
+                      ) -> list[str]:
     """Delete all but the newest `keep` step checkpoints (and never the one `last` points to, nor the step folders in
     `protect`, e.g. the model's chosen best checkpoint), so a run fits a 15 GB Drive. lerobot-train writes
     checkpoints/<step>/ and then moves the `last` link to it."""
@@ -132,9 +133,10 @@ def prune_checkpoints(output_dir: Path, keep: int, protect: set[str] | None = No
     steps = sorted((d for d in ck.iterdir() if d.is_dir() and not d.is_symlink() and d.name.isdigit()),
                    key=lambda d: int(d.name))
     last = (ck / "last").resolve() if (ck / "last").exists() else None
+    protect = (protect() if callable(protect) else protect) or set()
     removed = []
     for d in steps[:-keep]:
-        if (last is not None and d.resolve() == last) or d.name in (protect or set()):
+        if (last is not None and d.resolve() == last) or d.name in protect:
             continue
         shutil.rmtree(d, ignore_errors=True)
         removed.append(d.name)
@@ -142,7 +144,7 @@ def prune_checkpoints(output_dir: Path, keep: int, protect: set[str] | None = No
 
 
 def _pruner(output_dir: Path, keep: int, stop: threading.Event, every_s: float = 60,
-            protect: set[str] | None = None) -> threading.Thread:
+            protect: set[str] | Callable[[], set[str]] | None = None) -> threading.Thread:
     def loop() -> None:
         while not stop.wait(every_s):
             try:
@@ -286,8 +288,19 @@ def train(config_path: str, dataset_version: str, dry_run: bool = False, registr
           f"`hackpipe train --dataset {dataset_version} --resume {version}`", flush=True)
     t0 = time.time()
     keep = int(cfg.get("keep_checkpoints") or 0)          # 0 = keep all
-    best_step = ((reg.get_model(version) or {}).get("meta") or {}).get("best_step")
-    protect = {f"{int(best_step):06d}"} if best_step is not None else set()   # a resumed run keeps its chosen best
+    reg_path = reg.path
+
+    def protect() -> set[str]:          # re-read each round: the best checkpoint can be chosen while it trains
+        r = Registry(reg_path)          # own connection: the pruner runs in another thread
+        try:
+            m = r.get_model(version) or {}
+        finally:
+            r.close()
+        keep_dirs = {f"{int(m['meta']['best_step']):06d}"} if (m.get("meta") or {}).get("best_step") is not None else set()
+        from hackpipe.evaluation.offline import step_of
+        if step_of(m.get("checkpoint_dir")) is not None:
+            keep_dirs.add(f"{step_of(m['checkpoint_dir']):06d}")
+        return keep_dirs
     stop = threading.Event()
     if keep:
         _pruner(output_dir, keep, stop, protect=protect)

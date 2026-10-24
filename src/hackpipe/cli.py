@@ -150,6 +150,7 @@ def main(argv: list[str] | None = None) -> None:
     s.add_argument("--every", type=int, default=3, help="with --offline: every N-th frame on the policy's rate grid")
     s.add_argument("--batch", type=int, default=8, help="with --offline")
     s.add_argument("--no-robustness", action="store_true", help="with --offline: skip the robustness variants")
+    s.add_argument("--step", type=int, help="with --offline: test this saved checkpoint step (also while training)")
     s.add_argument("--replay", metavar="REPLAY_JSON",
                    help="with --import: eval_isaac.py --mode replay result of the same scene (sim sanity check)")
     s.add_argument("--adapter", choices=["organizer", "dummy"], default="organizer",
@@ -385,7 +386,8 @@ def main(argv: list[str] | None = None) -> None:
         failed = []
         for mv in todo:
             try:
-                r = offline_eval(mv, reg, args.split, args.every, args.batch, robustness=not args.no_robustness)
+                r = offline_eval(mv, reg, args.split, args.every, args.batch, robustness=not args.no_robustness,
+                                 step=args.step)
             except Exception as e:  # noqa: BLE001 — one broken model must not stop the others
                 if len(todo) == 1:
                     raise

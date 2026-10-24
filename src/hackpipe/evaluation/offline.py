@@ -11,7 +11,7 @@ Reported per instruction kind and sub-task:
 Executed stream (complete-task instruction): the first `every` actions of each prediction, as a policy that
 re-plans every `every` steps would send them (teacher-forced: it always sees the recorded frame). From it:
 - `executed`: arm error mean / p50 / p95 / p99, per sub-task error + DTW shape distance
-- `gripper_events`: every crossing of 0.5 in the demo's gripper command — caught within ±1 s? timing error
+- `gripper_events`: every grasp / release in the demo's gripper command (crossing 0.25) — caught within ±1 s?
 - `smoothness`: largest joint jump per step, within a prediction vs at re-plan, next to the demo's own jumps
 - `horizon_arm_rad`: error by how far ahead the step is (1 … chunk)
 - `robustness`: the same chunk error with darker / brighter images, noisy joint readings, reworded or no
@@ -117,17 +117,24 @@ def dtw(a: np.ndarray, b: np.ndarray) -> float:
     return float(acc[n, m] / steps[n, m])
 
 
+METRICS_VERSION = 2       # 2: grasp / release events (< 0.25) and doing nothing on the executed steps
+GRIP_CLOSED_BELOW = 0.25   # FR3 Duo gripper command: 1.0 start, 0.48 open (pre-grasp), 0.0 closed on the box
+
+
 def gripper_events(a: np.ndarray, g: int) -> list[tuple[int, str]]:
-    """(step, "up" | "down") wherever the gripper command crosses 0.5."""
-    hi = a[:, g] > 0.5
-    return [(int(i), "up" if hi[i] else "down") for i in np.flatnonzero(np.diff(hi.astype(int))) + 1]
+    """(step, "close" | "open") wherever the gripper command crosses GRIP_CLOSED_BELOW: the grasps and releases (the
+    1.0 → 0.48 pre-shape at the start is not an event)."""
+    closed = a[:, g] < GRIP_CLOSED_BELOW
+    return [(int(i), "close" if closed[i] else "open") for i in np.flatnonzero(np.diff(closed.astype(int))) + 1]
 
 
 def stream_metrics(streams: list[dict[str, Any]], hz: float) -> dict[str, Any]:
-    """Executed-stream metrics over episodes: {pred, gt (n, 16), sub (n,), replan (n,) bool, name}."""
+    """Executed-stream metrics over episodes: {pred, gt, still (n, 16), sub (n,), replan (n,) bool, name}. `still` =
+    the state at the prediction's start (doing nothing), so model and doing nothing are judged on the same steps."""
     if not streams:
         return {}
     E = np.concatenate([np.abs(x["pred"] - x["gt"]) for x in streams])
+    H = np.concatenate([np.abs(x["still"] - x["gt"]) for x in streams])
     subs = np.concatenate([x["sub"] for x in streams])
     names = np.concatenate([np.full(len(x["sub"]), x["name"], object) for x in streams])
     per_sub = []
@@ -136,6 +143,7 @@ def stream_metrics(streams: list[dict[str, Any]], hz: float) -> dict[str, Any]:
         d = [dtw(x["pred"][x["sub"] == key[1]][:, ARM], x["gt"][x["sub"] == key[1]][:, ARM])
              for x in streams if x["name"] == key[0]]
         per_sub.append({"subtask": f"{key[0]} · {key[1]}", "n": int(m.sum()), "arm_rad": _r(E[m][:, ARM].mean()),
+                        "hold_still_rad": _r(H[m][:, ARM].mean()),
                         "gripper": _r(E[m][:, GRIP].mean()), "dtw_rad": _r(np.nanmean(d) if d else None)})
     events = []
     tol = int(round(hz))                                  # ±1 s
@@ -157,7 +165,8 @@ def stream_metrics(streams: list[dict[str, Any]], hz: float) -> dict[str, Any]:
     pct = lambda v, q: _r(np.percentile(v, q)) if len(v) else None       # noqa: E731
     hits = [e for e in events if e["hit"]]
     return {
-        "executed": {"arm_mean": _r(E[:, ARM].mean()), "arm_p50": pct(E[:, ARM], 50), "arm_p95": pct(E[:, ARM], 95),
+        "executed": {"arm_mean": _r(E[:, ARM].mean()), "hold_still_arm_mean": _r(H[:, ARM].mean()),
+                     "arm_p50": pct(E[:, ARM], 50), "arm_p95": pct(E[:, ARM], 95),
                      "arm_p99": pct(E[:, ARM], 99), "left_arm": _r(E[:, 0:7].mean()), "right_arm": _r(E[:, 8:15].mean()),
                      "gripper_mean": _r(E[:, GRIP].mean()), "steps": int(len(E)), "per_subtask": per_sub},
         "gripper_events": {"n": len(events), "hit_rate": _r(len(hits) / len(events), 3) if events else None,
@@ -217,10 +226,11 @@ def score(tables: list[dict[str, Any]], predict: Callable[..., np.ndarray], chun
                         ex = valid.copy()
                         ex[every:] = False
                         st = streams.setdefault((t["name"], int(t["ep"][r])), {"pred": [], "gt": [], "sub": [],
-                                                                               "replan": []})
+                                                                               "replan": [], "still": []})
                         n_ex = int(ex.sum())
                         st["pred"].append(p[ex])
                         st["gt"].append(gt[ex])
+                        st["still"].append(np.repeat(t["S"][r][None].astype(np.float64), n_ex, 0))
                         st["sub"] += [str(t["sub_text"][i]) for i in idx[ex]]
                         st["replan"] += [True] + [False] * (n_ex - 1)
                 n_pred += len(rs)
@@ -231,9 +241,11 @@ def score(tables: list[dict[str, Any]], predict: Callable[..., np.ndarray], chun
                 for (mode, key), v in sorted(acc.items())]
     out: dict[str, Any] = {"rows": rows_out, "predictions": n_pred,
                            "horizon_arm_rad": [_r(x) for x in hor_sum / np.maximum(hor_n, 1)]}
-    out.update(stream_metrics([{"name": n, "ep": e, "pred": np.concatenate(v["pred"]), "gt": np.concatenate(v["gt"]),
-                                "sub": np.array(v["sub"], object), "replan": np.array(v["replan"], bool)}
-                               for (n, e), v in sorted(streams.items()) if v["pred"]], hz))
+    episodes = [{"name": n, "ep": e, "pred": np.concatenate(v["pred"]), "gt": np.concatenate(v["gt"]),
+                 "still": np.concatenate(v["still"]), "sub": np.array(v["sub"], object),
+                 "replan": np.array(v["replan"], bool)} for (n, e), v in sorted(streams.items()) if v["pred"]]
+    out.update(stream_metrics(episodes, hz))
+    out["_streams"] = episodes                       # trajectories, saved next to the result (not in the JSON)
     if robust:
         res: dict[str, list[float]] = defaultdict(list)
         for t in tables:
@@ -300,32 +312,71 @@ def lerobot_predictor(checkpoint: Path, tables: list[dict[str, Any]], device: st
             texts = [reword(x, 1) for x in texts] if v["task"] == "reworded" else [v["task"]] * len(rows)
         batch["task"] = texts
         policy.reset()
-        out = post(policy.predict_action_chunk(pre(batch)))
-        return out.float().cpu().numpy()
+        t0 = time.perf_counter()                       # the model only (frame decoding above is not robot time)
+        out = post(policy.predict_action_chunk(pre(batch))).float().cpu().numpy()
+        predict.infer_ms = (time.perf_counter() - t0) * 1000
+        return out
 
     return predict, getattr(cfg, "chunk_size", None)
 
 
 def latency(predict: Callable[..., np.ndarray], table: dict[str, Any], rate_hz: float, n: int = 6) -> dict[str, Any]:
-    """One prediction with batch 1 (what a re-plan costs on the robot); the first call is warm-up."""
+    """One prediction with batch 1 (what a re-plan costs on the robot: the model, not the frame decoding); the first
+    call is warm-up."""
     ms = []
     for r in table["rows"][:: max(1, len(table["rows"]) // n)][: n + 1]:
         t0 = time.perf_counter()
         predict(table, np.array([r]), "full")
-        ms.append((time.perf_counter() - t0) * 1000)
+        ms.append(getattr(predict, "infer_ms", None) or (time.perf_counter() - t0) * 1000)
     ms = ms[1:] or ms
     return {"replan_median": round(float(np.median(ms)), 1), "replan_max": round(float(np.max(ms)), 1),
             "budget_ms": round(1000 / rate_hz, 1), "calls": len(ms)}
 
 
-def result_path(model_version: str, split: str = "test") -> Path:
-    """outputs/runs/<model>/offline_eval_<split>.json — the one place that names the file."""
-    return resolve(project_config()["project"]["outputs_dir"]) / "runs" / model_version / f"offline_eval_{split}.json"
+def result_path(model_version: str, split: str = "test", step: int | None = None) -> Path:
+    """outputs/runs/<model>/offline_eval_<split>.json (the model's current checkpoint) or …_<split>_<step>.json (one
+    saved checkpoint, e.g. tested during training) — the one place that names the files."""
+    name = f"offline_eval_{split}.json" if step is None else f"offline_eval_{split}_{int(step):06d}.json"
+    return resolve(project_config()["project"]["outputs_dir"]) / "runs" / model_version / name
 
 
-def load_result(model_version: str, split: str = "test") -> dict[str, Any] | None:
-    f = result_path(model_version, split)
+def load_result(model_version: str, split: str = "test", step: int | None = None) -> dict[str, Any] | None:
+    f = result_path(model_version, split, step)
     return json.loads(f.read_text()) if f.is_file() else None
+
+
+def trajectories(result: dict[str, Any]) -> list[dict[str, Any]]:
+    """The executed streams saved next to a result: per episode name, ep, pred, gt, still (n, 16), sub, replan."""
+    if not result:
+        return []
+    found = [Path(result["file"]).with_suffix(".npz")] if result.get("file") else []
+    if result.get("model"):             # after a state import the stored absolute path is another machine's
+        found += [result_path(result["model"], result.get("split") or "test", s).with_suffix(".npz")
+                  for s in (None, result.get("step"))]
+    f = next((x for x in found if x.is_file()), None)
+    if f is None:
+        return []
+    z = np.load(f, allow_pickle=False)
+    meta = json.loads(str(z["meta"]))
+    return [{**m, **{k: z[f"{i}_{k}"] for k in ("pred", "gt", "still", "replan")},
+             "sub": z[f"{i}_sub"].astype(str)} for i, m in enumerate(meta)]
+
+
+def step_of(checkpoint: str | Path | None) -> int | None:
+    """…/checkpoints/<step>/pretrained_model → step (None for `last` or other folders)."""
+    p = Path(str(checkpoint or ""))
+    return int(p.parent.name) if p.name == "pretrained_model" and p.parent.name.isdigit() else None
+
+
+def result_for(model: dict[str, Any], split: str = "test") -> dict[str, Any] | None:
+    """The test of the checkpoint the model points at now: the main result if it matches, else that step's test
+    (made during training), else the main result (stale — is_current() says so)."""
+    main = load_result(model["version"], split)
+    if is_current(main, model):
+        return main
+    step = step_of(resolve(model["checkpoint_dir"] or ".").resolve())      # `last` → its step
+    by_step = load_result(model["version"], split, step) if step is not None else None
+    return by_step if is_current(by_step, model) else main
 
 
 def pending(reg: Registry, split: str = "test") -> list[str]:
@@ -340,31 +391,40 @@ def pending(reg: Registry, split: str = "test") -> list[str]:
 
 def offline_eval(model_version: str, registry: Registry | None = None, split: str = "test", every: int = 3,
                  batch: int = 8, device: str | None = None, progress: Callable[[str], None] | None = print,
-                 robustness: bool = True, robust_eps: int = 3) -> dict[str, Any]:
-    """Runs once per model at a time: a marker with this process ID is kept while it runs."""
+                 robustness: bool = True, robust_eps: int = 3, step: int | None = None) -> dict[str, Any]:
+    """Runs once per model at a time: a marker with this process ID is kept while it runs. step: test that saved
+    checkpoint (checkpoints/<step>/pretrained_model, e.g. while the run still trains) instead of the model's current
+    one; the result goes to its own file and does not change the model."""
     import os
-    if is_running(model_version, split):
-        raise RuntimeError(f"an offline eval of {model_version} is already running")
-    marker = running_marker(model_version, split)
+    reg = registry or Registry()
+    m = reg.get_model(model_version)
+    # the marker names the checkpoint, so a main test and a step test of the same checkpoint never run together
+    mark_step = step if step is not None else step_of(resolve((m or {}).get("checkpoint_dir") or ".").resolve())
+    if is_running(model_version, split, mark_step):
+        raise RuntimeError(f"an offline eval of {model_version}" + (f" step {mark_step}" if mark_step is not None
+                                                                   else "") + " is already running")
+    marker = running_marker(model_version, split, mark_step)
     marker.parent.mkdir(parents=True, exist_ok=True)
     import socket
     marker.write_text(f"{os.getpid()} {socket.gethostname()} {now_iso()}")
     try:
-        return _offline_eval(model_version, registry, split, every, batch, device, progress, robustness, robust_eps)
+        return _offline_eval(model_version, reg, split, every, batch, device, progress, robustness, robust_eps, step)
     finally:
         marker.unlink(missing_ok=True)
 
 
 def _offline_eval(model_version: str, registry: Registry | None, split: str, every: int, batch: int,
                   device: str | None, progress: Callable[[str], None] | None, robustness: bool,
-                  robust_eps: int) -> dict[str, Any]:
+                  robust_eps: int, step: int | None = None) -> dict[str, Any]:
     from hackpipe.common.lerobot_io import DatasetFolder
     from hackpipe.dataset.versioning import load_manifest
     reg = registry or Registry()
     model = reg.get_model(model_version)
     if model is None:
         raise KeyError(f"Unknown model {model_version}")
-    ckpt = resolve(model["checkpoint_dir"] or "")
+    ckpt = resolve(model["checkpoint_dir"] or "").resolve()         # `last` → the step it points at now
+    if step is not None:
+        ckpt = resolve(model["meta"].get("output_dir") or ".") / "checkpoints" / f"{int(step):06d}" / "pretrained_model"
     if not (ckpt / "config.json").exists():
         raise FileNotFoundError(f"no checkpoint at {ckpt} (config.json missing)")
     m = load_manifest(model["dataset_version"], reg)
@@ -390,27 +450,44 @@ def _offline_eval(model_version: str, registry: Registry | None, split: str, eve
     if robustness:
         res["robustness"]["skipped"] = skipped
     res["latency_ms"] = latency(predict, tables[0], rate)
-    res.update({"model": model_version, "checkpoint": str(ckpt), "dataset_version": model["dataset_version"],
+    streams = res.pop("_streams", [])
+    res.update({"model": model_version, "checkpoint": str(ckpt.resolve()), "metrics_version": METRICS_VERSION,
+                "step": step if step is not None else step_of(ckpt),
+                "dataset_version": model["dataset_version"],
                 "split": split, "rate_hz": rate, "every": every, "episodes": {t["source"]: len(set(t["ep"][t["rows"]]))
                                                                             for t in tables},
                 "created_at": now_iso()})
-    out = result_path(model_version, split)
+    out = result_path(model_version, split, step)
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(res, indent=1))
     res["file"] = str(out)
+    save_trajectories(out.with_suffix(".npz"), streams)
+    out.write_text(json.dumps(res, indent=1))
+    if step is None and step_of(ckpt) is not None:     # also findable by step (Evaluate → checkpoints table)
+        sp = result_path(model_version, split, step_of(ckpt))
+        save_trajectories(sp.with_suffix(".npz"), streams)
+        sp.write_text(json.dumps({**res, "file": str(sp)}, indent=1))
     return res
 
 
-def running_marker(model_version: str, split: str = "test") -> Path:
-    return result_path(model_version, split).with_suffix(".running")
+def save_trajectories(path: Path, streams: list[dict[str, Any]]) -> None:
+    arrays: dict[str, Any] = {"meta": np.array(json.dumps([{"name": x["name"], "ep": int(x["ep"])} for x in streams]))}
+    for i, x in enumerate(streams):
+        arrays.update({f"{i}_pred": x["pred"].astype(np.float32), f"{i}_gt": x["gt"].astype(np.float32),
+                       f"{i}_still": x["still"].astype(np.float32), f"{i}_replan": x["replan"],
+                       f"{i}_sub": np.asarray(x["sub"], dtype="U")})
+    np.savez_compressed(path, **arrays)
 
 
-def is_running(model_version: str, split: str = "test") -> bool:
+def running_marker(model_version: str, split: str = "test", step: int | None = None) -> Path:
+    return result_path(model_version, split, step).with_suffix(".running")
+
+
+def is_running(model_version: str, split: str = "test", step: int | None = None) -> bool:
     """An offline eval of this model is in progress: a marker written on this machine whose process still runs (a
     marker that came with a state import from another machine, or whose process ended, doesn't count)."""
     import os
     import socket
-    f = running_marker(model_version, split)
+    f = running_marker(model_version, split, step)
     try:
         parts = f.read_text().split()
         if len(parts) > 2 and parts[1] != socket.gethostname():
@@ -426,6 +503,10 @@ def is_current(res: dict[str, Any] | None, model: dict[str, Any] | None = None) 
     model, tested the checkpoint the model points at now (a new best checkpoint needs a new test)."""
     if not (res and (res.get("executed") or {}).get("arm_mean") is not None):
         return False
+    version = res.get("metrics_version") or (2 if "hold_still_arm_mean" in res["executed"] else 1)
+    if int(version) < METRICS_VERSION:                              # measured the old way: test again
+        return False
     if model is None or not res.get("checkpoint"):
         return True
-    return resolve(res["checkpoint"]).resolve() == resolve(model["checkpoint_dir"] or ".").resolve()
+    # stored resolved: a test of `last` goes stale once training moves `last` on
+    return Path(res["checkpoint"]) == resolve(model["checkpoint_dir"] or ".").resolve()

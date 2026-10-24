@@ -39,7 +39,7 @@ def _offline(v, arm=0.01):
                                          "reworded_instruction")}
     (d / "offline_eval_test.json").write_text(json.dumps({
         "model": v, "rows": [{"instruction": "full", "subtask": "h · all", "hold_still_arm_rad": 0.1}],
-        "executed": {"arm_mean": arm, "arm_p99": arm, "per_subtask": []},
+        "metrics_version": 2, "executed": {"arm_mean": arm, "arm_p99": arm, "per_subtask": []},
         "gripper_events": {"n": 2, "hit_rate": 1.0}, "robustness": {"variants": rob}}))
 
 

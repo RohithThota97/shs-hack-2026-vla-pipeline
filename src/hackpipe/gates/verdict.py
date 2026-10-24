@@ -66,13 +66,15 @@ def offline_gates(off: dict[str, Any], ref: dict[str, Any] | None, cfg: dict[str
     b, w, rows = cfg["block"], cfg["warn"], []
     ex = off.get("executed") or {}
     still = _hold_still(off)
-    base = next((v for k, v in still.items() if k.endswith("· all")), None)
+    # doing nothing on the same executed steps as the model (results before that metric: the chunk-level value)
+    base = ex.get("hold_still_arm_mean") or next((v for k, v in still.items() if k.endswith("· all")), None)
     train = "train longer (more steps), or give the weak sub-task more weight in the curriculum"
     arm = ex.get("arm_mean")
     _check(rows, "arm error ÷ doing nothing", round(arm / base, 3) if arm is not None and base else None,
            lambda x: x <= b["max_ratio_to_hold_still"], f"≤ {b['max_ratio_to_hold_still']}", hint=train)
-    subs = [(s["subtask"], s["arm_rad"] / still[s["subtask"]]) for s in ex.get("per_subtask") or []
-            if s.get("arm_rad") is not None and still.get(s["subtask"])]
+    subs = [(s["subtask"], s["arm_rad"] / (s.get("hold_still_rad") or still[s["subtask"]]))
+            for s in ex.get("per_subtask") or []
+            if s.get("arm_rad") is not None and (s.get("hold_still_rad") or still.get(s["subtask"]))]
     if subs:
         name, ratio = max(subs, key=lambda x: x[1])
         _check(rows, f"worst sub-task ÷ doing nothing: {name.split(' · ', 1)[-1]}", round(ratio, 3),
@@ -140,7 +142,9 @@ def verdict(model_version: str, registry: Registry | None = None, cfg: dict[str,
     if model is None:
         raise KeyError(f"Unknown model {model_version}")
     cfg = cfg or gates_config()
-    off = offline_result(model_version) if off is _UNSET else off
+    if off is _UNSET:
+        from hackpipe.evaluation.offline import result_for
+        off = result_for(model)                       # the test of the checkpoint in use (also one made in training)
     deployed = reg.current_deployed_model() if deployed is _UNSET else deployed
     if deployed == model_version:
         ref = None
