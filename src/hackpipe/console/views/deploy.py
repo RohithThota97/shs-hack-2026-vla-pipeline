@@ -78,7 +78,8 @@ with st.container(border=True):
 
 # ---------- deploy ----------
 st.markdown("**Deploy a model**")
-models = [m for m in reg.models() if m["meta"].get("purpose") != "timing" and m["status"] in FINISHED]
+# a model still training can be served too (its chosen checkpoint, once that checkpoint's test allows it)
+models = [m for m in reg.models() if m["meta"].get("purpose") != "timing" and m["status"] in (*FINISHED, "training")]
 if not models:
     st.info("No trained models yet.")
 else:

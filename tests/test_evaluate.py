@@ -142,8 +142,8 @@ def test_evaluate_page(workspace, dataset, monkeypatch):
     at.selectbox[0].select_index(1).run()                                     # newest first: m-v2, m-v1
     assert not at.exception, [e.message for e in at.exception]
     heads = [m.value for m in at.markdown]
-    assert {"#### 1 · Best checkpoint", "#### 2 · Test on lighting10 (held out)", "#### 3 · Checks and verdict",
-            "#### 4 · Isaac Sim results (site PC)"} <= set(heads)
+    assert {"#### 1 · Best checkpoint", "#### 2 · Test on lighting10 (held out)", "#### 3 · Why: the test episodes in 3D",
+            "#### 4 · Checks and verdict", "#### 5 · Isaac Sim results (site PC)"} <= set(heads)
     assert any("READY TO DEPLOY" in h for h in heads) and any("of doing nothing" in h for h in heads)
     assert {m.label for m in at.metric} >= {"Arm error", "Doing nothing", "Gripper on time", "One prediction"}
 
