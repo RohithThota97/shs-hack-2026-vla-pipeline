@@ -3,8 +3,8 @@ health check, history. Spec: docs/ui/04_deploy.md. After the team's pipeline UI 
 import pandas as pd
 import streamlit as st
 
-from hackpipe.common import writelock
 from hackpipe.common.registry import Registry
+from hackpipe.console.components.data_views import writer_ok
 from hackpipe.console.theme import badge
 from hackpipe.deploy import serving
 from hackpipe.gates.verdict import offline_result, verdict
@@ -27,13 +27,6 @@ with st.expander("How serving works", expanded=False):
         "3. **Actions per prediction:** the model predicts 20 steps ahead (3.3 s); the robot executes this many of "
         "them, then asks again. 5 = re-plan every 0.8 s (the sim suite's setting).\n"
         "4. **Roll back** puts the previous served model back, with its settings.")
-
-
-def writer_ok() -> tuple[bool, str]:
-    w = writelock.holder()
-    if w and w["machine"] != writelock.machine_id():
-        return False, f"{w['machine']} is the registry writer — take over in the jobs panel first."
-    return True, ""
 
 
 ok, why = writer_ok()
@@ -90,16 +83,15 @@ if not models:
     st.info("No trained models yet.")
 else:
     dep_model = current["model_version"] if current else None
-    ref = offline_result(dep_model) if dep_model else None              # loaded once, not per model
-    verdicts = {m["version"]: verdict(m["version"], reg, write=False, deployed=dep_model, ref=ref) for m in models}
     c = st.columns([2, 1, 1])
     pick = c[0].selectbox("Model", [m["version"] for m in models][::-1],
-                          format_func=lambda v: f"{v} · {verdicts[v]['verdict']}")
+                          format_func=lambda v: f"{v} · {next(m['dataset_version'] for m in models if m['version'] == v)}")
     nas = c[1].number_input("Actions per prediction", 1, 50, int(cfg.get("n_action_steps") or 5),
                             help="executed before re-planning; the sim suite's n_action_steps")
     ge = c[2].number_input("Grasp extension (s)", 0.0, 3.0, 0.0, 0.1,
                            help="inference-time grasp shaping (the team's --grasp_extend); 0 = off")
-    v = verdicts[pick]
+    v = verdict(pick, reg, write=False, deployed=dep_model,           # only the picked model, once per rerun
+                ref=offline_result(dep_model) if dep_model and dep_model != pick else None)
     st.markdown(f"Verdict for **{pick}**: {badge(v['verdict'])}", unsafe_allow_html=True)
     for t in v["todo"]:
         st.markdown(f"- {t}")

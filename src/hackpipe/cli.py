@@ -350,11 +350,14 @@ def main(argv: list[str] | None = None) -> None:
             _print({k: rec.get(k) for k in ("model_version", "dataset_version", "output_dir", "exit_code")})
             if args.then_eval and not args.dry_run and args.purpose == "model" and rec.get("exit_code") == 0:
                 from hackpipe.evaluation.offline import offline_eval
-                try:                          # training succeeded; an eval failure must not fail the job
-                    if rec.get("trainer") == "curriculum":
-                        from hackpipe.training.best import select
+                if rec.get("trainer") == "curriculum":
+                    from hackpipe.training.best import select
+                    try:
                         b = select(rec["model_version"], reg)
                         print(f"best checkpoint: step {b['step']} (val arm error {b['val_full_arm_rad']} rad)", flush=True)
+                    except (RuntimeError, OSError, ValueError) as e:        # still test the last checkpoint
+                        print(f"no best checkpoint ({e}); testing the last one", flush=True)
+                try:                          # training succeeded; an eval failure must not fail the job
                     r = offline_eval(rec["model_version"], reg)
                     _print({"offline_eval": r["file"], "executed_arm_mean": (r.get("executed") or {}).get("arm_mean")})
                 except Exception as e:  # noqa: BLE001
@@ -379,12 +382,22 @@ def main(argv: list[str] | None = None) -> None:
         todo = pending(reg, args.split) if args.model == "pending" else [args.model]
         if not todo:
             print("nothing pending: every finished model has an offline eval")
+        failed = []
         for mv in todo:
-            r = offline_eval(mv, reg, args.split, args.every, args.batch, robustness=not args.no_robustness)
+            try:
+                r = offline_eval(mv, reg, args.split, args.every, args.batch, robustness=not args.no_robustness)
+            except Exception as e:  # noqa: BLE001 — one broken model must not stop the others
+                if len(todo) == 1:
+                    raise
+                failed.append(mv)
+                print(f"{mv}: offline eval failed: {type(e).__name__}: {e}", flush=True)
+                continue
             _print({"model": mv, "file": r["file"], "predictions": r["predictions"], "seconds": r["seconds"],
                     "executed_arm_mean": (r.get("executed") or {}).get("arm_mean"),
                     "gripper_hit_rate": (r.get("gripper_events") or {}).get("hit_rate"),
                     "summary": [x for x in r["rows"] if x["subtask"].endswith("· all")]})
+        if failed:
+            sys.exit(f"offline eval failed for {failed}")
     elif args.cmd == "best":
         from hackpipe.training.best import select
         _print(select(args.model, reg))
@@ -434,7 +447,8 @@ def main(argv: list[str] | None = None) -> None:
             m = reg.get_model(args.model)
             if m is None:
                 sys.exit(f"Unknown model {args.model}")
-            ckpt, hz = m["checkpoint_dir"], policy_rate(m, reg)
+            from hackpipe.common.config import resolve
+            ckpt, hz = str(resolve(m["checkpoint_dir"])), policy_rate(m, reg)
         policy = server.build_policy(ckpt, args.model, args.dummy, args.n_action_steps, args.grasp_extend,
                                      args.grasp_hold, hz, args.device, args.any_robot)
         reg.close()
@@ -447,7 +461,7 @@ def main(argv: list[str] | None = None) -> None:
         elif args.action == "stop":
             print(f"stopped the server on {port}" if serving.stop(port) else f"nothing of ours serves {port}")
         else:
-            cur = reg.current_deployment()
+            cur = next((d for d in reversed(reg.deployments()) if d["status"] in ("deployed", "serving")), None)
             if cur is None:
                 sys.exit("nothing deployed yet: hackpipe deploy --model … --serve")
             srv = (cur["meta"] or {}).get("serving") or {}

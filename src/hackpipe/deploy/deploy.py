@@ -115,11 +115,13 @@ def deploy(model_version: str, registry: Registry | None = None, allow_supervise
             meta["serving"] = _swap(model_version, n_action_steps, grasp_extend)
         except Exception as e:  # noqa: BLE001 — any failure is recorded as a rejected deployment
             error = f"{type(e).__name__}: {e}" if not isinstance(e, RuntimeError) else str(e)
-    status = "rejected" if error else "deployed"
+    # only READY TO DEPLOY counts as a deployment (current model, regression reference, rollback target); a sim test
+    # or an override is recorded as "serving"
+    status = "rejected" if error else ("deployed" if purpose == "deployment" and not meta["supervised"] else "serving")
     if error:
         meta["error"] = error
     reg.add_deployment(dep_id, model_version, status, meta)
-    if not error:
+    if status == "deployed":
         reg.set_model_status(model_version, "deployed")
     return {"dep_id": dep_id, "status": status, "verdict": v["verdict"], "smoke_test": smoke, "error": error,
             "serving": meta.get("serving"), "launch": meta["launch"]}

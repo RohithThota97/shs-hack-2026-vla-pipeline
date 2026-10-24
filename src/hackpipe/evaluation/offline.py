@@ -179,6 +179,7 @@ def score(tables: list[dict[str, Any]], predict: Callable[..., np.ndarray], chun
     acc: dict[tuple[str, str], dict[str, list[float]]] = defaultdict(lambda: defaultdict(list))
     hor_sum, hor_n = np.zeros(chunk), np.zeros(chunk)
     streams: dict[tuple[str, int], dict[str, list]] = {}
+    full_err: dict[tuple[str, int], float] = {}        # chunk error per row, complete task: the robustness baseline
     n_pred, t0 = 0, time.time()
 
     def call(t, rs, mode, variant=None):
@@ -207,6 +208,8 @@ def score(tables: list[dict[str, Any]], predict: Callable[..., np.ndarray], chun
                         acc[kk]["gripper"].append(float(np.abs(p[valid][:, GRIP] - gt[valid][:, GRIP]).mean()))
                         acc[kk]["hold_still_arm_rad"].append(
                             float(np.abs(t["S"][r][ARM].astype(np.float64) - gt[valid][:, ARM]).mean()))
+                    if mode == "full":
+                        full_err[(t["name"], int(r))] = float(np.abs(p[valid][:, ARM] - gt[valid][:, ARM]).mean())
                     if mode == "full":
                         err = np.abs(p - gt)[:, ARM].mean(1)
                         hor_sum[:len(err)][valid] += err[valid]
@@ -237,7 +240,8 @@ def score(tables: list[dict[str, Any]], predict: Callable[..., np.ndarray], chun
             eps = sorted(set(t["ep"][t["rows"]].tolist()))[:robust_eps]
             rows = t["rows"][::max(1, every)]
             rows = rows[np.isin(t["ep"][rows], eps)]
-            for name, var in {"baseline": {}, **robust}.items():
+            res["baseline"] += [full_err[(t["name"], int(r))] for r in rows]   # already predicted above
+            for name, var in robust.items():
                 for b in range(0, len(rows), batch):
                     rs = rows[b:b + batch]
                     pred = call(t, rs, "full", var)
@@ -314,20 +318,24 @@ def latency(predict: Callable[..., np.ndarray], table: dict[str, Any], rate_hz: 
             "budget_ms": round(1000 / rate_hz, 1), "calls": len(ms)}
 
 
+def result_path(model_version: str, split: str = "test") -> Path:
+    """outputs/runs/<model>/offline_eval_<split>.json — the one place that names the file."""
+    return resolve(project_config()["project"]["outputs_dir"]) / "runs" / model_version / f"offline_eval_{split}.json"
+
+
+def load_result(model_version: str, split: str = "test") -> dict[str, Any] | None:
+    f = result_path(model_version, split)
+    return json.loads(f.read_text()) if f.is_file() else None
+
+
 def pending(reg: Registry, split: str = "test") -> list[str]:
-    """Finished models (not timing runs) with a checkpoint here, no current offline eval of this split (none, or
-    one from before the executed-stream metrics) and none running."""
+    """Finished models (not timing runs) with a checkpoint here, no current offline eval of this split (none, one
+    from before the executed-stream metrics, or one of another checkpoint) and none running."""
     from hackpipe.training.ranking import FINISHED
-    out_dir = resolve(project_config()["project"]["outputs_dir"]) / "runs"
-
-    def done(v: str) -> bool:
-        f = out_dir / v / f"offline_eval_{split}.json"
-        return f.is_file() and is_current(json.loads(f.read_text()))
-
     return [m["version"] for m in reg.models()
             if m["meta"].get("purpose") != "timing" and m["status"] in FINISHED
             and (resolve(m["checkpoint_dir"] or ".") / "config.json").is_file()
-            and not done(m["version"]) and not is_running(m["version"], split)]
+            and not is_current(load_result(m["version"], split), m) and not is_running(m["version"], split)]
 
 
 def offline_eval(model_version: str, registry: Registry | None = None, split: str = "test", every: int = 3,
@@ -339,7 +347,8 @@ def offline_eval(model_version: str, registry: Registry | None = None, split: st
         raise RuntimeError(f"an offline eval of {model_version} is already running")
     marker = running_marker(model_version, split)
     marker.parent.mkdir(parents=True, exist_ok=True)
-    marker.write_text(f"{os.getpid()} {now_iso()}")
+    import socket
+    marker.write_text(f"{os.getpid()} {socket.gethostname()} {now_iso()}")
     try:
         return _offline_eval(model_version, registry, split, every, batch, device, progress, robustness, robust_eps)
     finally:
@@ -368,10 +377,12 @@ def _offline_eval(model_version: str, registry: Registry | None, split: str, eve
     rate, chunk = model_rate(model, DatasetFolder(resolve(srcs[0])).fps)
     tables = eval_tables(m, split, rate, names)
     predict, ck_chunk = lerobot_predictor(ckpt, tables, device)
-    variants, skipped = dict(ROBUSTNESS), {}
+    from hackpipe.common.config import gates_config
+    gated = set((gates_config().get("offline") or {}).get("block", {}).get("robustness_variants") or ROBUSTNESS)
+    variants, skipped = {k: v for k, v in ROBUSTNESS.items() if k in gated}, {}   # only what the checks use
     from hackpipe.training.curriculum import reword
     texts = {str(x) for t in tables for x in t["full_text"][t["rows"]]}
-    if not any(reword(x, 1) != x for x in texts):        # no paraphrase applies: the variant would be the baseline
+    if "reworded_instruction" in variants and not any(reword(x, 1) != x for x in texts):   # = the baseline
         variants.pop("reworded_instruction")
         skipped["reworded_instruction"] = "no paraphrase pattern matches the test instructions"
     res = score(tables, predict, int(chunk or ck_chunk or 50), every, batch, progress, hz=rate,
@@ -383,29 +394,38 @@ def _offline_eval(model_version: str, registry: Registry | None, split: str, eve
                 "split": split, "rate_hz": rate, "every": every, "episodes": {t["source"]: len(set(t["ep"][t["rows"]]))
                                                                             for t in tables},
                 "created_at": now_iso()})
-    run_dir = resolve(project_config()["project"]["outputs_dir"]) / "runs" / model_version
-    run_dir.mkdir(parents=True, exist_ok=True)
-    out = run_dir / f"offline_eval_{split}.json"
+    out = result_path(model_version, split)
+    out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(res, indent=1))
     res["file"] = str(out)
     return res
 
 
 def running_marker(model_version: str, split: str = "test") -> Path:
-    return resolve(project_config()["project"]["outputs_dir"]) / "runs" / model_version / f"offline_eval_{split}.running"
+    return result_path(model_version, split).with_suffix(".running")
 
 
 def is_running(model_version: str, split: str = "test") -> bool:
-    """An offline eval of this model is in progress (marker with a live process ID on this machine)."""
+    """An offline eval of this model is in progress: a marker written on this machine whose process still runs (a
+    marker that came with a state import from another machine, or whose process ended, doesn't count)."""
     import os
+    import socket
     f = running_marker(model_version, split)
     try:
-        os.kill(int(f.read_text().split()[0]), 0)
+        parts = f.read_text().split()
+        if len(parts) > 2 and parts[1] != socket.gethostname():
+            return False
+        os.kill(int(parts[0]), 0)
         return True
     except (OSError, ValueError, IndexError):
         return False
 
 
-def is_current(res: dict[str, Any] | None) -> bool:
-    """The eval has the metrics the gates need (evals made before the executed-stream metrics don't)."""
-    return bool(res and (res.get("executed") or {}).get("arm_mean") is not None)
+def is_current(res: dict[str, Any] | None, model: dict[str, Any] | None = None) -> bool:
+    """The eval has the metrics the gates need (evals made before the executed-stream metrics don't) and, given the
+    model, tested the checkpoint the model points at now (a new best checkpoint needs a new test)."""
+    if not (res and (res.get("executed") or {}).get("arm_mean") is not None):
+        return False
+    if model is None or not res.get("checkpoint"):
+        return True
+    return resolve(res["checkpoint"]).resolve() == resolve(model["checkpoint_dir"] or ".").resolve()

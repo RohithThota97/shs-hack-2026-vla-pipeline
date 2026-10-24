@@ -22,8 +22,8 @@ from hackpipe.common.registry import Registry
 
 
 def offline_result(model_version: str, split: str = "test") -> dict[str, Any] | None:
-    f = resolve(project_config()["project"]["outputs_dir"]) / "runs" / model_version / f"offline_eval_{split}.json"
-    return json.loads(f.read_text()) if f.is_file() else None
+    from hackpipe.evaluation.offline import load_result
+    return load_result(model_version, split)
 
 
 def sim_result(model_version: str, reg: Registry) -> dict[str, Any] | None:
@@ -136,7 +136,8 @@ def verdict(model_version: str, registry: Registry | None = None, cfg: dict[str,
     """off / deployed / ref: already loaded (the Evaluate page loads every model's offline eval once)."""
     from hackpipe.evaluation.offline import is_current
     reg = registry or Registry()
-    if reg.get_model(model_version) is None:
+    model = reg.get_model(model_version)
+    if model is None:
         raise KeyError(f"Unknown model {model_version}")
     cfg = cfg or gates_config()
     off = offline_result(model_version) if off is _UNSET else off
@@ -148,9 +149,12 @@ def verdict(model_version: str, registry: Registry | None = None, cfg: dict[str,
     sim = sim_result(model_version, reg)
     out: dict[str, Any] = {"model": model_version, "created_at": now_iso(), "reference": deployed if ref else None,
                            "sim_eval": sim["eval_id"] if sim else None}
-    if not is_current(off):
+    if not is_current(off, model):
+        why = ("run the offline eval" if not off else "the offline eval predates the gate metrics: re-run it"
+               if not (off.get("executed") or {}).get("arm_mean") else
+               "the model now points at another checkpoint than the one tested: test it again")
         out.update(verdict="NOT TESTED", offline_gates=[], online_gates=[], online_state="skipped",
-                   todo=[("the offline eval predates the gate metrics: re-run it" if off else "run the offline eval")
+                   todo=[why
                          + f" (hackpipe eval --model {model_version} --offline, or Evaluate all pending)"])
         return out
     rows = offline_gates(off, ref, cfg["offline"])

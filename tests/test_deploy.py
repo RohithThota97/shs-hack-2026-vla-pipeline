@@ -56,15 +56,17 @@ def test_deploy_follows_the_verdict(workspace, dataset):
     assert r["status"] == "rejected" and r["verdict"] == "NOT TESTED" and "--override" in r["error"]
     _offline("m-v1")                                                   # offline passes, no sim → sim test
     r = deploy("m-v1", reg, by="rohith")
-    assert r["status"] == "deployed" and reg.deployments()[-1]["meta"]["purpose"] == "sim test"
-    assert reg.deployments()[-1]["meta"]["supervised"] is False and reg.current_deployed_model() == "m-v1"
+    assert r["status"] == "serving" and reg.deployments()[-1]["meta"]["purpose"] == "sim test"
+    assert reg.current_deployed_model() is None                        # a sim test is not a deployment
     _sim_pass(reg, tmp, "m-v1")
     assert deploy("m-v1", reg)["status"] == "deployed" and reg.deployments()[-1]["meta"]["purpose"] == "deployment"
+    assert reg.current_deployed_model() == "m-v1"
     _offline("m-v2", arm=0.09)                                         # 90% of doing nothing: needs more training
     assert deploy("m-v2", reg)["status"] == "rejected"
     assert deploy("m-v2", reg, allow_supervised=True)["error"].startswith("an override needs the name")
-    r = deploy("m-v2", reg, allow_supervised=True, by="rohith")         # override, recorded
-    assert r["status"] == "deployed" and reg.deployments()[-1]["meta"]["supervised"] is True
+    r = deploy("m-v2", reg, allow_supervised=True, by="rohith")         # override, recorded, never the reference
+    assert r["status"] == "serving" and reg.deployments()[-1]["meta"]["supervised"] is True
+    assert reg.current_deployed_model() == "m-v1"
 
 
 class FakeServing:

@@ -6,12 +6,12 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from hackpipe.common import writelock
 from hackpipe.common.config import REPO_ROOT, gates_config
 from hackpipe.common.registry import Registry
 from hackpipe.console.components.shell import machine_info
+from hackpipe.console.components.data_views import writer_ok
 from hackpipe.console.theme import TOKENS, badge
-from hackpipe.evaluation.offline import is_running
+from hackpipe.evaluation.offline import is_current, is_running
 from hackpipe.evaluation.runner import load_results
 from hackpipe.gates.verdict import offline_result, sim_result, verdict
 from hackpipe.jobs import runner
@@ -35,13 +35,6 @@ with st.expander("How the test works", expanded=False):
         "4. **Isaac Sim** (site PC) then measures real success: does the box end up on the tray?")
 gpus = machine_info()["gpus"]
 models = [m for m in reg.models() if m["meta"].get("purpose") != "timing" and m["status"] in FINISHED]
-
-
-def writer_ok() -> tuple[bool, str]:
-    w = writelock.holder()
-    if w and w["machine"] != writelock.machine_id():
-        return False, f"{w['machine']} is the registry writer — take over in the jobs panel first."
-    return True, ""
 
 
 def chart(fig: go.Figure, height: int = 260, **layout) -> None:
@@ -118,6 +111,9 @@ if off is None or not (off.get("executed") or {}).get("arm_mean"):
     if off is not None:
         st.warning("This test is from an older version without the checks below — run it again.")
     st.stop()
+if not is_current(off, model):
+    st.warning(f"This test is of another checkpoint (`{off.get('checkpoint')}`) than the one in use now — "
+               "**Test again**. The numbers below are the old checkpoint's.")
 
 ex = off["executed"]
 allrow = next((r for r in off["rows"] if r["instruction"] == "full" and r["subtask"].endswith("· all")), {})
@@ -134,8 +130,9 @@ m[3].metric("One prediction", f"{lat['replan_median']:.0f} ms" if lat else "n/a"
             help=f"time to predict once (batch 1); a 6 Hz robot has {lat.get('budget_ms', 167)} ms")
 if still:
     ratio = ex["arm_mean"] / still
+    need = gates_config()["offline"]["block"]["max_ratio_to_hold_still"]
     st.markdown(f"The model's error is **{ratio:.0%} of doing nothing** "
-                + ("— clearly better than standing still." if ratio <= 0.5 else
+                + (f"— clearly better than standing still (needed: ≤ {need:.0%})." if ratio <= need else
                    "— not yet much better than standing still." if ratio < 1 else "— worse than standing still."))
 
 subs = [s for s in ex.get("per_subtask") or [] if s.get("arm_rad") is not None]
