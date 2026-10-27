@@ -1,0 +1,36 @@
+{
+ "prim": "/World/FR3Duo_withV_Mkit__1_/mount_link/cover_link/head_link/zed_mini_camera_link/zed_mini_left_camera_frame/head_cam",
+ "world_from_camera": [
+  [
+   0.9995339556725265,
+   -0.030525818668961424,
+   0.00021413131903169624,
+   -3.96976784610145
+  ],
+  [
+   0.022920483107958717,
+   0.7551018264916571,
+   0.6552067483497566,
+   1.4753332373257195
+  ],
+  [
+   -0.020162413340914398,
+   -0.654896484968085,
+   0.7554495820799143,
+   23.2259768589137
+  ],
+  [
+   0.0,
+   0.0,
+   0.0,
+   1.0
+  ]
+ ],
+ "fx": 112.0,
+ "fy": 112.0,
+ "cx": 112.0,
+ "cy": 112.0,
+ "width": 224,
+ "height": 224,
+ "source": "pose: scene USD (authored); intrinsics: recorder metadata (focal 2.4 mm, aperture 4.8 mm)"
+}

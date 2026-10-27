@@ -1,8 +1,10 @@
 # Improve loop (src/hackpipe/improve/loop.py, Improve page, `hackpipe loop run`): new demos from the box grid
 # player, rendered in Isaac Sim on the site PC, back through the data pipeline into a fine-tuned model.
 grid:
-  x_cm: [-8, 8, 1]                     # table-plane offsets of the box: start, stop, step (cm) → 17 values
-  y_cm: [-3.5, 3.5, 1]                 # → 8 values: 17 × 8 = 136 cells
+  area: cart                           # cart: the whole cart top at step_cm (scene geometry, sim/scene.py) → 220 cells,
+  step_cm: 5                           #   133 valid on the handover demo; box: the x_cm × y_cm range below
+  x_cm: [-8, 8, 1]                     # area: box — table-plane offsets (room X) of the box: start, stop, step (cm)
+  y_cm: [-3.5, 3.5, 1]                 # (room Z); either way cells off the cart top are skipped
   source_name: fr3_duo_handover_sim_grid   # converted recordings land in data/incoming/<source_name>
   recordings_dir: data/incoming/sim_grid_recordings   # where the site PC's record_demos.py --mode grid output goes
 reference_demo_source: data/raw/fr3_duo_handover_84

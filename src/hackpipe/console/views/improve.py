@@ -2,6 +2,7 @@
 Spec: docs/ui/05_improve.md."""
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
@@ -23,7 +24,9 @@ with st.expander("Why, and how the grid player works", expanded=False):
     st.markdown(
         "- **Why:** all 84 handover demos are the same motion with the box in the same place (only the lighting "
         "changes). The model never saw the box anywhere else.\n"
-        "- **Grid:** the box is shifted over a table grid (default 17 × 8 = 136 positions, ±8 cm × ±3.5 cm).\n"
+        "- **Grid:** the box is shifted over the whole cart top in 5 cm steps (`configs/improve.yaml` → grid); "
+        "positions where the box would not stand on the cart are skipped. The arm-base poses, the cart and the "
+        "camera come from the scene file (`sim/scene.py`), so the laptop plans in the same frame as Isaac Sim.\n"
         "- **Bend the demo:** for each position the left arm's approach, grasp and lift are moved with the box "
         "by inverse kinematics on the FR3 (same gripper orientation, the demo's elbow posture); the motion goes back "
         "to the demo before the handover, so handover, release and place stay the same. A position counts only if "
@@ -70,12 +73,15 @@ if reason:
 plan = loop._state().get("plan")
 st.markdown("#### Box positions")
 if not plan:
-    st.caption("Not planned yet — **Run the loop** does it first (about a minute).")
+    st.caption("Not planned yet — **Run the loop** does it first (a few minutes).")
 else:
     g = pd.DataFrame(plan["grid"])
     fig = go.Figure()
-    for okv, colour, name in ((True, TOKENS["ok"], "valid"), (False, TOKENS["bad"], "not reachable")):
-        sub = g[g["ok"] == okv]
+    if "status" not in g:                               # plans from before the cart check
+        g["status"] = np.where(g["ok"], "ok", "out_of_reach")
+    for status, colour, name in (("ok", TOKENS["ok"], "valid"), ("out_of_reach", TOKENS["bad"], "not reachable"),
+                                 ("off_cart", "#c8c8c8", "off the cart")):
+        sub = g[g["status"] == status]
         if len(sub):
             fig.add_trace(go.Scatter(x=sub["dx"] * 100, y=sub["dy"] * 100, mode="markers", name=name,
                                      marker={"size": 12, "color": colour, "symbol": "square"},
@@ -83,10 +89,10 @@ else:
     fig.add_trace(go.Scatter(x=[0], y=[0], mode="markers+text", text=["demo"], textposition="top center",
                              marker={"size": 16, "color": "#000", "symbol": "x"}, name="demo's box"))
     fig.update_layout(height=300, margin={"l": 10, "r": 10, "t": 20, "b": 10}, plot_bgcolor="#fff",
-                      xaxis_title="box shift x (cm)", yaxis_title="box shift y (cm)", legend={"orientation": "h"},
+                      xaxis_title="box shift, room X (cm)", yaxis_title="box shift, room Z (cm)", legend={"orientation": "h"},
                       font={"family": "Inter"})
     st.plotly_chart(fig, use_container_width=True)
-    st.caption(f"{plan['valid']} of {plan['cells']} positions valid · checked on {plan['reference']} · worst IK error "
+    st.caption(f"{plan['valid']} of {plan['cells']} positions valid ({plan.get('off_cart', 0)} off the cart) · checked on {plan['reference']} · worst IK error "
                f"{plan['max_ik_mm']} mm. Isaac Sim checks them again in the real scene frame before recording.")
 
 # ---------- site PC ----------
