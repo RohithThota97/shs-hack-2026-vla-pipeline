@@ -116,12 +116,32 @@ def status(registry: Registry | None = None) -> list[dict[str, Any]]:
     return [{"step": k, "title": t, "done": rows[k][0], "detail": rows[k][1]} for k, t in STEPS]
 
 
+def grid_ranges(cfg: dict[str, Any], actions: Any = None) -> tuple[list[float], list[float]]:
+    """(x, y) grid ranges in cm (start, stop, step): the whole cart top around the demo's grasp (area: cart, needs
+    the demo's actions) or the configured box."""
+    g = cfg["grid"]
+    if g.get("area", "box") == "cart":
+        if actions is None:
+            raise ValueError("area: cart needs the reference demo")
+        from hackpipe.improve.grid import cart_offsets
+        return tuple(list(r) for r in cart_offsets(actions, float(g.get("step_cm", 5))))
+    return list(g["x_cm"]), list(g["y_cm"])
+
+
 def site_pc_commands(cfg: dict[str, Any] | None = None) -> str:
     cfg = cfg or improve_config()
-    ref = _state().get("reference") or "outputs/improve/ref.json"
-    x, y = (",".join(str(v) for v in cfg["grid"][k]) for k in ("x_cm", "y_cm"))
+    st = _state()
+    ref = st.get("reference") or "outputs/improve/ref.json"
+    plan = st.get("plan") or {}
+    if "x_cm" in plan:
+        xr, yr = plan["x_cm"], plan["y_cm"]
+    elif cfg["grid"].get("area", "box") == "cart":
+        return "# Run the loop first: step 1 works out the cart grid, then the site PC command appears here."
+    else:
+        xr, yr = grid_ranges(cfg)
+    x, y = (",".join(str(v) for v in r) for r in (xr, yr))
     return (f"<isaac>/python.sh scripts/isaac/record_demos.py --mode grid --usd <Hackathon_FR3Duo_flattened.usd> "
-            f"--ref {ref} --out {cfg['grid']['recordings_dir']} --grid_x={x} --grid_y={y}\n"
+            f"--ref {ref} --out {cfg['grid']['recordings_dir']} --grid_x={x} --grid_y={y} --grid_cart\n"
             f"# then copy {cfg['grid']['recordings_dir']} to this machine (Drive) and run: hackpipe loop run")
 
 
@@ -135,13 +155,16 @@ def step_plan(reg: Registry, cfg: dict[str, Any], log: Callable[[str], None]) ->
     df = ds.frames()
     ep0 = df["episode_index"].min()
     A = np.stack(df[df["episode_index"] == ep0].sort_values("frame_index")["action"]).astype(np.float32)
-    cells = plan(A, grid_offsets(tuple(cfg["grid"]["x_cm"]), tuple(cfg["grid"]["y_cm"])))
+    xr, yr = grid_ranges(cfg, A)
+    cells = plan(A, grid_offsets(tuple(xr), tuple(yr)), cart=True)
     ok = [c for c in cells if c["ok"]]
     summary = {"cells": len(cells), "valid": len(ok), "reference": f"{cfg['reference_demo_source']} episode {ep0}",
-               "grid": [{"dx": c["dx"], "dy": c["dy"], "ok": c["ok"], "reason": c["reason"]} for c in cells],
+               "x_cm": xr, "y_cm": yr, "off_cart": sum(c["status"] == "off_cart" for c in cells),
+               "grid": [{"dx": c["dx"], "dy": c["dy"], "ok": c["ok"], "status": c["status"], "reason": c["reason"]}
+                        for c in cells],
                "max_ik_mm": max((c["max_ik_mm"] for c in ok), default=None)}
     _save(plan=summary)
-    log(f"plan: {len(ok)} of {len(cells)} box positions valid")
+    log(f"plan: {len(ok)} of {len(cells)} box positions valid ({summary['off_cart']} off the cart)")
 
 
 def step_reference(reg: Registry, cfg: dict[str, Any], log: Callable[[str], None]) -> None:

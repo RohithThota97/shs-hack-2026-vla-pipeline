@@ -75,7 +75,7 @@ def test_loop_run_stops_at_render(workspace, monkeypatch):
     from hackpipe.improve import loop
     tmp, reg = workspace
     done = []
-    monkeypatch.setattr(loop, "step_plan", lambda r, c, log: (done.append("plan"), loop._save(plan={"cells": 1, "valid": 1, "grid": [], "reference": "x", "max_ik_mm": 0})))
+    monkeypatch.setattr(loop, "step_plan", lambda r, c, log: (done.append("plan"), loop._save(plan={"cells": 1, "valid": 1, "grid": [], "reference": "x", "max_ik_mm": 0, "x_cm": [0, 0, 5], "y_cm": [0, 0, 5]})))
     ref = tmp / "ref.json"
     ref.write_text("{}")
     monkeypatch.setattr(loop, "step_reference", lambda r, c, log: (done.append("reference"), loop._save(reference=str(ref))))
@@ -89,7 +89,8 @@ def test_improve_page(workspace, monkeypatch):
     from streamlit.testing.v1 import AppTest
     from hackpipe.improve import loop
     monkeypatch.setenv("HACKPIPE_MACHINE", "laptop-test")
-    loop._save(plan={"cells": 2, "valid": 1, "reference": "demo", "max_ik_mm": 0.1,
+    assert "Run the loop first" in loop.site_pc_commands()                       # area: cart needs the plan's ranges
+    loop._save(plan={"cells": 2, "valid": 1, "reference": "demo", "max_ik_mm": 0.1, "x_cm": [-5, 5, 5], "y_cm": [0, 0, 5],
                      "grid": [{"dx": 0, "dy": 0, "ok": True, "reason": ""}, {"dx": 0.08, "dy": 0, "ok": False,
                                                                            "reason": "too close to a joint limit"}]})
     at = AppTest.from_file(str(Path(__file__).resolve().parents[1] / "src/hackpipe/console/views/improve.py"),
@@ -98,3 +99,54 @@ def test_improve_page(workspace, monkeypatch):
     assert not at.exception, [e.message for e in at.exception]
     assert any("1 · Grid of box positions" in m.value for m in at.markdown)
     assert any("--mode grid" in c.value for c in at.code)
+
+
+def test_scene_chain_matches_the_dh_model():
+    """Franka's DH chain on the scene's arm-base pose lands on the scene's own link7 pose (authored joint angles)."""
+    from hackpipe.evaluation.kinematics import FLANGE_D, fk_T
+    from hackpipe.sim import scene
+    for side in ("left", "right"):
+        a = scene.chain()[side]
+        flange = scene.arm_base(side) @ fk_T(np.array(a["q_authored"])[None], tcp=False)[0]
+        F = np.eye(4)
+        F[2, 3] = FLANGE_D
+        assert np.abs(flange - np.array(a["link7_world_authored"]) @ F).max() < 1e-5
+        R = scene.table_to_base(side)
+        assert np.allclose(scene.arm_base(side)[:3, :3] @ R @ [0.03, 0.02, 0], [0.03, 0, 0.02])   # room X / Z
+    assert 0.21 < scene.tcp_offset() < 0.22                                         # Robotiq fingertip centre
+
+
+def test_camera_round_trip_and_box_detection():
+    from hackpipe.sim import scene
+    P = np.array([[-4.2, scene.BOX_MID_Y, 22.7], [-4.3, scene.BOX_MID_Y, 22.75]])
+    uv, z = scene.world_to_pixel(P)
+    assert (z > 0).all() and ((uv >= 0) & (uv < 224)).all()
+    assert np.allclose(scene.pixel_to_plane(uv), P, atol=1e-9)
+    img = np.full((224, 224, 3), 30, np.uint8)                                     # dark cart …
+    u, v = np.round(uv[0]).astype(int)
+    img[v - 3:v + 4, u - 4:u + 5] = 220                                             # … and a bright box
+    c = scene.detect_box(img, uv[0] + [3, -2])
+    assert np.allclose(c, [u, v], atol=0.01)
+    assert scene.detect_box(img, [10, 10]) is None
+    off = scene.box_offset(uv[0], P[1])
+    assert np.allclose(off, [0.1, -0.05], atol=1e-6)
+    cells = [{"dx": dx / 100, "dy": dy / 100} for dx in range(-20, 21, 5) for dy in range(-10, 11, 5)]
+    assert scene.nearest_cell(off + [0.004, -0.01], cells) == {"dx": 0.1, "dy": -0.05}
+
+
+def test_cart_grid_marks_off_cart_cells(monkeypatch):
+    from hackpipe.improve import grid
+    from hackpipe.sim import scene
+    A = _demo()
+    cfg = {"lift_hold_s": 1.0}
+    g = grid.grasp_world(A, cfg)
+    # put the synthetic demo's grasp point at the cart's centre, so the cart check means something here
+    centre = np.array([np.mean(scene.CART_TOP_X), g[1], np.mean(scene.CART_TOP_Z)])
+    monkeypatch.setattr(grid, "grasp_world", lambda a, c=None: centre)
+    (x0, x1, xs), (y0, y1, ys) = grid.cart_offsets(A, 5.0, cfg)
+    assert xs == ys == 5.0 and x0 <= 0 <= x1 and y0 <= 0 <= y1 and x0 % 5 == 0 and y1 % 5 == 0
+    (lx0, lx1), _ = scene.cart_limits(centre)
+    cells = grid.plan(A, [(0.0, 0.0), (lx1 + 0.05, 0.0), (0.02, 0.01)], cfg=cfg, cart=True)
+    assert [c["status"] for c in cells] == ["ok", "off_cart", "ok"]
+    assert not cells[1]["ok"] and "cart" in cells[1]["reason"]
+    assert all(c["status"] in ("ok", "out_of_reach") for c in grid.plan(A, [(0.0, 0.0), (lx1 + 0.05, 0.0)], cfg=cfg))

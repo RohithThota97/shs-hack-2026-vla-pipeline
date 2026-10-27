@@ -58,6 +58,8 @@ ap.add_argument("--no_tilt", dest="tilt", action="store_false",
 ap.add_argument("--headless", default="true")
 ap.add_argument("--grid_x", default="-8,8,1", help="grid: table-plane x offsets (cm) start,stop,step (world X)")
 ap.add_argument("--grid_y", default="-3.5,3.5,1", help="grid: table-plane y offsets (cm) start,stop,step (world Z)")
+ap.add_argument("--grid_cart", action="store_true",
+                help="grid: skip cells whose box would not stand on the cart top (scene cart, hackpipe/sim/scene.py)")
 ap.add_argument("--grid_check_cm", type=float, default=6.0,
                 help="grid: the demo's grasp point must be this close to the box at reset, else stop (frame check)")
 args = ap.parse_args()
@@ -305,7 +307,7 @@ def grid_jobs():
                          "the grid offsets would be wrong — check the articulation root prim")
     M = np.array([[1.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 1.0, 0.0]])      # (dx, dy, 0) → world (dx, 0, dy), Y up
     offs = grid_offsets(tuple(float(v) for v in args.grid_x.split(",")), tuple(float(v) for v in args.grid_y.split(",")))
-    cells = plan(A, offs, rotate=R_wb.T @ M)
+    cells = plan(A, offs, rotate=R_wb.T @ M, cart=args.grid_cart)
     ok = [c for c in cells if c["ok"]]
     print(f"grid: {len(ok)} of {len(cells)} cells valid", flush=True)
     for c in cells:

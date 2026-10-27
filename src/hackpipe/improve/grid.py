@@ -7,9 +7,16 @@ the handover, so handover, release and place stay the demo's. Each frame's grasp
 orientation) is solved by inverse kinematics on the FR3 (evaluation/kinematics.py). A cell is valid only if every
 frame is reachable within joint limits, the IK error is tiny, and no joint moves faster than the demo allows.
 
+Table-plane offsets are room X / Z; plan() turns them into the left arm's base frame with the scene's arm-base pose
+(sim/scene.py: the arms are mounted tilted, so the base's own x / y are not the table plane). Each cell gets a status:
+ok, out_of_reach (IK error, joint limit or speed) or off_cart (the box would not stand on the cart top; checked
+only with cart=True, against the scene's cart). cart_offsets() covers the whole cart top on a step-aligned grid
+(the demo's spot is always a cell) — the whole-cart grid and the cell statuses follow our team's
+tools/augment_box_grid.py (github.com/yugalrk/Robotics--VLA-training).
+
 Pure numpy (no hackpipe config): Isaac Sim's Python imports it in scripts/isaac/record_demos.py --mode grid, which
 puts the box at each valid cell, replays the bent demo, records the cameras and keeps the episodes whose box ends on
-the tray. Offsets here are in the left arm's base frame; record_demos.py converts the table-plane grid from world.
+the tray; there the live arm-base pose is passed as `rotate`, and the scene file's must agree with it.
 """
 from __future__ import annotations
 
@@ -17,7 +24,8 @@ from typing import Any
 
 import numpy as np
 
-from hackpipe.evaluation.kinematics import DQ_MAX, Q_MAX, Q_MIN, fk_T, ik
+from hackpipe.evaluation.kinematics import DQ_MAX, FLANGE_D, Q_MAX, Q_MIN, fk_T, ik
+from hackpipe.sim import scene
 
 LEFT, LEFT_GRIP, RIGHT_GRIP = slice(0, 7), 7, 15
 CLOSED_BELOW = 0.25           # gripper command: 1.0 start, 0.48 open, 0.0 closed on the box
@@ -104,14 +112,38 @@ def retarget(actions: np.ndarray, offset: np.ndarray, cfg: dict[str, Any] | None
     return {**res, "ok": True, "reason": ""}
 
 
+def grasp_world(actions: np.ndarray, cfg: dict[str, Any] | None = None) -> np.ndarray:
+    """World position (3,) of the left gripper centre at the demo's grasp (scene arm base + the Robotiq's TCP)."""
+    A = np.asarray(actions, np.float64)
+    T = fk_T(A[phases(A, cfg)["grasp"], LEFT][None], tcp=False)[0]          # flange
+    p = T[:3, 3] + T[:3, 2] * (scene.tcp_offset("left") - FLANGE_D)
+    return scene.to_world("left", p[None])[0]
+
+
+def cart_offsets(actions: np.ndarray, step_cm: float = 5.0, cfg: dict[str, Any] | None = None
+                 ) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
+    """Grid ranges (start, stop, step in cm, for grid_offsets) covering the whole cart top around the demo's grasp
+    point, aligned to multiples of the step so the demo's own spot (0, 0) is a cell."""
+    (x0, x1), (y0, y1) = scene.cart_limits(grasp_world(actions, cfg))
+    a = lambda lo, hi: (float(np.floor(lo * 100 / step_cm) * step_cm), float(np.ceil(hi * 100 / step_cm) * step_cm),
+                        float(step_cm))
+    return a(x0, x1), a(y0, y1)
+
+
 def plan(actions: np.ndarray, offsets: list[tuple[float, float]], rotate: np.ndarray | None = None,
-         cfg: dict[str, Any] | None = None) -> list[dict[str, Any]]:
-    """Retarget the demo for every table-plane offset. rotate (3, 3): table-plane offset → left-arm base frame (from
-    the scene; identity = the base's x / y are the table plane). Returns one result per cell (with "cell", "dx",
-    "dy")."""
-    R = np.eye(3) if rotate is None else np.asarray(rotate, np.float64)
+         cfg: dict[str, Any] | None = None, cart: bool = False) -> list[dict[str, Any]]:
+    """Retarget the demo for every table-plane offset (room X / Z, metres). rotate (3, 3): table-plane offset →
+    left-arm base frame; default from the scene (sim/scene.py), Isaac Sim passes the live one. cart=True marks
+    cells whose box would not stand on the cart top as off_cart (not retargeted). Returns one result per cell (with
+    "cell", "dx", "dy", "status")."""
+    R = scene.table_to_base("left") if rotate is None else np.asarray(rotate, np.float64)
+    lim = scene.cart_limits(grasp_world(actions, cfg)) if cart else None
     out = []
     for i, (dx, dy) in enumerate(offsets):
+        if lim and not (lim[0][0] - 1e-9 <= dx <= lim[0][1] + 1e-9 and lim[1][0] - 1e-9 <= dy <= lim[1][1] + 1e-9):
+            out.append({"ok": False, "status": "off_cart", "reason": "the box would not stand on the cart top",
+                        "cell": i, "dx": dx, "dy": dy, "max_ik_mm": None, "max_ik_deg": None})
+            continue
         r = retarget(actions, R @ np.array([dx, dy, 0.0]), cfg)
-        out.append({**r, "cell": i, "dx": dx, "dy": dy})
+        out.append({**r, "status": "ok" if r["ok"] else "out_of_reach", "cell": i, "dx": dx, "dy": dy})
     return out
