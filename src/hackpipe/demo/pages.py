@@ -79,9 +79,10 @@ def labels_for(source: str) -> tuple[dict[str, Any], Path] | None:
     return (best[1], best[2]) if best else None
 
 
-def frame_subtasks(source: str, ep: int, n: int) -> list[str]:
-    """Sub-task text per frame of one episode (empty strings if the source isn't labelled)."""
-    lab = labels_for(source)
+def frame_subtasks(source: str, ep: int, n: int, lab: Any = "find") -> list[str]:
+    """Sub-task text per frame of one episode (empty strings if the source isn't labelled). lab: labels_for(source),
+    looked up once per page build."""
+    lab = labels_for(source) if lab == "find" else lab
     if not lab:
         return [""] * n
     seg = pd.read_csv(lab[1] / lab[0]["segments"])
@@ -107,15 +108,16 @@ def page_data(ds: DatasetFolder, source: str, out: Path, every: int = 2) -> dict
     eps = ds.episodes_meta()
     eps = eps[(eps[k + "chunk_index"] == 0) & (eps[k + "file_index"] == 0)].sort_values("episode_index")
     res = {"names": NAMES, "fps": ds.fps / every, "episodes": []}
+    lab = labels_for(source)
     for e in eps.itertuples(index=False):
         ep = int(getattr(e, "episode_index"))
         d = episode(ds, ep)
         S, A, t = arrays(d)
-        lab = frame_subtasks(source, ep, len(S))[::every]
         res["episodes"].append({"episode": ep, "video_from": float(eps.loc[eps.episode_index == ep, k + "from_timestamp"]
                                                                    .iloc[0]),
                                 "t": t[::every].round(3).tolist(), "state": S[::every].round(4).tolist(),
-                                "action": A[::every].round(4).tolist(), "subtask": lab})
+                                "action": A[::every].round(4).tolist(),
+                                "subtask": frame_subtasks(source, ep, len(S), lab)[::every]})
     _page(out, "site/data.html", res)
     shutil.copy(_video_of(ds, "external_camera", int(eps.episode_index.iloc[0]))[0], out / "video.mp4")
     return {"episodes": len(res["episodes"])}
@@ -336,6 +338,7 @@ def build_xyz(out: Path, source: str = SOURCE, camera: str = "external_camera", 
     if eps.empty:
         raise ValueError(f"no episode in {camera} chunk {chunk} file {file}")
     res = {"camera": camera, "video": f"file-{file:03d}.mp4", "fps": ds.fps, "episodes": []}
+    lab = labels_for(source)
     for e in eps.itertuples(index=False):
         ep = int(getattr(e, "episode_index"))
         S, A, t = arrays(episode(ds, ep))
@@ -345,7 +348,7 @@ def build_xyz(out: Path, source: str = SOURCE, camera: str = "external_camera", 
             "right": scene.tcp_world("right", S[:, 8:15]).round(4).tolist(),
             "grip_left": S[:, 7].round(3).tolist(), "grip_right": S[:, 15].round(3).tolist(),
             "cmd_left": A[:, 7].round(3).tolist(), "cmd_right": A[:, 15].round(3).tolist(),
-            "subtask": frame_subtasks(source, ep, len(S))})
+            "subtask": frame_subtasks(source, ep, len(S), lab)})
     _page(out, "xyz_verify.html", res)
     shutil.copy(ds.episode_video_file(f"observation.images.{camera}", chunk, file), out / "video.mp4")
     return {"episodes": len(res["episodes"])}
@@ -417,11 +420,15 @@ def make_server(directory: str | Path, port: int = 8779, host: str = "127.0.0.1"
             path = self.translate_path(self.path)
             if not rng or not os.path.isfile(path):
                 return super().send_head()
-            m = re.match(r"bytes=(\d*)-(\d*)", rng)
+            m = re.match(r"bytes=(\d*)-(\d*)$", rng.strip())
             size = os.path.getsize(path)
-            start = int(m[1]) if m and m[1] else 0
-            end = min(int(m[2]) if m and m[2] else size - 1, size - 1)
-            if start >= size:
+            if not m or not (m[1] or m[2]):
+                return super().send_head()
+            if not m[1]:                                       # suffix: the last N bytes
+                start, end = max(0, size - int(m[2])), size - 1
+            else:
+                start, end = int(m[1]), min(int(m[2]) if m[2] else size - 1, size - 1)
+            if start >= size or end < start:
                 self.send_error(416, "Requested Range Not Satisfiable")
                 return None
             f = open(path, "rb")  # noqa: SIM115 — closed by the base class after copyfile

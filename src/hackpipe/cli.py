@@ -298,8 +298,9 @@ def main(argv: list[str] | None = None) -> None:
             elif t == "pi05":
                 if not args.checkpoint:
                     sys.exit("--checkpoint: the openpi checkpoint folder (params/ + assets/fr3_duo/)")
-                _print({"training_step": dg.pi05_step(args.checkpoint),
-                        **dg.pi05_variants(args.checkpoint, F, tuple(int(h) for h in args.horizons.split(",")))})
+                ck = str(resolve(args.checkpoint))
+                _print({"training_step": dg.pi05_step(ck),
+                        **dg.pi05_variants(ck, F, tuple(int(h) for h in args.horizons.split(",")))})
             else:
                 if not args.checkpoint:
                     sys.exit("--checkpoint: a LeRobot pretrained_model folder")

@@ -137,6 +137,51 @@ class ReplayPolicy:
         return a.copy()
 
 
+PI05_SLOTS = ("base_0_rgb", "left_wrist_0_rgb", "right_wrist_0_rgb")
+
+
+def openpi_load(checkpoint: str | Path, horizon: int) -> tuple[Any, Any, Any]:
+    """(Pi0Config, model, norm stats) of an openpi pi0.5 checkpoint (params/ + assets/fr3_duo/)."""
+    import jax.numpy as jnp
+    from openpi.models import model as _model
+    from openpi.models import pi0_config
+    from openpi.training import checkpoints as _checkpoints
+    cfg = pi0_config.Pi0Config(pi05=True, action_horizon=horizon)
+    ckpt = Path(checkpoint)
+    return (cfg, cfg.load(_model.restore_params(ckpt / "params", dtype=jnp.bfloat16)),
+            _checkpoints.load_norm_stats(ckpt / "assets", "fr3_duo"))
+
+
+def openpi_pipeline(cfg: Any, model: Any, norm: Any, quantile: bool = True, discrete_state: bool | None = None,
+                    order: tuple[str, str, str] = tuple(CAMERAS)) -> Any:
+    """The openpi Policy the server runs: our cameras (in `order`) → pi0.5's image slots, normalisation, 224×224,
+    prompt tokenised (with the discretised state by default), state / actions padded; 16 actions out. The variant
+    arguments are what `hackpipe diagnose pi05` tries, so the probe scores exactly this pipeline."""
+    from openpi import transforms
+    from openpi.models import tokenizer as _tokenizer
+    from openpi.policies import policy as _policy
+
+    class FR3Inputs(transforms.DataTransformFn):
+        def __call__(self, data: dict[str, Any]) -> dict[str, Any]:
+            img = {slot: np.asarray(data[k], np.uint8) for k, slot in zip(order, PI05_SLOTS)}
+            out = {"state": np.asarray(data["observation.state"], np.float32), "image": img,
+                   "image_mask": {slot: np.True_ for slot in img}}
+            if "prompt" in data:
+                out["prompt"] = data["prompt"]
+            return out
+
+    class FR3Outputs(transforms.DataTransformFn):
+        def __call__(self, data: dict[str, Any]) -> dict[str, Any]:
+            return {"actions": np.asarray(data["actions"][:, :ACTION_DIM])}
+
+    ds = cfg.discrete_state_input if discrete_state is None else discrete_state
+    return _policy.Policy(model, transforms=[
+        FR3Inputs(), transforms.Normalize(norm, use_quantiles=quantile), transforms.ResizeImages(224, 224),
+        transforms.TokenizePrompt(_tokenizer.PaligemmaTokenizer(cfg.max_token_len), discrete_state_input=ds),
+        transforms.PadStatesAndActions(cfg.action_dim)],
+        output_transforms=[transforms.Unnormalize(norm, use_quantiles=quantile), FR3Outputs()])
+
+
 class OpenPiPolicy:
     """An openpi pi0.5 checkpoint (JAX / Orbax: params/ + assets/fr3_duo/ norm stats). The organisers' openpi training
     config is not in the checkpoint, so the policy is rebuilt from openpi's standard pieces: Pi0Config(pi05=True),
@@ -145,7 +190,6 @@ class OpenPiPolicy:
     inference predicts `horizon` actions; the first `replan` are served one per /act (the client plays them at
     30 Hz, the rate of the data it was trained on)."""
     fake, model, policy_type = False, None, "pi05-openpi"
-    SLOTS = {CAMERAS[0]: "base_0_rgb", CAMERAS[1]: "left_wrist_0_rgb", CAMERAS[2]: "right_wrist_0_rgb"}
     input_features = DummyPolicy.input_features
     output_features = DummyPolicy.output_features
 
@@ -153,42 +197,8 @@ class OpenPiPolicy:
         if not 1 <= replan <= horizon:
             raise ValueError(f"replan must be 1…{horizon} (the horizon)")
         self.checkpoint, self.n_action_steps, self.chunk_size = checkpoint, replan, horizon
-        self.policy = policy if policy is not None else self._build(checkpoint, horizon)
+        self.policy = policy if policy is not None else openpi_pipeline(*openpi_load(checkpoint, horizon))
         self.queue: list[np.ndarray] = []
-
-    @classmethod
-    def _build(cls, checkpoint: str, horizon: int) -> Any:
-        import jax.numpy as jnp
-        from openpi import transforms
-        from openpi.models import model as _model
-        from openpi.models import pi0_config
-        from openpi.models import tokenizer as _tokenizer
-        from openpi.policies import policy as _policy
-        from openpi.training import checkpoints as _checkpoints
-
-        class FR3Inputs(transforms.DataTransformFn):
-            def __call__(self, data: dict[str, Any]) -> dict[str, Any]:
-                img = {slot: np.asarray(data[k], np.uint8) for k, slot in cls.SLOTS.items()}
-                out = {"state": np.asarray(data["observation.state"], np.float32), "image": img,
-                       "image_mask": {slot: np.True_ for slot in img}}
-                if "prompt" in data:
-                    out["prompt"] = data["prompt"]
-                return out
-
-        class FR3Outputs(transforms.DataTransformFn):
-            def __call__(self, data: dict[str, Any]) -> dict[str, Any]:
-                return {"actions": np.asarray(data["actions"][:, :ACTION_DIM])}
-
-        cfg = pi0_config.Pi0Config(pi05=True, action_horizon=horizon)
-        ckpt = Path(checkpoint)
-        model = cfg.load(_model.restore_params(ckpt / "params", dtype=jnp.bfloat16))
-        norm = _checkpoints.load_norm_stats(ckpt / "assets", "fr3_duo")
-        return _policy.Policy(model, transforms=[
-            FR3Inputs(), transforms.Normalize(norm, use_quantiles=True), transforms.ResizeImages(224, 224),
-            transforms.TokenizePrompt(_tokenizer.PaligemmaTokenizer(cfg.max_token_len),
-                                      discrete_state_input=cfg.discrete_state_input),
-            transforms.PadStatesAndActions(cfg.action_dim)],
-            output_transforms=[transforms.Unnormalize(norm, use_quantiles=True), FR3Outputs()])
 
     def reset(self) -> None:
         self.queue = []
@@ -408,7 +418,7 @@ def build_policy(checkpoint: str | None = None, model: str | None = None, dummy:
         return ReplayPolicy(episode_arrays(replay, episode)[1], label=f"{Path(replay).name}-episode-{episode}")
     policy: Any
     if pi05:
-        policy = OpenPiPolicy(pi05, horizon, n_action_steps or 25)
+        policy = OpenPiPolicy(pi05, horizon, n_action_steps or min(25, horizon))
     else:
         policy = LeRobotPolicy(str(checkpoint), device, n_action_steps, model)
     problems = contract_problems(policy)

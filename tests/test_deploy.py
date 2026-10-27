@@ -353,3 +353,6 @@ def test_trajectory_replay_and_pi05_policies(tmp_path, monkeypatch):
     assert contract_problems(pi) == [] and pi.policy_type == "pi05-openpi"
     with pytest.raises(ValueError):
         OpenPiPolicy("ck", horizon=10, replan=11, policy=f)
+    monkeypatch.setattr("hackpipe.deploy.server.openpi_load", lambda c, h: (None, None, None))
+    monkeypatch.setattr("hackpipe.deploy.server.openpi_pipeline", lambda *a: f)
+    assert build_policy(pi05="ck", horizon=10).n_action_steps == 10           # default replan fits a short horizon

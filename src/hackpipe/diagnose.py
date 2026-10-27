@@ -199,53 +199,24 @@ def score_variant(infer: Callable[[dict[str, Any], str], np.ndarray], F: dict[st
 
 
 def pi05_variants(checkpoint: str, F: dict[str, np.ndarray], horizons: tuple[int, ...] = (50,)) -> dict[str, Any]:
-    """Which input setup was the checkpoint trained with? The variant with the lowest error is the one."""
+    """Which input setup was the checkpoint trained with? The variant with the lowest error is the one. Each variant
+    is the server's own pipeline (deploy/server.py openpi_pipeline) with one setting changed."""
     import jax
-    import jax.numpy as jnp
-    from openpi import transforms
-    from openpi.models import model as _model
-    from openpi.models import pi0_config
-    from openpi.models import tokenizer as _tokenizer
-    from openpi.policies import policy as _policy
-    from openpi.training import checkpoints as _checkpoints
 
-    ckpt = Path(checkpoint)
-    norm = _checkpoints.load_norm_stats(ckpt / "assets", "fr3_duo")
-    params = _model.restore_params(ckpt / "params", dtype=jnp.bfloat16)
-
-    class Inputs(transforms.DataTransformFn):
-        def __init__(self, order: tuple[str, str, str]) -> None:
-            self.order = order
-
-        def __call__(self, d: dict[str, Any]) -> dict[str, Any]:
-            img = dict(zip(("base_0_rgb", "left_wrist_0_rgb", "right_wrist_0_rgb"), (d[k] for k in self.order)))
-            return {"state": d["observation.state"], "image": img, "image_mask": {k: np.True_ for k in img},
-                    "prompt": d["prompt"]}
-
-    class Outputs(transforms.DataTransformFn):
-        def __call__(self, d: dict[str, Any]) -> dict[str, Any]:
-            return {"actions": np.asarray(d["actions"][:, :16])}
-
+    from hackpipe.deploy.server import openpi_load, openpi_pipeline
     out: dict[str, Any] = {}
     for H in horizons:
-        cfg = pi0_config.Pi0Config(pi05=True, action_horizon=H)
-        model = cfg.load(params)
+        cfg, model, norm = openpi_load(checkpoint, H)
         noise = np.asarray(jax.random.normal(jax.random.key(0), (H, cfg.action_dim)), np.float32)
 
-        def make(quantile: bool = True, discrete: bool = True, order: tuple[str, str, str] = tuple(CAMERAS)
-                 ) -> Callable[[dict[str, Any], str], np.ndarray]:
-            pol = _policy.Policy(model, transforms=[
-                Inputs(order), transforms.Normalize(norm, use_quantiles=quantile), transforms.ResizeImages(224, 224),
-                transforms.TokenizePrompt(_tokenizer.PaligemmaTokenizer(cfg.max_token_len),
-                                          discrete_state_input=discrete), transforms.PadStatesAndActions(cfg.action_dim)],
-                output_transforms=[transforms.Unnormalize(norm, use_quantiles=quantile), Outputs()])
+        def make(**kw: Any) -> Callable[[dict[str, Any], str], np.ndarray]:
+            pol = openpi_pipeline(cfg, model, norm, **kw)
             return lambda obs, prompt: pol.infer({**obs, "prompt": prompt}, noise=noise)["actions"]
         n = min(H, 25)
-        swapped = (CAMERAS[0], CAMERAS[2], CAMERAS[1])
-        variants = {"quantile, state in prompt, ext/left/right": (make(), TASK),
+        variants = {"as served (quantile, state in prompt, ext/left/right)": (make(), TASK),
                     "z-score normalisation": (make(quantile=False), TASK),
-                    "no state in prompt": (make(discrete=False), TASK),
-                    "wrists swapped": (make(order=swapped), TASK),
+                    "no state in prompt": (make(discrete_state=False), TASK),
+                    "wrists swapped": (make(order=(CAMERAS[0], CAMERAS[2], CAMERAS[1])), TASK),
                     "lowercase prompt": (make(), TASK.lower()), "empty prompt": (make(), "")}
         out[f"horizon {H} (first {n})"] = {k: score_variant(f, F, n, p) for k, (f, p) in variants.items()}
     return out
@@ -254,7 +225,7 @@ def pi05_variants(checkpoint: str, F: dict[str, np.ndarray], horizons: tuple[int
 def pi05_step(checkpoint: str) -> int | None:
     """The training step stored in an openpi checkpoint's train_state (None if it can't be read)."""
     import tensorstore as ts
-    spec = {"driver": "zarr", "kvstore": {"driver": "ocdbt", "base": f"file://{Path(checkpoint) / 'train_state'}",
+    spec = {"driver": "zarr", "kvstore": {"driver": "ocdbt", "base": f"file://{Path(checkpoint).resolve() / 'train_state'}",
                                           "path": "step"}}
     try:
         return int(np.asarray(ts.open(spec).result().read().result()))
@@ -286,17 +257,20 @@ def grasp_timing(ref: dict[str, Any], run: dict[str, np.ndarray], fps: float = 3
     arm = list(range(7))
     dg = first_close(DA[:, 7])
     S, A = run["state"], run["action"]
+    step = run.get("step", np.arange(len(S)))           # rows may be logged every few 30 Hz steps
     g = first_close(A[:, 7])
     res: dict[str, Any] = {"demo_close_s": None if dg is None else round(dg / fps, 2)}
     if g is None or dg is None:
         return {**res, "closed": False}
+    tg = int(step[g])
+    later = min(int(np.searchsorted(step, tg + int(2 * fps))), len(S) - 1)
     best = int(np.argmin(np.abs(S[:g + 1][:, arm] - D[dg, arm]).sum(1)))
-    return {**res, "closed": True, "close_s": round(g / fps, 2), "vs_demo_s": round((g - dg) / fps, 2),
-            "finger_state_2s_later": round(float(S[min(g + int(2 * fps), len(S) - 1), 7]), 3),
+    return {**res, "closed": True, "close_s": round(tg / fps, 2), "vs_demo_s": round((tg - dg) / fps, 2),
+            "finger_state_2s_later": round(float(S[later, 7]), 3),
             "to_demo_grasp_pose_rad": round(float(np.abs(S[g, arm] - D[dg, arm]).sum()), 3),
-            "to_demo_same_time_rad": round(float(np.abs(S[g, arm] - D[min(g, len(D) - 1), arm]).sum()), 3),
+            "to_demo_same_time_rad": round(float(np.abs(S[g, arm] - D[min(tg, len(D) - 1), arm]).sum()), 3),
             "closest_before_rad": round(float(np.abs(S[best, arm] - D[dg, arm]).sum()), 3),
-            "closest_before_s": round(best / fps, 2)}
+            "closest_before_s": round(int(step[best]) / fps, 2)}
 
 
 def episode_report(ref: dict[str, Any], run: dict[str, np.ndarray], every_s: float = 5.0, fps: float = 30.0

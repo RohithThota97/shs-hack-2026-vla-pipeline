@@ -77,6 +77,9 @@ def test_grasp_timing_and_episode_report(tmp_path):
     g = dg.grasp_timing(ref, run)
     assert g["closed"] and g["demo_close_s"] == 5.0 and g["vs_demo_s"] == pytest.approx(1.0)
     assert g["to_demo_same_time_rad"] == 0 and g["to_demo_grasp_pose_rad"] > 0 and g["closest_before_s"] == 5.0
+    sparse = {k: v[::5] for k, v in run.items()}                            # a log row every 5 steps
+    gs = dg.grasp_timing(ref, sparse)
+    assert gs["close_s"] == 6.0 and gs["vs_demo_s"] == pytest.approx(1.0) and gs["to_demo_same_time_rad"] == 0
     A[:, 7] = 1.0
     assert not dg.grasp_timing(ref, {"state": S, "action": A})["closed"]
     e = dg.episode_report(ref, run)

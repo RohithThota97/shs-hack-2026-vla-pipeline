@@ -540,8 +540,13 @@ def run(dataset_version: str, cfg: dict[str, Any], out: Path, resume: bool = Fal
         start = int(torch.load(last / "training_state.pt", weights_only=False)["step"])
     sd = int(schema["state"]["shape"][0])
     ad = int(schema["action"]["shape"][0])
-    lora_resume = resume and s["lora_rank"]
-    # LoRA: the saved model is merged, so a resumed run starts from the base again and loads its adapters
+    # LoRA: the saved model is merged, so a resumed run starts from the base again and loads its adapters. If the base
+    # isn't on this machine (a fine-tune start point from another one), it continues from the merged model with fresh
+    # adapters instead: the same model, only the adapters' optimizer moments start over.
+    base = s.get("policy.path") or BASES[cfg.get("policy", "smolvla")]
+    lora_resume = bool(resume and s["lora_rank"]) and not (Path(base).is_absolute() and not Path(base).exists())
+    if resume and s["lora_rank"] and not lora_resume:
+        _log(f"LoRA resume: {base} is not on this machine, continuing from the merged checkpoint with fresh adapters")
     policy, pre, post, optim, sched = build_policy(cfg, s, stats, cams, sd, ad, None if lora_resume else ckpt)
     if lora_resume:
         bad = policy.load_state_dict(torch.load(last / "trainable_params.pt", weights_only=False),
@@ -550,7 +555,8 @@ def run(dataset_version: str, cfg: dict[str, Any], out: Path, resume: bool = Fal
             raise RuntimeError(f"trainable_params.pt does not match the model: {bad[:5]}")
     if resume:
         state = torch.load(last / "training_state.pt", weights_only=False)
-        optim.load_state_dict(state["optimizer"])
+        if lora_resume or not s["lora_rank"]:
+            optim.load_state_dict(state["optimizer"])
         if sched is not None and state["scheduler"]:
             sched.load_state_dict(state["scheduler"])
         _log(f"resumed at step {start}")
@@ -589,12 +595,14 @@ def run(dataset_version: str, cfg: dict[str, Any], out: Path, resume: bool = Fal
         policy.train()
         optim.zero_grad(set_to_none=True)
         t_data = t_upd = time.time()
+        micro_loss = 0.0
         for micro, batch in enumerate(dl, 1):
             data_s = time.time() - t_data
             batch = pre(batch)
             with torch.autocast("cuda", dtype=torch.bfloat16, enabled=bool(s["bf16"])):
                 loss, _ = policy.forward(batch)
             (loss / s["grad_accum"]).backward()
+            micro_loss += loss.item() / s["grad_accum"]      # the step's loss: mean over its micro-batches
             if micro % s["grad_accum"]:
                 t_data = time.time()
                 continue
@@ -606,7 +614,7 @@ def run(dataset_version: str, cfg: dict[str, Any], out: Path, resume: bool = Fal
                 sched.step()
             if step % s["log_freq"] == 0:       # same fields as lerobot-train, so the Train page reads it
                 mem = torch.cuda.max_memory_allocated() / 2**30 if torch.cuda.is_available() else 0.0
-                _log(f"INFO stage:{si + 1} step:{step} loss:{loss.item():.4f} grdn:{float(gn):.3f} "
+                _log(f"INFO stage:{si + 1} step:{step} loss:{micro_loss:.4f} grdn:{float(gn):.3f} "
                      f"lr:{optim.param_groups[0]['lr']:.1e} updt_s:{time.time() - t_upd:.3f} data_s:{data_s:.3f} "
                      f"mem_gb:{mem:.2f}")
             stage_end = step == sum(per_stage[:si + 1])
@@ -621,6 +629,7 @@ def run(dataset_version: str, cfg: dict[str, Any], out: Path, resume: bool = Fal
                     import shutil
                     shutil.copytree(ck / "pretrained_model", out / "stages" / stage["name"], dirs_exist_ok=True)
             t_data = t_upd = time.time()
+            micro_loss = 0.0
     _log(f"done: {step} steps in {(time.time() - t0) / 60:.1f} min")
 
 

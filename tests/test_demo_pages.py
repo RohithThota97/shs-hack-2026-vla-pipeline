@@ -1,6 +1,7 @@
 """Demo pages (hackpipe/demo/pages.py) on a small synthetic handover recording, and the seekable static server."""
 import json
 import threading
+import urllib.error
 import urllib.request
 
 import numpy as np
@@ -83,5 +84,10 @@ def test_static_server_serves_byte_ranges(tmp_path):
             assert r.status == 206 and r.headers["Content-Range"] == "bytes 10-19/1024" and r.read() == bytes(range(10, 20))
         with urllib.request.urlopen(url) as r:
             assert r.status == 200 and len(r.read()) == 1024
+        with urllib.request.urlopen(urllib.request.Request(url, headers={"Range": "bytes=-6"})) as r:   # last 6
+            assert r.headers["Content-Range"] == "bytes 1018-1023/1024" and r.read() == bytes(range(250, 256))
+        with pytest.raises(urllib.error.HTTPError) as e:
+            urllib.request.urlopen(urllib.request.Request(url, headers={"Range": "bytes=20-10"}))
+        assert e.value.code == 416
     finally:
         srv.shutdown()
