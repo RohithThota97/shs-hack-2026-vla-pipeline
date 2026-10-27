@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>XYZ Verification</title>
+<script src="plotly.min.js"></script>
+<style>
+:root { color-scheme: light; --page: #f9f9f7; --surface: #fcfcfb; --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
+        --line: #e1e0d9; --border: rgba(11,11,11,.10); --left: #2a78d6; --right: #eb6834; }
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--page); color: var(--ink); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width: 1240px; margin: 0 auto; padding: 18px 16px 40px; }
+h1 { font-size: 20px; margin: 0 0 2px; } .sub { color: var(--ink-2); margin: 0 0 12px; font-size: 13px; }
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 12px; }
+.top { display: grid; grid-template-columns: minmax(0, 470px) minmax(0, 1fr); gap: 14px; margin-bottom: 14px; }
+@media (max-width: 860px) { .top { grid-template-columns: 1fr; } }
+video { width: 100%; aspect-ratio: 1; image-rendering: pixelated; background: #000; border-radius: 6px; display: block; }
+.eps { display: flex; gap: 6px; margin: 8px 0; flex-wrap: wrap; align-items: center; }
+button { font: inherit; font-size: 13px; border-radius: 7px; border: 1px solid var(--border); background: var(--surface); color: var(--ink); padding: 4px 10px; cursor: pointer; }
+button.on { background: var(--ink); color: var(--surface); border-color: var(--ink); }
+.readout { display: grid; grid-template-columns: auto 1fr; gap: 3px 12px; font-size: 13px; font-variant-numeric: tabular-nums; margin-top: 8px; }
+.readout .k { color: var(--ink-2); } .sw { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; vertical-align: -1px; }
+.subtask { font-weight: 600; }
+.legend { display: flex; flex-wrap: wrap; gap: 14px; font-size: 12px; color: var(--ink-2); align-items: center; margin-bottom: 6px; }
+.ramp { width: 90px; height: 8px; border-radius: 4px; display: inline-block; vertical-align: 0; margin: 0 4px; }
+.grid3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr)); gap: 14px; }
+.card { min-width: 0; } .readout span { overflow-wrap: anywhere; }
+h2 { font-size: 14px; margin: 0 0 4px; } .note { color: var(--ink-2); font-size: 12px; margin-top: 10px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>XYZ trajectory vs training video</h1>
+  <p class="sub" id="sub"></p>
+  <div class="top">
+    <div class="card">
+      <video id="vid" src="video.mp4" controls muted playsinline preload="auto"></video>
+      <div class="eps" id="eps"></div>
+      <div class="eps" id="speed"></div>
+      <div class="readout" id="ro"></div>
+    </div>
+    <div class="card">
+      <div class="legend">
+        <span><span class="sw" style="background:var(--left)"></span>left gripper<span class="ramp" style="background:linear-gradient(90deg,#cde2fb,#3987e5,#0d366b)"></span></span>
+        <span><span class="sw" style="background:var(--right)"></span>right gripper<span class="ramp" style="background:linear-gradient(90deg,#fde0d2,#eb6834,#7a2c0a)"></span></span>
+        <span>the path draws as the video plays · light → dark = early → late · grey = rest of the episode · drag to rotate</span>
+      </div>
+      <div id="p3d" style="height:470px"></div>
+    </div>
+  </div>
+  <div class="grid3">
+    <div class="card"><h2>X (m) over time</h2><div id="px" style="height:220px"></div></div>
+    <div class="card"><h2>Height (m) over time</h2><div id="py" style="height:220px"></div></div>
+    <div class="card"><h2>Z (m) over time</h2><div id="pz" style="height:220px"></div></div>
+  </div>
+  <p class="note">XYZ = gripper centre from forward kinematics of each frame's recorded joint angles (observation.state, the training
+    matrix), FR3v2 chain from the scene (matches Franka's official kinematics). Room coordinates, metres, Y up. Click a time
+    plot to jump the video there.</p>
+</main>
+<script>
+const LR = [[0, "#cde2fb"], [0.5, "#3987e5"], [1, "#0d366b"]], RR = [[0, "#fde0d2"], [0.5, "#eb6834"], [1, "#7a2c0a"]];
+const font = { family: 'system-ui, -apple-system, "Segoe UI", sans-serif', size: 11, color: "#52514e" };
+const ax = (t) => ({ title: { text: t, font }, gridcolor: "#e1e0d9", zerolinecolor: "#e1e0d9", tickfont: font });
+const vid = document.getElementById("vid");
+let D, E, epi = 0, lastPlot = 0, lastFrame = -1;
+
+const col = (P, i) => P.map(p => p[i]);
+function episodeAt(t) { for (let k = D.episodes.length - 1; k >= 0; k--) if (t >= D.episodes[k].video_from - 1e-3) return k; return 0; }
+
+function range(vals, pad) { const lo = Math.min(...vals), hi = Math.max(...vals); return [lo - pad, hi + pad]; }
+
+function drawEpisode(k) {
+  epi = k; E = D.episodes[k];
+  document.querySelectorAll("#eps button").forEach((b, i) => b.classList.toggle("on", i === k));
+  const n = E.t.length, tt = E.t, T = tt[n - 1];
+  // fixed axes for the whole episode (both arms), true scale, so the view does not jump while drawing
+  const rx = range([...col(E.left, 0), ...col(E.right, 0)], 0.03), rz = range([...col(E.left, 2), ...col(E.right, 2)], 0.03),
+        ry = range([...col(E.left, 1), ...col(E.right, 1)], 0.03), m = Math.max(rx[1] - rx[0], rz[1] - rz[0], ry[1] - ry[0]);
+  const ghost = (P) => ({ type: "scatter3d", mode: "lines", x: col(P, 0), y: col(P, 2), z: col(P, 1),
+    line: { color: "#e1e0d9", width: 3 }, hoverinfo: "skip" });
+  const trail = (P, cs) => ({ type: "scatter3d", mode: "lines", x: [P[0][0]], y: [P[0][2]], z: [P[0][1]],
+    line: { color: [0], colorscale: cs, cmin: 0, cmax: T, width: 7 }, hoverinfo: "skip" });
+  const now = (P, c, name) => ({ type: "scatter3d", mode: "markers+text", x: [P[0][0]], y: [P[0][2]], z: [P[0][1]],
+    marker: { size: 7, color: c, line: { color: "#fcfcfb", width: 2 } }, text: [name], textposition: "top center",
+    textfont: { ...font, color: c }, hoverinfo: "skip" });
+  Plotly.react("p3d", [ghost(E.left), ghost(E.right), trail(E.left, LR), trail(E.right, RR),
+                       now(E.left, "#2a78d6", "left"), now(E.right, "#eb6834", "right")],
+    { margin: { l: 0, r: 0, t: 0, b: 0 }, showlegend: false, paper_bgcolor: "rgba(0,0,0,0)", uirevision: "keep",
+      scene: { xaxis: { ...ax("X"), range: rx }, yaxis: { ...ax("Z"), range: rz }, zaxis: { ...ax("height"), range: ry },
+               aspectmode: "manual", aspectratio: { x: (rx[1] - rx[0]) / m * 1.6, y: (rz[1] - rz[0]) / m * 1.6, z: (ry[1] - ry[0]) / m * 1.6 },
+               camera: { eye: { x: 1.3, y: -1.6, z: 0.8 } } } },
+    { displaylogo: false, responsive: true });
+  [["px", 0], ["py", 1], ["pz", 2]].forEach(([id, i]) => {
+    const yl = col(E.left, i), yr = col(E.right, i);
+    Plotly.react(id, [
+      { x: tt, y: yl, mode: "lines", line: { color: "#cde2fb", width: 1.5 }, hoverinfo: "skip" },
+      { x: tt, y: yr, mode: "lines", line: { color: "#fde0d2", width: 1.5 }, hoverinfo: "skip" },
+      { x: [tt[0]], y: [yl[0]], mode: "lines", line: { color: "#2a78d6", width: 2.5 }, hovertemplate: "left %{y:.4f}<extra>%{x:.2f} s</extra>" },
+      { x: [tt[0]], y: [yr[0]], mode: "lines", line: { color: "#eb6834", width: 2.5 }, hovertemplate: "right %{y:.4f}<extra>%{x:.2f} s</extra>" }],
+      { margin: { l: 50, r: 8, t: 4, b: 30 }, showlegend: false, paper_bgcolor: "rgba(0,0,0,0)", plot_bgcolor: "#fcfcfb",
+        xaxis: { ...ax("time in episode (s)"), range: [0, T] }, yaxis: { ...ax(""), range: range([...yl, ...yr], 0.02) },
+        shapes: [{ type: "line", x0: 0, x1: 0, yref: "paper", y0: 0, y1: 1, line: { color: "#0b0b0b", width: 1.5 } }] },
+      { displaylogo: false, responsive: true });
+    document.getElementById(id).on("plotly_click", ev => { vid.currentTime = E.video_from + ev.points[0].x; });
+  });
+}
+
+function drawUpTo(i) {  // grow the trails and time lines to frame i
+  const n = i + 1, tt = E.t.slice(0, n), L = E.left.slice(0, n), R = E.right.slice(0, n);
+  Plotly.restyle("p3d", { x: [col(L, 0), col(R, 0), [L[i][0]], [R[i][0]]], y: [col(L, 2), col(R, 2), [L[i][2]], [R[i][2]]],
+                          z: [col(L, 1), col(R, 1), [L[i][1]], [R[i][1]]] }, [2, 3, 4, 5]);
+  Plotly.restyle("p3d", { "line.color": [tt, tt] }, [2, 3]);
+  [["px", 0], ["py", 1], ["pz", 2]].forEach(([id, c]) => {
+    Plotly.restyle(id, { x: [tt, tt], y: [col(L, c), col(R, c)] }, [2, 3]);
+    Plotly.relayout(id, { "shapes[0].x0": E.t[i], "shapes[0].x1": E.t[i] });
+  });
+}
+
+function update() {
+  const t = vid.currentTime, k = episodeAt(t);
+  if (k !== epi) { drawEpisode(k); lastFrame = -1; }
+  const i = Math.max(0, Math.min(E.t.length - 1, Math.round((t - E.video_from) * D.fps))), L = E.left[i], R = E.right[i];
+  const f = v => v.toFixed(4);
+  document.getElementById("ro").innerHTML = `
+    <span class="k">episode / frame</span><span>${E.episode} / ${i} &nbsp;(t = ${E.t[i].toFixed(2)} s)</span>
+    <span class="k">sub-task</span><span class="subtask">${E.subtask[i] || "—"}</span>
+    <span class="k"><span class="sw" style="background:var(--left)"></span>left XYZ</span><span>${f(L[0])}, ${f(L[1])}, ${f(L[2])}</span>
+    <span class="k"><span class="sw" style="background:var(--right)"></span>right XYZ</span><span>${f(R[0])}, ${f(R[1])}, ${f(R[2])}</span>
+    <span class="k">grippers (state / cmd)</span><span>left ${E.grip_left[i].toFixed(2)} / ${E.cmd_left[i].toFixed(2)} · right ${E.grip_right[i].toFixed(2)} / ${E.cmd_right[i].toFixed(2)}</span>`;
+  const now = performance.now();
+  if (i !== lastFrame && (now - lastPlot > 60 || vid.paused)) {  // plots redraw ~15 Hz while playing, at once when paused
+    lastPlot = now; lastFrame = i;
+    drawUpTo(i);
+  }
+}
+
+function loop() { update(); if (!vid.paused && !vid.ended) requestAnimationFrame(loop); }
+fetch("data.json").then(r => r.json()).then(d => {
+  D = d;
+  document.getElementById("sub").textContent = `${D.video} (${D.camera}) holds ${D.episodes.length} episodes. Play or scrub the video: the markers and readout follow the frame shown.`;
+  document.getElementById("eps").innerHTML = "<span class='k' style='color:var(--ink-2);font-size:13px'>jump to:</span>" +
+    D.episodes.map((e, k) => `<button data-k="${k}">episode ${e.episode}</button>`).join("");
+  document.querySelectorAll("#eps button").forEach(b => b.onclick = () => { vid.currentTime = D.episodes[+b.dataset.k].video_from; });
+  document.getElementById("speed").innerHTML = "<span style='color:var(--ink-2);font-size:13px'>speed:</span>" +
+    [0.25, 0.5, 1, 2].map(s => `<button data-s="${s}" class="${s === 1 ? "on" : ""}">${s}×</button>`).join("");
+  document.querySelectorAll("#speed button").forEach(b => b.onclick = () => {
+    vid.playbackRate = +b.dataset.s;
+    document.querySelectorAll("#speed button").forEach(x => x.classList.toggle("on", x === b));
+  });
+  drawEpisode(0); update();
+  vid.addEventListener("play", loop); vid.addEventListener("seeked", update); vid.addEventListener("timeupdate", update);
+});
+</script>
+</body>
+</html>

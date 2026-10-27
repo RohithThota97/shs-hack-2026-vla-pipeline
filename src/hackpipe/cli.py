@@ -201,6 +201,12 @@ def main(argv: list[str] | None = None) -> None:
     src.add_argument("--model", help="registered model version")
     src.add_argument("--checkpoint", help="pretrained_model folder")
     src.add_argument("--dummy", action="store_true", help="holds the start pose — bridge tests only, FAKE")
+    src.add_argument("--trajectory", metavar="DATASET",
+                     help="no model: a recorded episode as a closed-loop lookup (the baseline any model must beat)")
+    src.add_argument("--replay", metavar="DATASET", help="a recorded episode's actions open loop (sim check, FAKE)")
+    src.add_argument("--pi05", metavar="CKPT", help="openpi pi0.5 checkpoint (params/ + assets/fr3_duo/; openpi venv)")
+    s.add_argument("--episode", type=int, default=0, help="with --trajectory / --replay")
+    s.add_argument("--horizon", type=int, default=50, help="with --pi05: actions per inference")
     s.add_argument("--host", default=None)
     s.add_argument("--port", type=int, default=None)
     s.add_argument("--n-action-steps", type=int)
@@ -212,6 +218,34 @@ def main(argv: list[str] | None = None) -> None:
     s = sub.add_parser("serving", help="the deploy port: status / stop / start (the deployed model, detached)")
     s.add_argument("action", choices=["status", "stop", "start"])
     s.add_argument("--port", type=int, default=None)
+    s = sub.add_parser("diagnose", help="diagnostic probes of a model, a server or a sim run (hackpipe/diagnose.py)")
+    s.add_argument("tool", choices=["probe-frames", "io", "ablation", "server", "pi05", "grasp", "episode"])
+    s.add_argument("--source", default="data/raw/fr3_duo_handover_84", help="probe-frames: recorded dataset")
+    s.add_argument("--probe", default="outputs/diagnose/probe_frames.npz", help="probe frames (.npz)")
+    s.add_argument("--checkpoint", help="io / ablation: LeRobot pretrained_model folder; pi05: openpi checkpoint")
+    s.add_argument("--frame", type=int, default=2, help="io: index into the probe frames (2 = episode 0, frame 330)")
+    s.add_argument("--stride", type=int, default=5, help="io / ablation: 30 fps frames per policy action (6 Hz: 5)")
+    s.add_argument("--url", default="http://127.0.0.1:8090", help="server: the running policy server")
+    s.add_argument("--calls", type=int, help="server: /act calls per frame (default: the server's n_action_steps)")
+    s.add_argument("--horizons", default="50", help="pi05: comma-separated action horizons to try")
+    s.add_argument("--ref", default="outputs/improve/ref.json", help="grasp / episode: reference file")
+    s.add_argument("runs", nargs="*", help="grasp: step logs (.jsonl) of sim runs; episode: one step log")
+    s.add_argument("--out", default="outputs/diagnose", help="io: output folder")
+    s = sub.add_parser("pages", help="static explainer pages for the demo / pitch (hackpipe/demo/pages.py)")
+    s.add_argument("page", choices=["site", "grid", "subtasks", "xyz", "tcp", "retarget", "serve"])
+    s.add_argument("--out", help="output folder (tcp: .html file); default outputs/demo/<page>")
+    s.add_argument("--source", default="data/raw/fr3_duo_handover_84", help="recorded handover dataset")
+    s.add_argument("--episode", type=int, default=0)
+    s.add_argument("--step-cm", type=float, default=5.0, help="site / grid: grid step on the cart top")
+    s.add_argument("--camera", default="external_camera", help="xyz: video of this camera")
+    s.add_argument("--file", type=int, default=0, help="xyz: video file index (chunk 0)")
+    s.add_argument("--arm", choices=["left", "right"], default="left", help="tcp")
+    s.add_argument("--start", type=float, default=7.6, help="tcp: window start (s)")
+    s.add_argument("--seconds", type=float, default=20 / 6, help="tcp: window length (s)")
+    s.add_argument("--dx", type=float, default=3.0, help="retarget: box shift along room X (cm)")
+    s.add_argument("--dz", type=float, default=0.0, help="retarget: box shift along room Z (cm)")
+    s.add_argument("--dir", help="serve: folder to serve (default outputs/demo)")
+    s.add_argument("--port", type=int, default=8779, help="serve")
     s = sub.add_parser("publish", help="push a model + model card to the Hugging Face Hub (never the dataset)")
     s.add_argument("--model", required=True)
     s.add_argument("--repo", help="<hf-user>/<name>; default hub.model_repo_id in configs/project.yaml")
@@ -244,6 +278,51 @@ def main(argv: list[str] | None = None) -> None:
             _print(writelock.acquire(force=True))
         else:
             _print({"writer": writelock.holder(), "this_machine": writelock.machine_id()})
+        return
+    if args.cmd == "diagnose":        # reads files and models only, no registry
+        from hackpipe import diagnose as dg
+        from hackpipe.common.config import resolve
+        t = args.tool
+        if t == "probe-frames":
+            _print(dg.export_probe_frames(resolve(args.source), resolve(args.probe)))
+        elif t in ("grasp", "episode"):
+            if not args.runs:
+                sys.exit("give the step log(s) of the sim run(s)")
+            ref = json.loads(resolve(args.ref).read_text())
+            _print({r: dg.grasp_timing(ref, dg.read_steps(r)) for r in args.runs} if t == "grasp"
+                   else dg.episode_report(ref, dg.read_steps(args.runs[0])))
+        else:
+            F = dg.load_probe(resolve(args.probe))
+            if t == "server":
+                _print(dg.server_check(args.url, F, args.calls))
+            elif t == "pi05":
+                if not args.checkpoint:
+                    sys.exit("--checkpoint: the openpi checkpoint folder (params/ + assets/fr3_duo/)")
+                _print({"training_step": dg.pi05_step(args.checkpoint),
+                        **dg.pi05_variants(args.checkpoint, F, tuple(int(h) for h in args.horizons.split(",")))})
+            else:
+                if not args.checkpoint:
+                    sys.exit("--checkpoint: a LeRobot pretrained_model folder")
+                predict = dg.chunk_fn(str(resolve(args.checkpoint)))
+                _print(dg.io_example(predict, F, args.frame, resolve(args.out), args.stride) if t == "io"
+                       else dg.ablation(predict, F, stride=args.stride))
+        return
+    if args.cmd == "pages":           # reads datasets only, no registry
+        from hackpipe.common.config import resolve
+        from hackpipe.demo import pages
+        if args.page == "serve":
+            pages.serve(resolve(args.dir or "outputs/demo"), args.port)
+            return
+        default = "outputs/demo/tcp_window.html" if args.page == "tcp" else f"outputs/demo/{args.page}"
+        out = resolve(args.out or default)
+        r = {"site": lambda: pages.build_site(out, args.source, args.step_cm),
+             "grid": lambda: pages.build_grid(out, args.source, args.step_cm, ep=args.episode),
+             "subtasks": lambda: pages.build_subtasks(out, args.source, args.episode),
+             "xyz": lambda: pages.build_xyz(out, args.source, args.camera, 0, args.file),
+             "tcp": lambda: pages.build_tcp(out, args.source, args.episode, args.arm, args.start, args.seconds),
+             "retarget": lambda: pages.build_retarget(out, args.dx, args.dz, args.source, args.episode)}[args.page]()
+        _print({"wrote": str(out), **r})
+        print(f"view: hackpipe pages serve --dir {out.parent if args.page == 'tcp' else out}")
         return
     if args.cmd == "state":           # before the registry is opened: import replaces the file itself
         from hackpipe.common import state
@@ -463,7 +542,7 @@ def main(argv: list[str] | None = None) -> None:
         from hackpipe.deploy import server
         from hackpipe.deploy.serving import settings
         cfg = settings()
-        ckpt, hz = args.checkpoint, 6.0
+        ckpt, hz = args.checkpoint, 30.0 if (args.pi05 or args.replay) else 6.0
         if args.model:
             from hackpipe.deploy.serving import policy_rate
             m = reg.get_model(args.model)
@@ -471,8 +550,11 @@ def main(argv: list[str] | None = None) -> None:
                 sys.exit(f"Unknown model {args.model}")
             from hackpipe.common.config import resolve
             ckpt, hz = str(resolve(m["checkpoint_dir"])), policy_rate(m, reg)
+        from hackpipe.common.config import resolve
+        path = lambda v: str(resolve(v)) if v else None
         policy = server.build_policy(ckpt, args.model, args.dummy, args.n_action_steps, args.grasp_extend,
-                                     args.grasp_hold, hz, args.device, args.any_robot)
+                                     args.grasp_hold, hz, args.device, args.any_robot, path(args.trajectory),
+                                     path(args.replay), args.episode, args.pi05, args.horizon)
         reg.close()
         server.serve(policy, args.host or cfg["host"], args.port or cfg["port"], hz, args.probe_source)
     elif args.cmd == "serving":

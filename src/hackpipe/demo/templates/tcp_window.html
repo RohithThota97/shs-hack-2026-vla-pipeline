@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gripper Trajectory</title>
+<script>/*PLOTLY*/</script>
+<style>
+:root { color-scheme: light; --page: #f9f9f7; --surface: #fcfcfb; --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
+        --grid: #e1e0d9; --border: rgba(11,11,11,.10); }
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--page); color: var(--ink); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width: 1200px; margin: 0 auto; padding: 20px 16px 40px; }
+h1 { font-size: 20px; margin: 0 0 4px; }
+.sub { color: var(--ink-2); margin: 0 0 14px; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; margin-bottom: 14px; }
+.tile, .card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; }
+.tile { padding: 10px 12px; } .tile .k { color: var(--ink-2); font-size: 12px; } .tile .v { font-size: 20px; font-weight: 600; }
+.card { padding: 10px; margin-bottom: 14px; } .card h2 { font-size: 14px; margin: 2px 4px 6px; }
+.grid3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; }
+.grid3 .card { margin-bottom: 0; }
+.legend { display: flex; flex-wrap: wrap; gap: 14px; font-size: 12px; color: var(--ink-2); margin: 0 0 10px; align-items: center; }
+.ramp { width: 160px; height: 10px; border-radius: 5px; background: linear-gradient(90deg, #cde2fb, #86b6ef, #3987e5, #1c5cab, #0d366b); }
+.note { color: var(--ink-2); font-size: 13px; }
+</style>
+</head>
+<body>
+<main>
+  <h1 id="title">Gripper-centre trajectory</h1>
+  <p class="sub" id="sub"></p>
+  <div class="tiles" id="tiles"></div>
+  <div class="legend"><span>time:</span><span id="t0"></span><span class="ramp"></span><span id="t1"></span>
+    <span>· dots = the 20 policy steps (6 Hz) · grey box = the box in the hand-out scene</span></div>
+  <div class="card"><h2>3D (drag to rotate) — X and Z horizontal, height up; each axis stretched to fill (not to scale, the 2D views are)</h2><div id="p3d" style="height:480px"></div></div>
+  <div class="grid3">
+    <div class="card"><h2>Top view (X vs Z)</h2><div id="top" style="height:330px"></div></div>
+    <div class="card"><h2>Front view (X vs height)</h2><div id="front" style="height:330px"></div></div>
+    <div class="card"><h2>Side view (Z vs height)</h2><div id="side" style="height:330px"></div></div>
+  </div>
+  <p class="note">Positions from forward kinematics of the recorded joint angles (scene chain = official Franka FR3v2 geometry,
+    gripper centre 0.216 m beyond joint 7). Room coordinates in metres, Y is up.</p>
+</main>
+<script>
+const D = /*DATA*/null;
+const RAMP = [[0, "#cde2fb"], [0.25, "#86b6ef"], [0.5, "#3987e5"], [0.75, "#1c5cab"], [1, "#0d366b"]];
+const T0 = D.t[0], T1 = D.t[D.t.length - 1], N = D.t.length - 1;
+document.getElementById("title").textContent = `${D.arm[0].toUpperCase() + D.arm.slice(1)} gripper centre, ${T0.toFixed(1)}–${T1.toFixed(1)} s`;
+document.getElementById("sub").textContent = `Recorded handover episode ${D.episode}: one 3.3 s window (20 policy steps) mapped from joint angles to room coordinates.`;
+document.getElementById("t0").textContent = `${T0.toFixed(1)} s`;
+document.getElementById("t1").textContent = `${T1.toFixed(1)} s`;
+const disp = D.displacement_mm;
+document.getElementById("tiles").innerHTML = [
+  ["Path length", `${D.path_len_mm.toFixed(0)} mm`], ["Start → end, X", `${disp[0] > 0 ? "+" : ""}${disp[0]} mm`],
+  ["Start → end, height", `${disp[1] > 0 ? "+" : ""}${disp[1]} mm`], ["Start → end, Z", `${disp[2] > 0 ? "+" : ""}${disp[2]} mm`],
+  ["Gripper (state)", `${D.grip[0].toFixed(2)} → ${D.grip[N].toFixed(2)}`]].map(([k, v]) => `<div class="tile"><div class="k">${k}</div><div class="v">${v}</div></div>`).join("");
+
+const hover = D.t.map((t, i) => `t = ${t.toFixed(2)} s<br>x ${D.x[i].toFixed(4)}  y(up) ${D.y[i].toFixed(4)}  z ${D.z[i].toFixed(4)}<br>gripper ${D.grip[i].toFixed(2)}`);
+const font = { family: 'system-ui, -apple-system, "Segoe UI", sans-serif', size: 11, color: "#52514e" };
+const axis = (title) => ({ title: { text: title, font }, gridcolor: "#e1e0d9", zerolinecolor: "#e1e0d9", tickfont: font, showline: true, linecolor: "#c3c2b7" });
+const B = D.box;
+const boxEdges = (a, b) => { // 12 edges of the axis-aligned box, mapped to plot axes (a, b, c) by index arrays
+  const c = [[B.min[0], B.max[0]], [B.min[1], B.max[1]], [B.min[2], B.max[2]]], xs = [], ys = [], zs = [];
+  for (const i of [0, 1]) for (const j of [0, 1]) {
+    xs.push(c[0][0], c[0][1], null); ys.push(c[1][i], c[1][i], null); zs.push(c[2][j], c[2][j], null);
+    xs.push(c[0][i], c[0][i], null); ys.push(c[1][0], c[1][1], null); zs.push(c[2][j], c[2][j], null);
+    xs.push(c[0][i], c[0][i], null); ys.push(c[1][j], c[1][j], null); zs.push(c[2][0], c[2][1], null);
+  }
+  return { x: xs, y: ys, z: zs };
+};
+const end = (pts, i) => pts.map(p => p[i]);
+
+// 3D: plot x = room X, plot y = room Z, plot z = height (room Y)
+const be = boxEdges();
+Plotly.newPlot("p3d", [
+  { type: "scatter3d", mode: "lines", x: be.x, y: be.z, z: be.y, line: { color: "#898781", width: 3 }, name: "scene box", hoverinfo: "skip" },
+  { type: "scatter3d", mode: "lines+markers", x: D.x, y: D.z, z: D.y, text: hover, hovertemplate: "%{text}<extra></extra>",
+    line: { color: D.t, colorscale: RAMP, width: 8 }, marker: { size: 2, color: D.t, colorscale: RAMP }, name: "path" },
+  { type: "scatter3d", mode: "markers", x: D.steps.map(i => D.x[i]), y: D.steps.map(i => D.z[i]), z: D.steps.map(i => D.y[i]),
+    marker: { size: 5, color: D.steps.map(i => D.t[i]), colorscale: RAMP, cmin: T0, cmax: T1, line: { color: "#fcfcfb", width: 1 } },
+    text: D.steps.map(i => hover[i]), hovertemplate: "%{text}<extra>policy step</extra>", name: "policy steps" },
+  { type: "scatter3d", mode: "text", x: [D.x[0], D.x[N]], y: [D.z[0], D.z[N]], z: [D.y[0], D.y[N]],
+    text: [`start ${T0.toFixed(1)} s`, `end ${T1.toFixed(1)} s`], textfont: { ...font, size: 12, color: "#0b0b0b" }, textposition: "top center", hoverinfo: "skip" },
+], { margin: { l: 0, r: 0, t: 0, b: 0 }, showlegend: false, paper_bgcolor: "rgba(0,0,0,0)",
+     scene: { xaxis: axis("X (m)"), yaxis: axis("Z (m)"), zaxis: axis("height (m)"), aspectmode: "cube",
+              camera: { eye: { x: 1.4, y: -1.4, z: 0.9 } } } }, { displaylogo: false, responsive: true });
+
+function view(id, hx, hy, xl, yl, bx, by) {
+  const bxv = [B.min[bx], B.max[bx], B.max[bx], B.min[bx], B.min[bx]], byv = [B.min[by], B.min[by], B.max[by], B.max[by], B.min[by]];
+  Plotly.newPlot(id, [
+    { x: bxv, y: byv, mode: "lines", line: { color: "#898781", width: 1.5, dash: "dot" }, fill: "toself", fillcolor: "rgba(137,135,129,.10)", hoverinfo: "skip", name: "box" },
+    { x: hx, y: hy, mode: "lines", line: { color: "#c3c2b7", width: 1 }, hoverinfo: "skip" },
+    { x: hx, y: hy, mode: "markers", marker: { size: 6, color: D.t, colorscale: RAMP, cmin: T0, cmax: T1 }, text: hover, hovertemplate: "%{text}<extra></extra>" },
+    { x: D.steps.map(i => hx[i]), y: D.steps.map(i => hy[i]), mode: "markers",
+      marker: { size: 10, color: D.steps.map(i => D.t[i]), colorscale: RAMP, cmin: T0, cmax: T1, line: { color: "#fcfcfb", width: 2 } },
+      text: D.steps.map(i => hover[i]), hovertemplate: "%{text}<extra>policy step</extra>" },
+    { x: [hx[0], hx[N]], y: [hy[0], hy[N]], mode: "text", text: ["start", "end"], textposition: ["top right", "bottom left"],
+      textfont: { ...font, size: 12, color: "#0b0b0b" }, hoverinfo: "skip" },
+  ], { margin: { l: 56, r: 10, t: 6, b: 40 }, showlegend: false, paper_bgcolor: "rgba(0,0,0,0)", plot_bgcolor: "#fcfcfb",
+       xaxis: axis(xl), yaxis: { ...axis(yl), scaleanchor: "x", scaleratio: 1 } }, { displaylogo: false, responsive: true });
+}
+view("top", D.x, D.z, "X (m)", "Z (m)", 0, 2);
+view("front", D.x, D.y, "X (m)", "height (m)", 0, 1);
+view("side", D.z, D.y, "Z (m)", "height (m)", 2, 1);
+</script>
+</body>
+</html>

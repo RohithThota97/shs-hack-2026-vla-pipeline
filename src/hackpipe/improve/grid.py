@@ -24,7 +24,7 @@ from typing import Any
 
 import numpy as np
 
-from hackpipe.evaluation.kinematics import DQ_MAX, FLANGE_D, Q_MAX, Q_MIN, fk_T, ik
+from hackpipe.evaluation.kinematics import DQ_MAX, Q_MAX, Q_MIN, fk_T, ik
 from hackpipe.sim import scene
 
 LEFT, LEFT_GRIP, RIGHT_GRIP = slice(0, 7), 7, 15
@@ -115,9 +115,7 @@ def retarget(actions: np.ndarray, offset: np.ndarray, cfg: dict[str, Any] | None
 def grasp_world(actions: np.ndarray, cfg: dict[str, Any] | None = None) -> np.ndarray:
     """World position (3,) of the left gripper centre at the demo's grasp (scene arm base + the Robotiq's TCP)."""
     A = np.asarray(actions, np.float64)
-    T = fk_T(A[phases(A, cfg)["grasp"], LEFT][None], tcp=False)[0]          # flange
-    p = T[:3, 3] + T[:3, 2] * (scene.tcp_offset("left") - FLANGE_D)
-    return scene.to_world("left", p[None])[0]
+    return scene.tcp_world("left", A[phases(A, cfg)["grasp"], LEFT][None])[0]
 
 
 def cart_offsets(actions: np.ndarray, step_cm: float = 5.0, cfg: dict[str, Any] | None = None

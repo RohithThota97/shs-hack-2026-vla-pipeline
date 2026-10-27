@@ -334,3 +334,42 @@ def test_new_version_without_the_base_sources_files(approved, dataset):
     m = create_dataset_version(reg, base="ds-v1", subtasks=_fake_labels(tmp / "labels", v1))
     assert m["preprocessing"]["schema"] == v1["preprocessing"]["schema"]
     assert m["preprocessing"]["normalisation_stats"]["sha256"] == v1["preprocessing"]["normalisation_stats"]["sha256"]
+
+
+def test_grad_accum_and_lora_settings():
+    s = cur.settings({"args": {"grad_accum": "4", "lora_rank": 16}})
+    assert s["grad_accum"] == 4 and s["lora_rank"] == 16 and s["lora_targets"] == "vlm" and s["lora_alpha"] is None
+    assert cur.settings({})["grad_accum"] == 1 and cur.settings({})["lora_rank"] == 0
+    for bad in ({"grad_accum": 0}, {"lora_rank": -1}, {"lora_targets": "expert"}):
+        with pytest.raises(ValueError):
+            cur.settings({"args": bad})
+    with pytest.raises(ValueError, match="SmolVLA"):
+        cur.settings({"policy": "pi05", "args": {"lora_rank": 8}})
+    # an accumulated step draws batch × grad_accum samples, and a resume skips exactly what was used
+    w = np.ones(10)
+    full = cur.stage_draws(w, 6 * 8 * 4, 1, 0, 0.3)
+    assert np.array_equal(cur.stage_draws(w, 6 * 8 * 4, 1, 0, 0.3, skip=2 * 8 * 4), full[2 * 8 * 4:])
+
+
+def test_lora_merges_into_plain_linear_layers():
+    torch = pytest.importorskip("torch")
+    from hackpipe.training import lora
+    torch.manual_seed(0)
+    net = torch.nn.Sequential(torch.nn.Linear(6, 5), torch.nn.ReLU(), torch.nn.Linear(5, 4))
+    head = torch.nn.Linear(4, 2)
+    x = torch.randn(3, 6)
+    before = net(x).detach()
+    assert lora.add_lora([net], r=2) == 2
+    assert torch.allclose(net(x), before)                                  # B starts at zero: no change at step 0
+    assert {n for n, p in net.named_parameters() if p.requires_grad} == {"0.lora_A", "0.lora_B", "2.lora_A", "2.lora_B"}
+    with torch.no_grad():
+        for _, _, a in lora.adapters(net):
+            a.lora_B.normal_()
+    adapted = net(x).detach()
+    with lora.merged(net) as plain:
+        assert not lora.adapters(plain) and isinstance(plain[0], torch.nn.Linear)
+        assert torch.allclose(plain(x), adapted, atol=1e-5)               # the merged checkpoint = the adapted model
+    assert len(lora.adapters(net)) == 2 and torch.allclose(net(x), adapted)   # restored after saving
+    assert set(lora.trainable_state(net)) == {"0.lora_A", "0.lora_B", "2.lora_A", "2.lora_B"}
+    with pytest.raises(ValueError):
+        lora.scopes(head)

@@ -1,0 +1,311 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Box Grid Player</title>
+<script src="plotly.min.js"></script>
+<style>
+:root { color-scheme: light; --page: #f9f9f7; --surface: #fcfcfb; --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
+        --border: rgba(11,11,11,.10); --bad: #d03b3b; --off: #e1e0d9; }
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--page); color: var(--ink); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width: 1320px; margin: 0 auto; padding: 18px 16px 40px; }
+h1 { font-size: 20px; margin: 0 0 2px; } .sub { color: var(--ink-2); margin: 0 0 12px; font-size: 13px; }
+h2 { font-size: 14px; margin: 0 0 6px; }
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 12px; min-width: 0; }
+.row2 { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); gap: 14px; margin-bottom: 14px; }
+@media (max-width: 960px) { .row2 { grid-template-columns: 1fr; } }
+canvas { display: block; width: 100%; touch-action: none; }
+#cam { cursor: grab; border-radius: 6px; image-rendering: pixelated; background: #000; }
+#cam.dragging { cursor: grabbing; }
+#grid { cursor: pointer; border-radius: 4px; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 12px; color: var(--ink-2); align-items: center; margin-top: 6px; }
+.chip { display: inline-block; width: 12px; height: 12px; border-radius: 3px; vertical-align: -2px; margin-right: 5px; }
+.ramp { width: 90px; height: 8px; border-radius: 4px; background: linear-gradient(90deg, #cde2fb, #6da7ec, #2a78d6, #1c5cab, #0d366b); display: inline-block; vertical-align: 0; margin: 0 4px; }
+.info { margin-top: 10px; font-size: 13px; display: grid; grid-template-columns: auto 1fr; gap: 2px 12px; font-variant-numeric: tabular-nums; }
+.info .k { color: var(--ink-2); }
+.status-ok { color: #006300; font-weight: 600; } .status-bad { color: var(--bad); font-weight: 600; }
+.bar { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; margin-bottom: 6px; font-size: 13px; }
+.bar input[type=range] { flex: 1; min-width: 160px; }
+button { font: inherit; font-size: 13px; border-radius: 7px; border: 1px solid var(--border); background: var(--surface); padding: 4px 10px; cursor: pointer; }
+button.on { background: var(--ink); color: var(--surface); }
+.readout { font-variant-numeric: tabular-nums; font-size: 12px; color: var(--ink-2); }
+.sw { display: inline-block; width: 18px; height: 0; border-top: 3px solid; vertical-align: 3px; margin-right: 5px; }
+.grid3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr)); gap: 14px; }
+.note { color: var(--ink-2); font-size: 12px; margin-top: 12px; }
+.hint { font-size: 13px; color: var(--ink-2); margin: 0 0 8px; }
+.explain { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(250px, 100%), 1fr)); gap: 10px; margin-bottom: 14px; }
+.explain div { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; font-size: 13px; color: var(--ink-2); }
+.explain b { color: var(--ink); display: block; margin-bottom: 2px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Box grid player</h1>
+  <p class="sub" id="sub"></p>
+  <div class="explain">
+    <div><b>1 · Build the table once (offline)</b>For every 5 cm box position on the cart, inverse kinematics (step 2) bends the one recorded handover so the gripper reaches that spot. Each feasible position gets its own ready-made trajectory: a lookup table (LUT). Red cells: the arm cannot get there.</div>
+    <div><b>2 · Find the box with one camera</b>The head camera's position and lens are known, so every pixel on the cart maps to one spot on the table. The box is detected in the picture and converted to "dx, dz cm from the recorded spot".</div>
+    <div><b>3 · Look up, don't solve</b>The spot is snapped to the nearest grid cell and that cell's trajectory is played. No solving at run time: the camera picks a row in the table. Try it: drag the box in the picture.</div>
+  </div>
+  <div class="row2">
+    <div class="card">
+      <h2>Place the box in the camera image</h2>
+      <p class="hint">Drag the box (or click anywhere on the cart). It snaps to the nearest feasible grid cell and that cell's
+        trajectory loads on the right. Head camera, training video, episode 0 at 1.0 s.</p>
+      <canvas id="cam"></canvas>
+      <div class="legend">
+        <span><span class="chip" style="background:rgba(57,135,229,.55)"></span>arm can do it</span>
+        <span><span class="chip" style="background:rgba(208,59,59,.6)"></span>out of reach</span>
+        <span>○ recorded box spot · + your pointer</span>
+      </div>
+      <div class="info" id="caminfo"></div>
+    </div>
+    <div class="card">
+      <div class="bar">
+        <button id="play">▶ Play</button><span>speed</span><span id="speeds"></span>
+        <input type="range" id="slider" min="0" value="0"><span class="readout" id="tnow"></span>
+      </div>
+      <div class="legend" style="margin:0 0 4px"><span><span class="sw" style="border-color:#b4b2a9"></span>original</span>
+        <span><span class="sw" style="border-color:#2a78d6"></span>selected box position (light → dark = time)</span><span>· dots = grasp points of all feasible cells</span></div>
+      <div class="readout" id="ro"></div>
+      <div id="p3d" style="height:430px"></div>
+    </div>
+  </div>
+  <div class="row2">
+    <div class="card">
+      <h2 id="gridtitle">All box positions on the cart (top view)</h2>
+      <canvas id="grid"></canvas>
+      <div class="legend">
+        <span>feasible: joint change<span class="ramp"></span><span id="gscale"></span></span>
+        <span><span class="chip" style="background:var(--bad)"></span>out of reach (joint limits / accuracy / jerk)</span>
+        <span><span class="chip" style="background:var(--off)"></span>off the cart</span>
+        <span>○ recorded spot · arrow keys move</span>
+      </div>
+      <div class="info" id="info"></div>
+    </div>
+    <div class="card">
+      <h2>Joint angles: selected minus recorded (degrees)</h2><div class="legend" id="jleg" style="margin:0 0 4px"></div><div id="pj" style="height:250px"></div>
+    </div>
+  </div>
+  <div class="grid3">
+    <div class="card"><h2>X (m)</h2><div id="px" style="height:190px"></div></div>
+    <div class="card"><h2>Height (m)</h2><div id="py" style="height:190px"></div></div>
+    <div class="card"><h2>Z (m)</h2><div id="pz" style="height:190px"></div></div>
+  </div>
+  <p class="note">Each feasible cell is the one recorded handover retargeted by inverse kinematics to that box position
+    (tools/augment_box_grid.py): left-arm gripper path shifted, recorded orientation, FR3 joint limits; right arm and gripper timing
+    unchanged. Camera: scene head-camera pose + recorder intrinsics, box detected in the real frame, one-shot calibration
+    (tools/camera_grid.py). Room coordinates in metres, Y up. Collisions are not checked.</p>
+</main>
+<script>
+const RAMP = [[0, "#cde2fb"], [0.5, "#3987e5"], [1, "#0d366b"]];
+const STEPS = ["#cde2fb", "#9ec5f4", "#6da7ec", "#3987e5", "#2a78d6", "#256abf", "#1c5cab", "#184f95", "#0d366b"];
+const JC = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#6250d6"];
+const font = { family: 'system-ui, -apple-system, "Segoe UI", sans-serif', size: 11, color: "#52514e" };
+const ax = (t) => ({ title: { text: t, font }, gridcolor: "#e1e0d9", zerolinecolor: "#c3c2b7", tickfont: font });
+const col = (P, i) => P.map(p => p[i]);
+let I, C, N, byKey = {}, okCells = [], sel = null, cur = null, idx = 0, playing = false, speed = 2, last = 0, cache = {};
+let STEP = 10, lo = 0, hi = 1, bg, sprite, view = null, drag = false, pointer = null, pointerCell = null;
+const key = (dx, dz) => `${Math.round(dx)},${Math.round(dz)}`;  // mm
+
+Promise.all([fetch("index.json").then(r => r.json()), fetch("camera/camera.json").then(r => r.json()).catch(() => null)]).then(([d, c]) => {
+  I = d; C = c; N = d.t.length; STEP = d.step_mm || 10;
+  d.cells.forEach(cl => { byKey[key(cl.box_dx_mm, cl.box_dz_mm)] = cl; if (cl.status === "ok") okCells.push(cl); });
+  const ch = okCells.map(e => e.max_joint_change_deg); lo = Math.min(...ch); hi = Math.max(...ch);
+  const n = { ok: okCells.length, out: d.cells.filter(c => c.status === "out_of_reach").length };
+  const xr = [Math.min(...okCells.map(c => c.box_dx_mm)), Math.max(...okCells.map(c => c.box_dx_mm))], zr = [Math.min(...okCells.map(c => c.box_dz_mm)), Math.max(...okCells.map(c => c.box_dz_mm))];
+  document.getElementById("sub").textContent = `${n.ok} feasible box positions (${STEP / 10} cm grid over the cart top: dx ${xr[0] / 10}…${xr[1] / 10} cm, dz ${zr[0] / 10}…${zr[1] / 10} cm), ${n.out} out of the arm's reach. Each feasible position has its own left-arm trajectory.`;
+  document.getElementById("gscale").textContent = `${lo.toFixed(1)}° … ${hi.toFixed(1)}°`;
+  document.getElementById("jleg").innerHTML = JC.map((c, j) => `<span><span class="sw" style="border-color:${c}"></span>joint ${j + 1}</span>`).join("");
+  const sl = document.getElementById("slider"); sl.max = N - 1; sl.oninput = () => { idx = +sl.value; render(); };
+  document.getElementById("speeds").innerHTML = [1, 2, 4, 8].map(v => `<button data-s="${v}" class="${v === 2 ? "on" : ""}">${v}×</button>`).join(" ");
+  document.querySelectorAll("#speeds button").forEach(b => b.onclick = () => { speed = +b.dataset.s; document.querySelectorAll("#speeds button").forEach(x => x.classList.toggle("on", x === b)); });
+  document.getElementById("play").onclick = () => { playing = !playing; if (playing && idx >= N - 1) idx = 0;
+    document.getElementById("play").textContent = playing ? "❚❚ Pause" : "▶ Play"; last = performance.now(); if (playing) requestAnimationFrame(tick); };
+  document.getElementById("gridtitle").textContent = `All box positions on the cart (top view, ${STEP / 10} cm cells)`;
+  initGrid();
+  document.addEventListener("keydown", ev => {
+    const mv = { ArrowLeft: [-STEP, 0], ArrowRight: [STEP, 0], ArrowUp: [0, STEP], ArrowDown: [0, -STEP] }[ev.key];
+    if (!mv || !sel || ev.target.tagName === "INPUT") return; ev.preventDefault();
+    const nx = byKey[key(sel.box_dx_mm + mv[0], sel.box_dz_mm + mv[1])]; if (nx) select(nx);
+  });
+  select(byKey[key(0, 0)]);
+  if (C) initCamera();
+  window.addEventListener("resize", () => { drawGrid(); if (C) layoutCamera(); });
+});
+
+// ---------------------------------------------------------------- grid heatmap
+function gridGeom() {
+  const cv = document.getElementById("grid"), xs = I.dx_mm, zs = I.dz_mm, W = cv.clientWidth, cs = W / xs.length;
+  return { cv, xs, zs, cs, W, H: cs * zs.length };
+}
+function initGrid() {
+  const cv = document.getElementById("grid");
+  cv.addEventListener("click", ev => {
+    const g = gridGeom(), r = cv.getBoundingClientRect(), i = Math.floor((ev.clientX - r.left) / g.cs), j = g.zs.length - 1 - Math.floor((ev.clientY - r.top) / g.cs);
+    const cl = byKey[key(g.xs[i], g.zs[j])]; if (cl) select(cl);
+  });
+  drawGrid();
+}
+function cellColor(cl) {
+  if (cl.status === "off_cart") return "#e1e0d9";
+  if (cl.status !== "ok") return "#d03b3b";
+  return STEPS[Math.round((cl.max_joint_change_deg - lo) / (hi - lo || 1) * (STEPS.length - 1))];
+}
+function drawGrid() {
+  const g = gridGeom(), dpr = window.devicePixelRatio || 1;
+  g.cv.width = g.W * dpr; g.cv.height = g.H * dpr; g.cv.style.height = g.H + "px";
+  const x = g.cv.getContext("2d"); x.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.zs.forEach((dz, j) => g.xs.forEach((dx, i) => {
+    const cl = byKey[key(dx, dz)]; if (!cl) return;
+    x.fillStyle = cellColor(cl); x.fillRect(i * g.cs, (g.zs.length - 1 - j) * g.cs, Math.max(1, g.cs - 0.4), Math.max(1, g.cs - 0.4));
+  }));
+  const i0 = g.xs.indexOf(0), j0 = g.zs.indexOf(0);
+  x.strokeStyle = "#fcfcfb"; x.lineWidth = 1.5; x.beginPath(); x.arc((i0 + 0.5) * g.cs, (g.zs.length - 0.5 - j0) * g.cs, g.cs * 1.4, 0, 7); x.stroke();
+  if (sel) {
+    const i = g.xs.indexOf(sel.box_dx_mm), j = g.zs.indexOf(sel.box_dz_mm);
+    x.strokeStyle = "#0b0b0b"; x.lineWidth = 2; x.strokeRect(i * g.cs - 2, (g.zs.length - 1 - j) * g.cs - 2, g.cs + 4, g.cs + 4);
+  }
+  x.fillStyle = "#52514e"; x.font = "11px system-ui"; x.fillText("dx →", g.W - 30, g.H - 4); x.fillText("dz ↑", 2, 11);
+}
+
+// ---------------------------------------------------------------- selection + trajectory player
+async function select(cl) {
+  if (!cl) return;
+  sel = cl; drawGrid();
+  const ok = cl.status === "ok";
+  document.getElementById("info").innerHTML = `
+    <span class="k">box shift</span><span>dx ${cl.box_dx_mm / 10} cm, dz ${cl.box_dz_mm / 10} cm${ok ? ` · trajectory ${cl.episode_index}` : ""}</span>
+    <span class="k">status</span><span class="${ok ? "status-ok" : "status-bad"}">${ok ? "✓ feasible" : cl.status === "off_cart" ? "off the cart" : "✕ out of the arm's reach"}</span>
+    ${cl.status === "off_cart" ? "" : `<span class="k">reach error</span><span>${cl.max_pos_err_mm} mm · ${cl.max_rot_err_deg}°</span>
+    <span class="k">joints</span><span>max change ${cl.max_joint_change_deg}° · largest step ${cl.max_step_deg}° · limit margin ${cl.min_limit_margin_deg}°</span>`}`;
+  if (C) drawCamera();
+  if (!ok) return;
+  if (!cache[cl.episode_index]) cache[cl.episode_index] = await (await fetch(`paths/${cl.episode_index}.json`)).json();
+  if (sel !== cl) return;
+  cur = cache[cl.episode_index]; drawPlots(); render();
+}
+
+function rng(v, p) { return [Math.min(...v) - p, Math.max(...v) + p]; }
+function drawPlots() {
+  const O = I.orig, P = cur.path, g = I.t.findIndex(t => t >= I.grasp_t), T = I.t[N - 1];
+  const all = [...O, ...P], rx = rng(col(all, 0), 0.1), rz = rng(col(all, 2), 0.1), ry = rng(col(all, 1), 0.04), m = Math.max(rx[1] - rx[0], rz[1] - rz[0], ry[1] - ry[0]);
+  Plotly.react("p3d", [
+    { type: "scatter3d", mode: "lines", x: col(O, 0), y: col(O, 2), z: col(O, 1), line: { color: "#b4b2a9", width: 3 }, hoverinfo: "skip" },
+    { type: "scatter3d", mode: "lines", x: [P[0][0]], y: [P[0][2]], z: [P[0][1]], line: { color: [0], colorscale: RAMP, cmin: 0, cmax: T, width: 7 }, hoverinfo: "skip" },
+    { type: "scatter3d", mode: "markers", x: [P[0][0]], y: [P[0][2]], z: [P[0][1]], marker: { size: 7, color: "#0d366b", line: { color: "#fcfcfb", width: 2 } }, hoverinfo: "skip" },
+    { type: "scatter3d", mode: "markers", x: [O[g][0], P[g][0]], y: [O[g][2], P[g][2]], z: [O[g][1], P[g][1]], marker: { size: 5, symbol: "x", color: ["#898781", "#0d366b"] }, hoverinfo: "skip" },
+    { type: "scatter3d", mode: "markers", x: okCells.map(e => e.grasp_x), y: okCells.map(e => e.grasp_z), z: okCells.map(e => e.grasp_y), marker: { size: 1.5, color: "#c3c2b7" }, hoverinfo: "skip" },
+  ], { margin: { l: 0, r: 0, t: 0, b: 0 }, showlegend: false, paper_bgcolor: "rgba(0,0,0,0)", uirevision: "keep",
+       scene: { xaxis: { ...ax("X"), range: rx }, yaxis: { ...ax("Z"), range: rz }, zaxis: { ...ax("height"), range: ry }, aspectmode: "manual",
+                aspectratio: { x: (rx[1] - rx[0]) / m * 1.6, y: (rz[1] - rz[0]) / m * 1.6, z: (ry[1] - ry[0]) / m * 1.6 }, camera: { eye: { x: 1.3, y: -1.6, z: 0.8 } } } },
+     { displaylogo: false, responsive: true });
+  [["px", 0], ["py", 1], ["pz", 2]].forEach(([id, c]) => Plotly.react(id, [
+      { x: I.t, y: col(O, c), mode: "lines", line: { color: "#b4b2a9", width: 1.5, dash: "dot" }, hovertemplate: "original %{y:.4f}<extra>%{x:.2f} s</extra>" },
+      { x: I.t, y: col(P, c), mode: "lines", line: { color: "#2a78d6", width: 2 }, hovertemplate: "selected %{y:.4f}<extra>%{x:.2f} s</extra>" }],
+    { margin: { l: 52, r: 8, t: 4, b: 30 }, showlegend: false, paper_bgcolor: "rgba(0,0,0,0)", plot_bgcolor: "#fcfcfb", uirevision: id,
+      xaxis: { ...ax("time (s)"), range: [0, 30] }, yaxis: ax(""), hovermode: "x unified",
+      shapes: [{ type: "rect", xref: "x", yref: "paper", x0: I.blend[0][0], x1: I.blend[1][1], y0: 0, y1: 1, fillcolor: "rgba(42,120,214,.06)", line: { width: 0 } },
+               { type: "line", x0: 0, x1: 0, yref: "paper", y0: 0, y1: 1, line: { color: "#0b0b0b", width: 1.5 } }] }, { displaylogo: false, responsive: true }));
+  Plotly.react("pj", [...Array(7).keys()].map(j => ({ x: I.t, y: cur.dq_deg.map(q => q[j]), mode: "lines", line: { color: JC[j], width: 2 },
+      hovertemplate: `joint ${j + 1}: %{y:.2f}°<extra>%{x:.2f} s</extra>` })),
+    { margin: { l: 52, r: 8, t: 4, b: 30 }, showlegend: false, paper_bgcolor: "rgba(0,0,0,0)", plot_bgcolor: "#fcfcfb", uirevision: "pj",
+      xaxis: { ...ax("time (s)"), range: [0, 30] }, yaxis: ax("Δ angle (°)"), hovermode: "x unified",
+      shapes: [{ type: "line", x0: 0, x1: 0, yref: "paper", y0: 0, y1: 1, line: { color: "#0b0b0b", width: 1.5 } }] }, { displaylogo: false, responsive: true });
+}
+function render() {
+  if (!cur) return;
+  const i = idx, O = I.orig, P = cur.path, n = i + 1;
+  document.getElementById("slider").value = i;
+  document.getElementById("tnow").textContent = `t = ${I.t[i].toFixed(2)} s`;
+  const dmm = [0, 1, 2].map(c => ((P[i][c] - O[i][c]) * 1000).toFixed(1));
+  document.getElementById("ro").textContent = `selected ${P[i].map(v => v.toFixed(4)).join(", ")} · original ${O[i].map(v => v.toFixed(4)).join(", ")} · difference (${dmm.join(", ")}) mm · gripper ${I.grip[i].toFixed(2)}`;
+  Plotly.restyle("p3d", { x: [col(P.slice(0, n), 0), [P[i][0]]], y: [col(P.slice(0, n), 2), [P[i][2]]], z: [col(P.slice(0, n), 1), [P[i][1]]] }, [1, 2]);
+  Plotly.restyle("p3d", { "line.color": [I.t.slice(0, n)] }, [1]);
+  ["px", "py", "pz"].forEach(id => Plotly.relayout(id, { "shapes[1].x0": I.t[i], "shapes[1].x1": I.t[i] }));
+  Plotly.relayout("pj", { "shapes[0].x0": I.t[i], "shapes[0].x1": I.t[i] });
+}
+function tick(now) {
+  if (!playing) return;
+  const adv = Math.floor((now - last) / 1000 * 7.5 * speed);  // player paths are at 7.5 Hz
+  if (adv > 0) { idx = Math.min(N - 1, idx + adv); last = now; render(); }
+  if (idx >= N - 1) { playing = false; document.getElementById("play").textContent = "▶ Play"; return; }
+  requestAnimationFrame(tick);
+}
+
+// ---------------------------------------------------------------- camera: drag the box
+function w2p(P) {  // world -> pixel (u right, v down) and depth
+  const W = C.camera.world_from_camera, c = C.camera, d = [P[0] - W[0][3], P[1] - W[1][3], P[2] - W[2][3]];
+  const x = W[0][0] * d[0] + W[1][0] * d[1] + W[2][0] * d[2], y = W[0][1] * d[0] + W[1][1] * d[1] + W[2][1] * d[2], z = -(W[0][2] * d[0] + W[1][2] * d[1] + W[2][2] * d[2]);
+  return [c.cx + c.fx * x / z, c.cy - c.fy * y / z, z];
+}
+function p2offset(u, v) {  // pixel -> plane at the box-centroid height -> calibrated table offset (cm)
+  const W = C.camera.world_from_camera, c = C.camera, dc = [(u - c.cx) / c.fx, -(v - c.cy) / c.fy, -1];
+  const d = [0, 1, 2].map(r => W[r][0] * dc[0] + W[r][1] * dc[1] + W[r][2] * dc[2]), s = (C.box_mid_y - W[1][3]) / d[1];
+  return [(W[0][3] + s * d[0] - C.ref_xz[0]) * 100 - C.bias_cm[0], (W[2][3] + s * d[2] - C.ref_xz[1]) * 100 - C.bias_cm[1]];
+}
+const cellWorld = (dx_mm, dz_mm) => [C.ref_xz[0] + (C.bias_cm[0] + dx_mm / 10) / 100, C.box_mid_y, C.ref_xz[1] + (C.bias_cm[1] + dz_mm / 10) / 100];
+
+function initCamera() {
+  bg = new Image(); sprite = new Image();
+  let loaded = 0; const done = () => { if (++loaded === 2) layoutCamera(); };
+  bg.onload = done; sprite.onload = done; bg.src = "camera/background.png"; sprite.src = "camera/box_sprite.png";
+  const cv = document.getElementById("cam");
+  const toPx = ev => { const r = cv.getBoundingClientRect(); return [view.x0 + (ev.clientX - r.left) / r.width * view.w, view.y0 + (ev.clientY - r.top) / r.height * view.h]; };
+  const move = ev => {
+    pointer = toPx(ev); const off = p2offset(pointer[0], pointer[1]);
+    const sx = Math.round(off[0] * 10 / STEP) * STEP, sz = Math.round(off[1] * 10 / STEP) * STEP;
+    pointerCell = byKey[key(sx, sz)] || { status: "off_cart", box_dx_mm: sx, box_dz_mm: sz };
+    if (pointerCell.status === "ok" && pointerCell !== sel) select(pointerCell); else drawCamera();
+  };
+  cv.addEventListener("pointerdown", ev => { drag = true; cv.classList.add("dragging"); cv.setPointerCapture(ev.pointerId); move(ev); });
+  cv.addEventListener("pointermove", ev => { if (drag) move(ev); });
+  cv.addEventListener("pointerup", () => { drag = false; cv.classList.remove("dragging"); pointer = null; pointerCell = null; drawCamera(); });
+}
+function layoutCamera() {
+  // view: the cart region (cart limits projected) with a margin, square-ish, in source pixels
+  const L = I.cart_limits_cm, pts = [[L.dx[0], L.dz[0]], [L.dx[0], L.dz[1]], [L.dx[1], L.dz[0]], [L.dx[1], L.dz[1]]].map(([a, b]) => w2p(cellWorld(a * 10, b * 10)));
+  const us = pts.map(p => p[0]), vs = pts.map(p => p[1]);
+  let x0 = Math.max(0, Math.min(...us) - 12), x1 = Math.min(224, Math.max(...us) + 12), y0 = Math.max(0, Math.min(...vs) - 14), y1 = Math.min(224, Math.max(...vs) + 10);
+  view = { x0, y0, w: x1 - x0, h: y1 - y0 };
+  const cv = document.getElementById("cam"), dpr = window.devicePixelRatio || 1, W = cv.clientWidth;
+  cv.style.height = (W * view.h / view.w) + "px"; cv.width = W * dpr; cv.height = W * view.h / view.w * dpr;
+  drawCamera();
+}
+function drawCamera() {
+  if (!view || !bg.complete) return;
+  const cv = document.getElementById("cam"), x = cv.getContext("2d"), sx = cv.width / view.w, sy = cv.height / view.h;
+  const S = (u, v) => [(u - view.x0) * sx, (v - view.y0) * sy];
+  x.imageSmoothingEnabled = false;
+  x.drawImage(bg, view.x0, view.y0, view.w, view.h, 0, 0, cv.width, cv.height);
+  // feasibility tint: one dot per cell (ok blue, out of reach red)
+  const r = Math.max(1.2, sx * C.px_per_cm * STEP / 10 * 0.42);  // about one grid cell per square
+  I.cells.forEach(cl => {
+    if (cl.status === "off_cart") return;
+    const p = w2p(cellWorld(cl.box_dx_mm, cl.box_dz_mm)), q = S(p[0], p[1]);
+    x.fillStyle = cl.status === "ok" ? "rgba(57,135,229,.35)" : "rgba(208,59,59,.45)";
+    x.fillRect(q[0] - r, q[1] - r, 2 * r, 2 * r);
+  });
+  const o = S(...w2p(cellWorld(0, 0))); x.strokeStyle = "#fcfcfb"; x.lineWidth = 2; x.beginPath(); x.arc(o[0], o[1], sx * 2.2, 0, 7); x.stroke();
+  // the box sprite at the selected cell (snapped), scaled with distance from the camera
+  if (sel && sel.status === "ok") {
+    const p = w2p(cellWorld(sel.box_dx_mm, sel.box_dz_mm)), k = C.box_depth / p[2], sp = C.sprite;
+    const cx = C.box_centroid_px[0] - sp.x0, cy = C.box_centroid_px[1] - sp.y0, q = S(p[0], p[1]);
+    x.drawImage(sprite, q[0] - cx * k * sx, q[1] - cy * k * sy, sp.w * k * sx, sp.h * k * sy);
+  }
+  if (pointer) {
+    const q = S(pointer[0], pointer[1]), bad = !pointerCell || pointerCell.status !== "ok";
+    x.strokeStyle = bad ? "#d03b3b" : "#eda100"; x.lineWidth = 2;
+    x.beginPath(); x.moveTo(q[0] - 9, q[1]); x.lineTo(q[0] + 9, q[1]); x.moveTo(q[0], q[1] - 9); x.lineTo(q[0], q[1] + 9); x.stroke();
+  }
+  const pc = pointer ? pointerCell : null, shown = sel;
+  document.getElementById("caminfo").innerHTML = `
+    <span class="k">box at</span><span>dx ${shown.box_dx_mm / 10} cm, dz ${shown.box_dz_mm / 10} cm ${shown.status === "ok" ? `<span class="status-ok">✓ trajectory ${shown.episode_index}</span>` : ""}</span>
+    ${pc && pc.status !== "ok" ? `<span class="k">pointer</span><span class="status-bad">dx ${pc.box_dx_mm / 10}, dz ${pc.box_dz_mm / 10} cm: ${pc.status === "off_cart" ? "off the cart" : "out of the arm's reach"} (kept the last feasible spot)</span>` : ""}
+    <span class="k">camera</span><span>${C.px_per_cm} px per cm at the recorded spot · calibration bias (${C.bias_cm.map(v => v.toFixed(1)).join(", ")}) cm</span>`;
+}
+</script>
+</body>
+</html>

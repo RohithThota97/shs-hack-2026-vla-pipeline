@@ -50,6 +50,24 @@ hackpipe deploy  --model m-v1                        # R10 gated deployment reco
 streamlit run dashboard/app.py                       # R9  dashboard
 ```
 
+From our team repo ([yugalrk/Robotics--VLA-training](https://github.com/yugalrk/Robotics--VLA-training)):
+
+```bash
+hackpipe serve --trajectory data/raw/fr3_duo_handover_84   # no model: the recorded handover as a closed-loop baseline
+hackpipe serve --replay data/raw/fr3_duo_handover_84       # one episode open loop: does the sim reproduce it? (FAKE)
+hackpipe serve --pi05 <openpi_ckpt>                        # openpi pi0.5 (its own venv: scripts/wsl/install_openpi.sh)
+hackpipe pages site | grid | subtasks | xyz | tcp | retarget   # static explainer pages → outputs/demo/<page>
+hackpipe pages serve --dir outputs/demo/site               # (seekable videos)
+hackpipe diagnose probe-frames                             # recorded frames for the probes below
+hackpipe diagnose io | ablation --checkpoint <pretrained_model>   # one inference; how much cameras / state matter
+hackpipe diagnose server --url http://127.0.0.1:8090       # does a running server serve what the demo did?
+hackpipe diagnose pi05 --checkpoint <openpi_ckpt>          # which input setup the pi0.5 checkpoint expects
+hackpipe diagnose grasp | episode <steps.jsonl> …          # sim runs: grasp timing; one episode vs the demo
+```
+
+Curriculum training also takes `grad_accum` and `lora_rank` (SmolVLA LoRA, saved merged) in the config's `args`.
+How the box grid came about: [docs/approach_box_grid.md](docs/approach_box_grid.md).
+
 ## Folder map and owners
 
 | Folder | Task | Owner | Status |
@@ -68,6 +86,9 @@ streamlit run dashboard/app.py                       # R9  dashboard
 | `src/hackpipe/deploy/` | R10 Gated deployment, smoke test, rollback | Person 3 + Person 5 | Record + smoke test working; launch command to fill in |
 | `src/hackpipe/common/` | Registry (SQLite), IDs, fingerprints, Wilson CI, environment capture | Person 5 | Working |
 | `dashboard/` | R9 Streamlit dashboard over the registry | Person 5 | Working |
+| `src/hackpipe/sim/scene.py` | Scene geometry: arm bases, cart, head camera (from the scene USD) | Team repo port | Working |
+| `src/hackpipe/demo/` | Static explainer pages (`hackpipe pages`) | Team repo port | Working |
+| `src/hackpipe/diagnose.py` | Model / server / sim-run probes (`hackpipe diagnose`) | Team repo port | Working (pi0.5 probes need openpi) |
 | `configs/` | Project, dataset, training, test suite, gates | All | Fill in `CONFIRM` values on Day 1 |
 | `docs/` | Plan, roles, interfaces, runbook, decisions, organiser questions | All | Living documents |
 | `docker/` | Inference / training container | Person 3 | Draft, build on Day 3 |

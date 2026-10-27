@@ -32,7 +32,7 @@ hackpipe = "hackpipe.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-hackpipe = ["sim/geometry/*.json"]
+hackpipe = ["sim/geometry/*.json", "demo/templates/*.html", "demo/templates/site/*.html"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
