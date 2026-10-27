@@ -139,6 +139,12 @@ up() {
     echo "-- $d ($(du -shL "data/raw/$d" | cut -f1))"
     rsync -a -L --partial --progress -e ssh "data/raw/$d/" "$ALIAS:$DATA/$d/" | tail -1
   done
+  # datasets not copied: their meta/ only (info + stats, ~MB): a new dataset version records every source's schema
+  for d in fr3_duo_handover_84 fr3_duo_handover_lighting10 fr3_duo_rand500; do
+    [[ " ${DATASETS[*]} " == *" $d "* || ! -e "data/raw/$d/meta/info.json" ]] && continue
+    echo "-- $d: meta only (not trained on this pod)"
+    rsync -a -L -e ssh "data/raw/$d/meta/" "$ALIAS:$DATA/$d/meta/"
+  done
 
   step "5/7 pipeline install + checks on the pod (first time: ~5 min)"
   r "cd $REMOTE_REPO && PYTHON=\$(UV_PYTHON_INSTALL_DIR=$BASE/.uv/python $UV python find 3.12) ./scripts/remote/gpu.sh setup $DATA"

@@ -138,3 +138,14 @@ Data goes from the laptop to the pod over SSH (rsync, ~4.4 GB). Repo, data, uv a
 volume, kept when the pod is stopped) or, without it, the remote home (Lambda: `ubuntu@IP`, picked automatically;
 `REMOTE_BASE=/abs/path` overrides). The pod runs this laptop's commit (push it first). The registry is handed over
 once (marker `~/.hackpipe/cloud_writer` on the laptop); after that the pod is the writer until `down`.
+
+## Improve loop: box grid → Isaac Sim → better model
+```bash
+hackpipe loop run                       # plan (136 box positions) + reference file → stops at "render"
+# site PC (Isaac Sim), command also on the Improve page:
+<isaac>/python.sh scripts/isaac/record_demos.py --mode grid --usd <Hackathon_FR3Duo_flattened.usd> \
+    --ref outputs/improve/ref.json --out data/incoming/sim_grid_recordings
+# copy data/incoming/sim_grid_recordings to the GPU machine (Drive), then there:
+hackpipe loop run                       # convert → import + QC → version → auto-approve → fine-tune → test → compare
+hackpipe loop status
+```

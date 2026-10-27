@@ -77,3 +77,11 @@ Newest first. One line for the decision, one for the reason.
 - The check now compares both over the whole 3.3 s prediction (m-v2: 0.21, worst sub-task 0.32). The executed-
   stream error stays in the results (and the regression check against the served model).
 - Latency budget = deploy.n_action_steps ÷ policy rate (5 steps at 6 Hz = 833 ms), not one 6 Hz step.
+
+## 2026-10-24 — Box grid player and the improve loop
+- Varied data from geometry instead of teleoperation (after the team's explorer): 136 box positions, the pick bent
+  by IK on the FR3; rendering stays in Isaac Sim on the site PC (the A100 pod has no RT cores for Isaac Sim).
+- Versions made only of sim-generated demos that pass QC are approved by the pipeline ("auto: sim-generated");
+  decided by the team for this loop. Any other new data still needs a human approval.
+- The loop fine-tunes the best model (m-v2) rather than training from scratch; the comparison uses the ranking
+  (sim success → offline test → loss).

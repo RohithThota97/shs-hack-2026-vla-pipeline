@@ -5,6 +5,9 @@
 sources:
   fr3_duo_handover_84: handover      # 30 fps: pick (L) | bring to handover | grasp (R) | release (L) | place (R)
   fr3_duo_rand500: cubes             # 6 fps:  pick A (L) | put A on B | pick C (R) | stack C on top
+  fr3_duo_handover_sim_grid: handover     # Isaac Sim recordings (record_demos.py): box grid player
+  fr3_duo_handover_sim_render: handover   #   … demo re-rendered in the eval scene
+  fr3_duo_handover_sim_dart: handover     #   … with DART noise (recovery data)
 joints:                              # indices into the 16-D state / action vector (names in meta/info.json)
   left_arm: [0, 7]                   # slice start, stop
   right_arm: [8, 15]
