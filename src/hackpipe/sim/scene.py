@@ -122,6 +122,12 @@ def pixel_to_plane(uv: np.ndarray, height: float = BOX_MID_Y, cam: dict[str, Any
 def detect_box(img: np.ndarray, expect_uv: np.ndarray, radius: int = 16) -> np.ndarray | None:
     """Centroid (u, v) of the box in a head-camera frame (h, w, 3): the bright, low-saturation blob nearest to
     expect_uv on the dark cart, brightness-weighted for sub-pixel accuracy. None if there is no such blob."""
+    found = box_blob(img, expect_uv, radius)
+    return None if found is None else found[1]
+
+
+def box_blob(img: np.ndarray, expect_uv: np.ndarray, radius: int = 16) -> tuple[np.ndarray, np.ndarray] | None:
+    """(the box's pixel mask, its centroid) — see detect_box."""
     a = np.asarray(img, np.float64)
     m = (a.mean(2) > 150) & ((a.max(2) - a.min(2)) < 40)
     h, w = m.shape
@@ -139,7 +145,7 @@ def detect_box(img: np.ndarray, expect_uv: np.ndarray, radius: int = 16) -> np.n
             stack += [(y + 1, x), (y - 1, x), (y, x + 1), (y, x - 1)]
     ys, xs = np.nonzero(blob)
     wgt = a.mean(2)[ys, xs] - 140
-    return np.array([(xs * wgt).sum() / wgt.sum(), (ys * wgt).sum() / wgt.sum()])
+    return blob, np.array([(xs * wgt).sum() / wgt.sum(), (ys * wgt).sum() / wgt.sum()])
 
 
 def box_offset(uv: np.ndarray, ref_world: np.ndarray, bias_m: tuple[float, float] = (0.0, 0.0)) -> np.ndarray:

@@ -208,18 +208,15 @@ def camera_assets(ds: DatasetFolder, A: np.ndarray, out: Path, ep: int = 0, at_s
     img = Videos(ds).frames(ep, "external_camera", [int(round(at_s * ds.fps))])[0]
     ref = grasp_world(A)
     ref_uv = scene.world_to_pixel(np.array([[ref[0], scene.BOX_MID_Y, ref[2]]]))[0][0]
-    c = scene.detect_box(img, ref_uv)
-    if c is None:
+    found = scene.box_blob(img, ref_uv)
+    if found is None:
         return None
-    a = img.astype(float)
-    m = (a.mean(2) > 150) & ((a.max(2) - a.min(2)) < 40)
-    yy, xx = np.mgrid[0:m.shape[0], 0:m.shape[1]]
-    blob = m & ((xx - c[0]) ** 2 + (yy - c[1]) ** 2 < 16 ** 2)
+    blob, c = found
     ys, xs = np.nonzero(blob)
     pad = np.zeros_like(blob)
     for dy in (-1, 0, 1):
         for dx in (-1, 0, 1):
-            pad[np.clip(ys + dy, 0, m.shape[0] - 1), np.clip(xs + dx, 0, m.shape[1] - 1)] = True
+            pad[np.clip(ys + dy, 0, blob.shape[0] - 1), np.clip(xs + dx, 0, blob.shape[1] - 1)] = True
     ring = np.zeros_like(blob)
     ring[max(0, ys.min() - 4):ys.max() + 5, max(0, xs.min() - 4):xs.max() + 5] = True
     ring &= ~pad
