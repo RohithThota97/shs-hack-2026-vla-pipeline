@@ -302,3 +302,57 @@ def test_policy_rate(workspace, dataset, tmp_path):
     (out / "train_config.json").write_text(json.dumps({"args": {"rate_hz": 6, "chunk": 20}}))
     reg.update_model_meta("m-v2", {"trainer": "curriculum", "output_dir": str(out)})
     assert policy_rate(reg.get_model("m-v2"), reg) == 6.0
+
+
+def test_trajectory_replay_and_pi05_policies(tmp_path, monkeypatch):
+    import pandas as pd
+
+    from hackpipe.deploy.server import OpenPiPolicy, ReplayPolicy, TrajectoryPolicy, build_policy, contract_problems
+    monkeypatch.setattr("hackpipe.deploy.server.rename_map", lambda: {})
+    n = 60                                                                       # a 2 s recording at 30 fps
+    S = np.zeros((n, 16), np.float32)
+    S[:, 0] = np.linspace(0, 1, n)                                               # the left shoulder sweeps
+    S[30:40, 0] = S[30, 0]                                                       # … and stands still for 10 frames
+    S[40:, 0] = S[30, 0] + np.linspace(0, 0.5, n - 40)
+    A = np.roll(S, -1, 0)
+    (tmp_path / "data/chunk-000").mkdir(parents=True)
+    pd.DataFrame({"episode_index": [3] * n, "frame_index": range(n), "observation.state": list(S),
+                  "action": list(A)}).to_parquet(tmp_path / "data/chunk-000/file-000.parquet")
+
+    traj = build_policy(trajectory=str(tmp_path), episode=3, policy_hz=6.0)
+    assert isinstance(traj, TrajectoryPolicy) and not traj.fake and contract_problems(traj) == []
+    assert np.allclose(traj.act({"observation.state": S[0]}, ""), A[4])          # 1/6 s ahead of where the robot is
+    assert np.allclose(traj.act({"observation.state": S[0]}, ""), A[4])          # a blocked robot is waited for
+    assert np.allclose(traj.act({"observation.state": S[5]}, ""), A[9])
+    traj.i = 30
+    traj.act({"observation.state": S[30]}, "")                                   # still recording: advance on time
+    assert traj.i == 35
+    traj.reset()
+    assert traj.i == 0
+
+    rep = build_policy(replay=str(tmp_path), episode=3)
+    assert isinstance(rep, ReplayPolicy) and rep.fake
+    assert [float(rep.act({}, "")[0]) for _ in range(3)] == pytest.approx(A[:3, 0])
+    rep.reset()
+    assert rep.act({}, "")[0] == pytest.approx(A[0, 0])
+    with pytest.raises(ValueError):
+        build_policy(replay=str(tmp_path), episode=9)
+
+    class Fake:                                                                  # openpi's Policy.infer
+        calls = []
+
+        def infer(self, obs):
+            self.calls.append(obs["prompt"])
+            return {"actions": np.tile(np.arange(10, dtype=np.float32)[:, None], (1, 16))}
+
+    f = Fake()
+    pi = OpenPiPolicy("ck", horizon=10, replan=4, policy=f)
+    obs = {"observation.state": np.zeros(16), **{c: np.zeros((224, 224, 3), np.uint8) for c in CAMS}}
+    got = [float(pi.act(obs, "hand over")[0]) for _ in range(6)]
+    assert got == [0, 1, 2, 3, 0, 1] and f.calls == ["hand over", "hand over"]    # re-infers after `replan` actions
+    assert contract_problems(pi) == [] and pi.policy_type == "pi05-openpi"
+    with pytest.raises(ValueError):
+        OpenPiPolicy("ck", horizon=10, replan=11, policy=f)
+    monkeypatch.setattr("hackpipe.deploy.server.openpi_load", lambda c, h: (None, None, None))
+    monkeypatch.setattr("hackpipe.deploy.server.openpi_pipeline", lambda *a: f)
+    assert build_policy(pi05="ck", horizon=10).n_action_steps == 10           # default replan fits a short horizon

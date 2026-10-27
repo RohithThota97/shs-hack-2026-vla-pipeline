@@ -22,6 +22,8 @@ Differences to the team script, so runs stay reproducible and fit Colab + a 15 G
   `keep_checkpoints` (outside this module) deletes older ones
 - the sample order and the instruction rewording come from seeded generators: a resumed run draws the same
   samples it would have drawn without the interruption
+- `grad_accum` micro-batches per optimizer step (effective batch = batch_size × grad_accum) and LoRA
+  (`lora_rank` > 0, SmolVLA only, training/lora.py) from the team script, for GPUs that don't fit the full run
 """
 from __future__ import annotations
 
@@ -52,6 +54,9 @@ DEFAULTS = {"chunk": 20, "rate_hz": 6, "batch_size": 8, "steps": 20000, "save_fr
             "train_sources": None,       # folder names to train on (e.g. [fr3_duo_handover_84]); None = all labelled
             "image_aug": False,          # colour jitter + small shifts of the camera images (train samples only)
             "state_noise_std": 0.0,      # Gaussian noise on the arm joints of the input state (rad)
+            "grad_accum": 1,             # micro-batches per optimizer step: effective batch = batch_size × this
+            "lora_rank": 0,              # > 0: LoRA adapters on SmolVLA's VLM (training/lora.py); saved merged
+            "lora_alpha": None, "lora_dropout": 0.0, "lora_targets": "vlm",   # alpha default 2 × rank; vlm | all
             "lr": None, "policy_overrides": {}}
 BASES = {"smolvla": "lerobot/smolvla_base", "pi0": "lerobot/pi0_base", "pi05": "lerobot/pi05_base"}
 
@@ -68,6 +73,11 @@ def settings(cfg: dict[str, Any]) -> dict[str, Any]:
     """Train-config `args` with defaults filled in."""
     s = {**DEFAULTS, **(cfg.get("args") or {})}
     s["train_sources"] = source_names(s["train_sources"])
+    s["grad_accum"] = int(s["grad_accum"])
+    if s["grad_accum"] < 1 or int(s["lora_rank"]) < 0 or s["lora_targets"] not in ("vlm", "all"):
+        raise ValueError("grad_accum must be ≥ 1, lora_rank ≥ 0 and lora_targets vlm or all")
+    if s["lora_rank"] and cfg.get("policy", "smolvla") != "smolvla":
+        raise ValueError("lora_rank is implemented for SmolVLA only")
     return s
 
 
@@ -399,11 +409,19 @@ def build_policy(cfg: dict[str, Any], s: dict[str, Any], stats: dict[str, Any], 
         pc.optimizer_lr = s["lr"]
     for k, v in (s["policy_overrides"] or {}).items():     # e.g. gradient_checkpointing: true for pi0
         setattr(pc, k, v)
+    if s["lora_rank"]:                 # the VLM must stay trainable for its adapters; add_lora freezes its base
+        pc.train_expert_only, pc.freeze_vision_encoder = False, False
     t_stats = {k: {kk: torch.tensor(vv, dtype=torch.float32) for kk, vv in v.items()} for k, v in stats.items()}
     for c in cams:
         t_stats[c] = {"mean": torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1),
                       "std": torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)}
     policy = get_policy_class(pc.type).from_pretrained(str(checkpoint or base), config=pc).to(pc.device)
+    if s["lora_rank"]:
+        from hackpipe.training import lora
+        n = lora.add_lora(lora.scopes(policy, s["lora_targets"]), int(s["lora_rank"]), s["lora_alpha"],
+                          float(s["lora_dropout"]))
+        _log(f"LoRA rank {s['lora_rank']} on {s['lora_targets']}: {n} adapters, "
+             f"{sum(p.numel() for p in policy.parameters() if p.requires_grad) / 1e6:.0f}M trainable parameters")
     pre, post = make_pre_post_processors(pc, dataset_stats=t_stats)
     optim = pc.get_optimizer_preset().build(policy.get_optim_params())
     preset = pc.get_scheduler_preset()
@@ -443,7 +461,14 @@ def save_checkpoint(out: Path, step: int, policy, pre, post, optim, sched, log: 
     import torch
     ck = out / "checkpoints" / f"{step:06d}"
     pm = ck / "pretrained_model"
-    policy.save_pretrained(pm)
+    from hackpipe.training import lora
+    if lora.adapters(policy):          # merged: a plain checkpoint; the adapters themselves for --resume
+        ck.mkdir(parents=True, exist_ok=True)
+        torch.save(lora.trainable_state(policy), ck / "trainable_params.pt")
+        with lora.merged(policy):
+            policy.save_pretrained(pm)
+    else:
+        policy.save_pretrained(pm)
     pre.save_pretrained(pm)
     post.save_pretrained(pm)
     torch.save({"step": step, "optimizer": optim.state_dict(),
@@ -515,10 +540,23 @@ def run(dataset_version: str, cfg: dict[str, Any], out: Path, resume: bool = Fal
         start = int(torch.load(last / "training_state.pt", weights_only=False)["step"])
     sd = int(schema["state"]["shape"][0])
     ad = int(schema["action"]["shape"][0])
-    policy, pre, post, optim, sched = build_policy(cfg, s, stats, cams, sd, ad, ckpt)
+    # LoRA: the saved model is merged, so a resumed run starts from the base again and loads its adapters. If the base
+    # isn't on this machine (a fine-tune start point from another one), it continues from the merged model with fresh
+    # adapters instead: the same model, only the adapters' optimizer moments start over.
+    base = s.get("policy.path") or BASES[cfg.get("policy", "smolvla")]
+    lora_resume = bool(resume and s["lora_rank"]) and not (Path(base).is_absolute() and not Path(base).exists())
+    if resume and s["lora_rank"] and not lora_resume:
+        _log(f"LoRA resume: {base} is not on this machine, continuing from the merged checkpoint with fresh adapters")
+    policy, pre, post, optim, sched = build_policy(cfg, s, stats, cams, sd, ad, None if lora_resume else ckpt)
+    if lora_resume:
+        bad = policy.load_state_dict(torch.load(last / "trainable_params.pt", weights_only=False),
+                                     strict=False).unexpected_keys
+        if bad:
+            raise RuntimeError(f"trainable_params.pt does not match the model: {bad[:5]}")
     if resume:
         state = torch.load(last / "training_state.pt", weights_only=False)
-        optim.load_state_dict(state["optimizer"])
+        if lora_resume or not s["lora_rank"]:
+            optim.load_state_dict(state["optimizer"])
         if sched is not None and state["scheduler"]:
             sched.load_state_dict(state["scheduler"])
         _log(f"resumed at step {start}")
@@ -546,7 +584,8 @@ def run(dataset_version: str, cfg: dict[str, Any], out: Path, resume: bool = Fal
         seen += new
         w = weights(groups, stage["skills"], new, plan.get("new_skill_weight", 0.7))
         skip = done_in_stage if si == first_stage else 0
-        codes = stage_draws(w, n_steps * s["batch_size"], seed, si, s["paraphrase_prob"], skip * s["batch_size"])
+        per_step = s["batch_size"] * s["grad_accum"]
+        codes = stage_draws(w, n_steps * per_step, seed, si, s["paraphrase_prob"], skip * per_step)
         mix = {g: round(float(w[groups == g].sum()), 3) for g in np.unique(groups) if w[groups == g].sum() > 0}
         _log(f"=== {stage['name']}: {n_steps} steps (from {skip}), new skills {new}, sample mix {mix}")
         if not any(x["name"] == stage["name"] for x in log["stages"]):
@@ -554,23 +593,28 @@ def run(dataset_version: str, cfg: dict[str, Any], out: Path, resume: bool = Fal
         dl = DataLoader(data, batch_size=s["batch_size"], sampler=codes.tolist(), num_workers=s["num_workers"],
                         pin_memory=True, drop_last=True)
         policy.train()
-        t_data = time.time()
-        for batch in dl:
+        optim.zero_grad(set_to_none=True)
+        t_data = t_upd = time.time()
+        micro_loss = 0.0
+        for micro, batch in enumerate(dl, 1):
             data_s = time.time() - t_data
-            t_upd = time.time()
-            step += 1
             batch = pre(batch)
             with torch.autocast("cuda", dtype=torch.bfloat16, enabled=bool(s["bf16"])):
                 loss, _ = policy.forward(batch)
-            optim.zero_grad(set_to_none=True)
-            loss.backward()
+            (loss / s["grad_accum"]).backward()
+            micro_loss += loss.item() / s["grad_accum"]      # the step's loss: mean over its micro-batches
+            if micro % s["grad_accum"]:
+                t_data = time.time()
+                continue
+            step += 1
             gn = torch.nn.utils.clip_grad_norm_(policy.parameters(), 10.0)
             optim.step()
+            optim.zero_grad(set_to_none=True)
             if sched is not None:
                 sched.step()
             if step % s["log_freq"] == 0:       # same fields as lerobot-train, so the Train page reads it
                 mem = torch.cuda.max_memory_allocated() / 2**30 if torch.cuda.is_available() else 0.0
-                _log(f"INFO stage:{si + 1} step:{step} loss:{loss.item():.4f} grdn:{float(gn):.3f} "
+                _log(f"INFO stage:{si + 1} step:{step} loss:{micro_loss:.4f} grdn:{float(gn):.3f} "
                      f"lr:{optim.param_groups[0]['lr']:.1e} updt_s:{time.time() - t_upd:.3f} data_s:{data_s:.3f} "
                      f"mem_gb:{mem:.2f}")
             stage_end = step == sum(per_stage[:si + 1])
@@ -584,7 +628,8 @@ def run(dataset_version: str, cfg: dict[str, Any], out: Path, resume: bool = Fal
                 if stage_end and s["keep_stage_checkpoints"]:
                     import shutil
                     shutil.copytree(ck / "pretrained_model", out / "stages" / stage["name"], dirs_exist_ok=True)
-            t_data = time.time()
+            t_data = t_upd = time.time()
+            micro_loss = 0.0
     _log(f"done: {step} steps in {(time.time() - t0) / 60:.1f} min")
 
 

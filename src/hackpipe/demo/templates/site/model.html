@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The Robot Model</title>
+<script src="plotly.min.js"></script>
+<style>
+:root { color-scheme: light; --page: #f9f9f7; --surface: #fcfcfb; --ink: #0b0b0b; --ink-2: #52514e; --border: rgba(11,11,11,.10); }
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--page); color: var(--ink); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width: 1360px; margin: 0 auto; padding: 4px 16px 40px; }
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 12px; min-width: 0; }
+.explain { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(250px, 100%), 1fr)); gap: 10px; margin-bottom: 14px; }
+.explain div { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; font-size: 13px; color: var(--ink-2); }
+.explain b { color: var(--ink); display: block; margin-bottom: 2px; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(200px, 100%), 1fr)); gap: 10px; margin-bottom: 14px; }
+.tile { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 9px 12px; }
+.tile .k { font-size: 12px; color: var(--ink-2); } .tile .v { font-size: 19px; font-weight: 600; } .tile .d { font-size: 12px; color: var(--ink-2); }
+.row { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: 14px; margin-bottom: 14px; }
+@media (max-width: 960px) { .row { grid-template-columns: 1fr; } }
+h2 { font-size: 14px; margin: 0 0 6px; }
+.bar { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; font-size: 13px; margin-bottom: 6px; }
+.bar input[type=range] { flex: 1; min-width: 150px; }
+button { font: inherit; font-size: 13px; border-radius: 7px; border: 1px solid var(--border); background: var(--surface); padding: 3px 9px; cursor: pointer; }
+button.on { background: var(--ink); color: var(--surface); }
+label { font-size: 13px; color: var(--ink-2); display: inline-flex; gap: 5px; align-items: center; cursor: pointer; }
+.legend { display: flex; flex-wrap: wrap; gap: 12px; font-size: 12px; color: var(--ink-2); align-items: center; }
+.sw { display: inline-block; width: 18px; height: 0; border-top: 3px solid; vertical-align: 3px; margin-right: 5px; }
+.readout { font-size: 12px; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+</style>
+</head>
+<body>
+<main>
+  <div class="explain">
+    <div><b>1 · Forward kinematics (numbers → space)</b>The FR3 arm's geometry is public: how long each link is and how each joint turns. Chaining the 7 joint angles through it gives the exact position of every joint and of the gripper. That is the 3D model below.</div>
+    <div><b>2 · Inverse kinematics (space → numbers)</b>The reverse: "put the gripper here, at this angle" → which 7 joint angles? A gripper pose is 6 numbers, the arm has 7 joints, so there is one joint too many: infinitely many answers.</div>
+    <div><b>3 · One rule → one answer</b>We recalculate the recording from the gripper path alone. A: no extra rule (just "move as little as possible"): the gripper path is perfect, but the arm drifts into other postures. B: add one rule (joint 7 follows its recorded angle): 6 equations, 6 unknowns, a single answer — the original trajectory comes back.</div>
+  </div>
+  <div class="tiles" id="tiles"></div>
+  <div class="row">
+    <div class="card">
+      <div class="bar"><button id="play">▶ Play</button><span>speed</span><span id="speeds"></span><input type="range" id="slider" min="0" value="0"><span class="readout" id="tnow"></span></div>
+      <div class="bar">
+        <label><input type="checkbox" id="showA" checked> show recalculation A (no extra rule)</label>
+        <label><input type="checkbox" id="showTrail" checked> gripper trails</label>
+      </div>
+      <div class="legend"><span><span class="sw" style="border-color:#2a78d6"></span>left arm (recorded)</span><span><span class="sw" style="border-color:#1baf7a"></span>right arm (recorded)</span>
+        <span><span class="sw" style="border-color:#eb6834;border-top-style:dashed"></span>left arm, recalculation A</span><span>B is not drawn: it lies exactly on the recorded arm</span></div>
+      <div id="p3d" style="height:520px"></div>
+      <div class="readout" id="ro"></div>
+    </div>
+    <div class="card">
+      <h2>Left-arm joint angles: recorded vs recalculated</h2>
+      <div class="bar"><span>joint</span><span id="jsel"></span></div>
+      <div id="pj" style="height:240px"></div>
+      <h2 style="margin-top:10px">How far each recalculation is from the recording (all 7 joints)</h2>
+      <div class="legend"><span><span class="sw" style="border-color:#eb6834"></span>A: no extra rule</span><span><span class="sw" style="border-color:#2a78d6"></span>B: joint 7 given</span></div>
+      <div id="pd" style="height:220px"></div>
+    </div>
+  </div>
+</main>
+<script>
+const font = { family: 'system-ui, -apple-system, "Segoe UI", sans-serif', size: 11, color: "#52514e" };
+const ax = (t) => ({ title: { text: t, font }, gridcolor: "#e1e0d9", zerolinecolor: "#c3c2b7", tickfont: font });
+let D, N, idx = 0, playing = false, speed = 1, last = 0, joint = 0;
+const col = (P, i) => P.map(p => p[i]);
+fetch("data.json").then(r => r.json()).then(d => {
+  D = d; N = d.t.length; const s = d.stats;
+  document.getElementById("tiles").innerHTML = [
+    ["A · gripper path error", `${s.A_pose_err_mm.toFixed(4)} mm`, "no extra rule: the hand is exactly on the path"],
+    ["A · joints differ by up to", `${s.A_joint_diff_deg.toFixed(1)}°`, "…but the arm takes another posture"],
+    ["B · gripper path error", `${s.B_pose_err_mm.toFixed(4)} mm`, "joint 7 given: 6 equations, 6 unknowns"],
+    ["B · joints differ by up to", `${s.B_joint_diff_deg.toFixed(2)}°`, "the original trajectory is recovered"]].map(([k, v, dd]) =>
+    `<div class="tile"><div class="k">${k}</div><div class="v">${v}</div><div class="d">${dd}</div></div>`).join("");
+  const sl = document.getElementById("slider"); sl.max = N - 1; sl.oninput = () => { idx = +sl.value; render(); };
+  document.getElementById("speeds").innerHTML = [1, 2, 4, 8].map(v => `<button data-s="${v}" class="${v === 1 ? "on" : ""}">${v}×</button>`).join(" ");
+  document.querySelectorAll("#speeds button").forEach(b => b.onclick = () => { speed = +b.dataset.s; document.querySelectorAll("#speeds button").forEach(x => x.classList.toggle("on", x === b)); });
+  document.getElementById("play").onclick = () => { playing = !playing; if (playing && idx >= N - 1) idx = 0; document.getElementById("play").textContent = playing ? "❚❚ Pause" : "▶ Play"; last = performance.now(); if (playing) requestAnimationFrame(tick); };
+  document.getElementById("jsel").innerHTML = [...Array(7).keys()].map(j => `<button data-j="${j}" class="${j === 0 ? "on" : ""}">${j + 1}</button>`).join(" ");
+  document.querySelectorAll("#jsel button").forEach(b => b.onclick = () => { joint = +b.dataset.j; document.querySelectorAll("#jsel button").forEach(x => x.classList.toggle("on", x === b)); drawJoint(); });
+  ["showA", "showTrail"].forEach(id => document.getElementById(id).onchange = () => { draw3d(); render(); });
+  draw3d(); drawJoint(); drawDiff(); render();
+});
+
+function bounds() {
+  const all = [...D.left, ...D.right, ...D.leftA].flat(), rng = i => { const v = all.map(p => p[i]); return [Math.min(...v) - 0.05, Math.max(...v) + 0.05]; };
+  return [rng(0), rng(2), rng(1)];
+}
+function draw3d() {
+  const [rx, rz, ry] = bounds(), m = Math.max(rx[1] - rx[0], rz[1] - rz[0], ry[1] - ry[0]), trail = document.getElementById("showTrail").checked, A = document.getElementById("showA").checked;
+  const arm = (pts, c, dash) => ({ type: "scatter3d", mode: "lines+markers", x: col(pts, 0), y: col(pts, 2), z: col(pts, 1), line: { color: c, width: 9, dash: dash || "solid" }, marker: { size: 3.5, color: c }, hoverinfo: "skip" });
+  const tr = (P, c) => ({ type: "scatter3d", mode: "lines", x: [], y: [], z: [], line: { color: c, width: 2.5 }, opacity: trail ? 0.6 : 0, hoverinfo: "skip" });
+  Plotly.react("p3d", [arm(D.left[0], "#2a78d6"), arm(D.right[0], "#1baf7a"), { ...arm(D.leftA[0], "#eb6834", "dash"), visible: A }, tr(D.left, "#2a78d6"), tr(D.right, "#1baf7a")],
+    { margin: { l: 0, r: 0, t: 0, b: 0 }, showlegend: false, paper_bgcolor: "rgba(0,0,0,0)", uirevision: "keep",
+      scene: { xaxis: { ...ax("X"), range: rx }, yaxis: { ...ax("Z"), range: rz }, zaxis: { ...ax("height"), range: ry }, aspectmode: "manual",
+               aspectratio: { x: (rx[1] - rx[0]) / m * 1.7, y: (rz[1] - rz[0]) / m * 1.7, z: (ry[1] - ry[0]) / m * 1.7 }, camera: { eye: { x: 1.5, y: -1.4, z: 0.7 } } } },
+    { displaylogo: false, responsive: true });
+}
+function drawJoint() {
+  const j = joint;
+  Plotly.react("pj", [
+    { x: D.t, y: D.q_rec.map(q => q[j]), mode: "lines", line: { color: "#0b0b0b", width: 2 }, name: "recorded", hovertemplate: "recorded %{y:.2f}°<extra>%{x:.1f} s</extra>" },
+    { x: D.t, y: D.q_A.map(q => q[j]), mode: "lines", line: { color: "#eb6834", width: 2 }, name: "A: no extra rule", hovertemplate: "A %{y:.2f}°<extra>%{x:.1f} s</extra>" },
+    { x: D.t, y: D.q_B.map(q => q[j]), mode: "lines", line: { color: "#2a78d6", width: 2, dash: "dot" }, name: "B: joint 7 given", hovertemplate: "B %{y:.2f}°<extra>%{x:.1f} s</extra>" }],
+    { margin: { l: 48, r: 8, t: 4, b: 30 }, paper_bgcolor: "rgba(0,0,0,0)", plot_bgcolor: "#fcfcfb", legend: { orientation: "h", y: 1.18, font }, hovermode: "x unified",
+      xaxis: ax("time (s)"), yaxis: ax(`joint ${j + 1} (°)`), shapes: [{ type: "line", x0: 0, x1: 0, yref: "paper", y0: 0, y1: 1, line: { color: "#0b0b0b", width: 1.2 } }] },
+    { displaylogo: false, responsive: true });
+}
+function drawDiff() {
+  const md = Q => D.t.map((_, k) => Math.max(...Q[k].map((v, j) => Math.abs(v - D.q_rec[k][j]))));
+  Plotly.react("pd", [
+    { x: D.t, y: md(D.q_A), mode: "lines", line: { color: "#eb6834", width: 2 }, hovertemplate: "A: up to %{y:.2f}°<extra>%{x:.1f} s</extra>" },
+    { x: D.t, y: md(D.q_B), mode: "lines", line: { color: "#2a78d6", width: 2 }, hovertemplate: "B: up to %{y:.3f}°<extra>%{x:.1f} s</extra>" }],
+    { margin: { l: 48, r: 8, t: 4, b: 30 }, showlegend: false, paper_bgcolor: "rgba(0,0,0,0)", plot_bgcolor: "#fcfcfb", hovermode: "x unified",
+      xaxis: ax("time (s)"), yaxis: ax("largest joint difference (°)"), shapes: [{ type: "line", x0: 0, x1: 0, yref: "paper", y0: 0, y1: 1, line: { color: "#0b0b0b", width: 1.2 } }] },
+    { displaylogo: false, responsive: true });
+}
+function render() {
+  const i = idx, L = D.left, R = D.right, A = D.leftA, n = i + 1, tcp = P => P[P.length - 1];
+  document.getElementById("slider").value = i;
+  document.getElementById("tnow").textContent = `t = ${D.t[i].toFixed(2)} s`;
+  const tl = L.slice(0, n).map(tcp), trr = R.slice(0, n).map(tcp);
+  Plotly.restyle("p3d", { x: [col(L[i], 0), col(R[i], 0), col(A[i], 0), col(tl, 0), col(trr, 0)], y: [col(L[i], 2), col(R[i], 2), col(A[i], 2), col(tl, 2), col(trr, 2)],
+                          z: [col(L[i], 1), col(R[i], 1), col(A[i], 1), col(tl, 1), col(trr, 1)] }, [0, 1, 2, 3, 4]);
+  ["pj", "pd"].forEach(id => Plotly.relayout(id, { "shapes[0].x0": D.t[i], "shapes[0].x1": D.t[i] }));
+  const g = tcp(L[i]), ga = tcp(A[i]), elbow = (P, Q) => Math.hypot(P[4][0] - Q[4][0], P[4][1] - Q[4][1], P[4][2] - Q[4][2]) * 1000;
+  document.getElementById("ro").textContent = `left gripper ${g.map(v => v.toFixed(4)).join(", ")} · A's gripper is ${(Math.hypot(g[0] - ga[0], g[1] - ga[1], g[2] - ga[2]) * 1000).toFixed(2)} mm away, A's elbow ${elbow(L[i], A[i]).toFixed(0)} mm away · grippers L ${D.grip_l[i].toFixed(2)} R ${D.grip_r[i].toFixed(2)}`;
+}
+function tick(now) {
+  if (!playing) return;
+  const adv = Math.floor((now - last) / 1000 * 15 * speed);
+  if (adv > 0) { idx = Math.min(N - 1, idx + adv); last = now; render(); }
+  if (idx >= N - 1) { playing = false; document.getElementById("play").textContent = "▶ Play"; return; }
+  requestAnimationFrame(tick);
+}
+</script>
+</body>
+</html>

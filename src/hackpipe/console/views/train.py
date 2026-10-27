@@ -332,7 +332,8 @@ else:
             steps = progress.budget(hours, t["seconds_per_step"], save_freq, t["startup_s"] or 0)
             b = st.columns(3)
             b[0].metric("Steps", f"{steps:,}")
-            b[1].metric("Epochs", progress.epochs(steps, batch, frames) or "n/a")
+            accum = int(overrides.get("grad_accum", args.get("grad_accum", 1)) or 1)   # samples per step: batch × accum
+            b[1].metric("Epochs", progress.epochs(steps, batch * accum, frames) or "n/a")
             b[2].metric("Expected time", fmt_duration(progress.expected_seconds(steps, t["seconds_per_step"],
                                                                                 t["startup_s"])))
             st.caption(f"From {t['job_id']}: {t['seconds_per_step']} s/step, start-up {fmt_duration(t['startup_s'])}; "

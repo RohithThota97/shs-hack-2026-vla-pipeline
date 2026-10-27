@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The Data</title>
+<script src="plotly.min.js"></script>
+<style>
+:root { color-scheme: light; --page: #f9f9f7; --surface: #fcfcfb; --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781; --border: rgba(11,11,11,.10); }
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--page); color: var(--ink); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width: 1360px; margin: 0 auto; padding: 4px 16px 40px; }
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 12px; min-width: 0; }
+.explain { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(260px, 100%), 1fr)); gap: 10px; margin-bottom: 14px; }
+.explain div { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; font-size: 13px; color: var(--ink-2); }
+.explain b { color: var(--ink); display: block; margin-bottom: 2px; }
+.row { display: grid; grid-template-columns: minmax(0, 400px) minmax(0, 1fr); gap: 14px; margin-bottom: 14px; }
+@media (max-width: 900px) { .row { grid-template-columns: 1fr; } }
+video { width: 100%; aspect-ratio: 1; image-rendering: pixelated; background: #000; border-radius: 6px; display: block; }
+h2 { font-size: 14px; margin: 0 0 6px; }
+.bar { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin: 8px 0 0; font-size: 13px; color: var(--ink-2); }
+button { font: inherit; font-size: 13px; border-radius: 7px; border: 1px solid var(--border); background: var(--surface); padding: 3px 9px; cursor: pointer; }
+button.on { background: var(--ink); color: var(--surface); }
+canvas { display: block; width: 100%; cursor: pointer; }
+.heat { display: grid; grid-template-columns: 112px 1fr; gap: 6px; }
+.labels { display: grid; font-size: 11px; color: var(--ink-2); text-align: right; }
+.labels span { display: flex; align-items: center; justify-content: flex-end; white-space: nowrap; }
+.legend { font-size: 12px; color: var(--ink-2); display: flex; gap: 12px; flex-wrap: wrap; align-items: center; margin-top: 6px; }
+.ramp { width: 100px; height: 8px; border-radius: 4px; background: linear-gradient(90deg, #f0efec, #86b6ef, #2a78d6, #0d366b); display: inline-block; vertical-align: 0; margin: 0 4px; }
+table { border-collapse: collapse; width: 100%; font-size: 12px; font-variant-numeric: tabular-nums; }
+th, td { padding: 3px 8px; border-bottom: 1px solid #e1e0d9; text-align: right; } th:first-child, td:first-child { text-align: left; color: var(--ink-2); }
+.subtask { font-weight: 600; font-size: 13px; margin: 6px 0; }
+</style>
+</head>
+<body>
+<main>
+  <div class="explain">
+    <div><b>1 · What was recorded</b>A scripted robot did the handover 84 times. Every 1/30 s the recorder saved three camera pictures and the robot's numbers.</div>
+    <div><b>2 · The numbers</b>16 values per moment: each arm's 7 joint angles (radians) and its gripper opening (1 = open, 0 = closed). "State" is where the robot is; "action" is where it is told to go next.</div>
+    <div><b>3 · What is missing</b>There are no positions in space: no "the hand is here". From this matrix alone you see angles changing, not where the gripper goes. That needs the robot's geometry (step 2).</div>
+  </div>
+  <div class="row">
+    <div class="card">
+      <h2>Camera (head) — training video</h2>
+      <video id="vid" src="video.mp4" controls muted playsinline preload="auto"></video>
+      <div class="bar"><span>jump to:</span><span id="eps"></span><span>speed:</span><span id="speed"></span></div>
+      <div class="subtask" id="subtask"></div>
+    </div>
+    <div class="card">
+      <h2>The matrix: every value of the recording over time (state)</h2>
+      <div class="heat"><div class="labels" id="labels"></div><canvas id="heat"></canvas></div>
+      <div class="legend"><span>each row coloured from its own lowest to highest value<span class="ramp"></span></span><span>black line = the video's current moment · click to jump</span></div>
+      <h2 style="margin-top:12px">Same numbers as lines (left arm)</h2>
+      <div id="lines" style="height:230px"></div>
+    </div>
+  </div>
+  <div class="card">
+    <h2>The 16 numbers right now</h2>
+    <table id="tbl"></table>
+  </div>
+</main>
+<script>
+const vid = document.getElementById("vid"), JC = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#6250d6"];
+const font = { family: 'system-ui, -apple-system, "Segoe UI", sans-serif', size: 11, color: "#52514e" };
+let D, E, epi = -1, last = -1;
+const lerp = (a, b, f) => a.map((x, i) => Math.round(x + (b[i] - x) * f));
+const STOPS = [[240, 239, 236], [134, 182, 239], [42, 120, 214], [13, 54, 107]];
+function color(f) { f = Math.max(0, Math.min(1, f)) * 3; const i = Math.min(2, Math.floor(f)); return lerp(STOPS[i], STOPS[i + 1], f - i); }
+
+fetch("data.json").then(r => r.json()).then(d => {
+  D = d;
+  document.getElementById("labels").innerHTML = D.names.map(n => `<span>${n}</span>`).join("");
+  document.getElementById("eps").innerHTML = D.episodes.map((e, k) => `<button data-k="${k}">episode ${e.episode}</button>`).join(" ");
+  document.querySelectorAll("#eps button").forEach(b => b.onclick = () => { vid.currentTime = D.episodes[+b.dataset.k].video_from; });
+  document.getElementById("speed").innerHTML = [0.5, 1, 2, 4].map(s => `<button data-s="${s}" class="${s === 1 ? "on" : ""}">${s}×</button>`).join(" ");
+  document.querySelectorAll("#speed button").forEach(b => b.onclick = () => { vid.playbackRate = +b.dataset.s; document.querySelectorAll("#speed button").forEach(x => x.classList.toggle("on", x === b)); });
+  document.getElementById("heat").addEventListener("click", ev => { const r = ev.currentTarget.getBoundingClientRect(); vid.currentTime = E.video_from + (ev.clientX - r.left) / r.width * E.t[E.t.length - 1]; });
+  update();
+  vid.addEventListener("timeupdate", update); vid.addEventListener("seeked", update); vid.addEventListener("play", loop);
+  window.addEventListener("resize", () => { epi = -1; update(); });
+});
+function loop() { update(); if (!vid.paused) requestAnimationFrame(loop); }
+
+function drawEpisode(k) {
+  epi = k; E = D.episodes[k];
+  document.querySelectorAll("#eps button").forEach((b, i) => b.classList.toggle("on", i === k));
+  const cv = document.getElementById("heat"), n = E.t.length, rows = 16, rh = 14, dpr = window.devicePixelRatio || 1, W = cv.clientWidth;
+  cv.width = W * dpr; cv.height = rows * rh * dpr; cv.style.height = rows * rh + "px";
+  document.getElementById("labels").style.gridTemplateRows = `repeat(${rows}, ${rh}px)`;
+  const x = cv.getContext("2d"), img = x.createImageData(n, rows);
+  for (let c = 0; c < rows; c++) {
+    const v = E.state.map(s => s[c]), lo = Math.min(...v), hi = Math.max(...v);
+    for (let i = 0; i < n; i++) { const [r, g, b] = color(hi > lo ? (v[i] - lo) / (hi - lo) : 0.5), o = (c * n + i) * 4; img.data[o] = r; img.data[o + 1] = g; img.data[o + 2] = b; img.data[o + 3] = 255; }
+  }
+  const off = document.createElement("canvas"); off.width = n; off.height = rows; off.getContext("2d").putImageData(img, 0, 0);
+  E._heat = off;
+  Plotly.react("lines", [...Array(7).keys()].map(j => ({ x: E.t, y: E.state.map(s => s[j]), mode: "lines", line: { color: JC[j], width: 1.6 }, name: `joint ${j + 1}`,
+      hovertemplate: `joint ${j + 1}: %{y:.3f} rad<extra>%{x:.1f} s</extra>` })).concat([{ x: E.t, y: E.state.map(s => s[7]), mode: "lines", line: { color: "#898781", width: 1.6, dash: "dot" }, name: "gripper", hovertemplate: "gripper %{y:.2f}<extra>%{x:.1f} s</extra>" }]),
+    { margin: { l: 44, r: 8, t: 4, b: 30 }, paper_bgcolor: "rgba(0,0,0,0)", plot_bgcolor: "#fcfcfb", legend: { orientation: "h", y: 1.15, font },
+      xaxis: { title: { text: "time in episode (s)", font }, gridcolor: "#e1e0d9", tickfont: font }, yaxis: { title: { text: "rad / opening", font }, gridcolor: "#e1e0d9", tickfont: font },
+      shapes: [{ type: "line", x0: 0, x1: 0, yref: "paper", y0: 0, y1: 1, line: { color: "#0b0b0b", width: 1.5 } }] }, { displaylogo: false, responsive: true });
+}
+
+function update() {
+  if (!D) return;
+  const t = vid.currentTime; let k = 0;
+  for (let j = D.episodes.length - 1; j >= 0; j--) if (t >= D.episodes[j].video_from - 1e-3) { k = j; break; }
+  if (k !== epi) { drawEpisode(k); last = -1; }
+  const i = Math.max(0, Math.min(E.t.length - 1, Math.round((t - E.video_from) * D.fps)));
+  if (i === last) return; last = i;
+  const cv = document.getElementById("heat"), x = cv.getContext("2d");
+  x.imageSmoothingEnabled = false; x.drawImage(E._heat, 0, 0, cv.width, cv.height);
+  const px = i / (E.t.length - 1) * cv.width; x.fillStyle = "#0b0b0b"; x.fillRect(px - 1, 0, 2.5, cv.height);
+  Plotly.relayout("lines", { "shapes[0].x0": E.t[i], "shapes[0].x1": E.t[i] });
+  document.getElementById("subtask").textContent = `t = ${E.t[i].toFixed(2)} s · ${E.subtask[i] || ""}`;
+  document.getElementById("tbl").innerHTML = "<tr><th>value</th><th>state (now)</th><th>action (go to next)</th><th>unit</th></tr>" +
+    D.names.map((n, c) => `<tr><td>${n}</td><td>${E.state[i][c].toFixed(4)}</td><td>${E.action[i][c].toFixed(4)}</td><td>${n.includes("gripper") ? "1 open · 0 closed" : "rad"}</td></tr>`).join("");
+}
+</script>
+</body>
+</html>

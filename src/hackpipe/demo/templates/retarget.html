@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Retargeted Trajectory</title>
+<script src="plotly.min.js"></script>
+<style>
+:root { color-scheme: light; --page: #f9f9f7; --surface: #fcfcfb; --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
+        --border: rgba(11,11,11,.10); }
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--page); color: var(--ink); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width: 1240px; margin: 0 auto; padding: 18px 16px 40px; }
+h1 { font-size: 20px; margin: 0 0 2px; } .sub { color: var(--ink-2); margin: 0 0 12px; font-size: 13px; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(170px, 100%), 1fr)); gap: 10px; margin-bottom: 12px; }
+.tile, .card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; min-width: 0; }
+.tile { padding: 9px 12px; } .tile .k { color: var(--ink-2); font-size: 12px; } .tile .v { font-size: 19px; font-weight: 600; }
+.card { padding: 12px; margin-bottom: 14px; } h2 { font-size: 14px; margin: 0 0 6px; }
+.bar { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; margin-bottom: 8px; font-size: 13px; }
+.bar input[type=range] { flex: 1; min-width: 160px; }
+button { font: inherit; font-size: 13px; border-radius: 7px; border: 1px solid var(--border); background: var(--surface); padding: 4px 10px; cursor: pointer; }
+button.on { background: var(--ink); color: var(--surface); }
+.legend { display: flex; flex-wrap: wrap; gap: 14px; font-size: 12px; color: var(--ink-2); align-items: center; }
+.sw { display: inline-block; width: 18px; height: 0; border-top: 3px solid; vertical-align: 3px; margin-right: 5px; }
+.ramp { width: 80px; height: 8px; border-radius: 4px; display: inline-block; background: linear-gradient(90deg, #cde2fb, #3987e5, #0d366b); vertical-align: 0; margin: 0 4px; }
+.readout { font-variant-numeric: tabular-nums; font-size: 13px; color: var(--ink-2); }
+.grid3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr)); gap: 14px; }
+.grid3 .card { margin-bottom: 0; }
+.note { color: var(--ink-2); font-size: 12px; margin-top: 12px; }
+</style>
+</head>
+<body>
+<main>
+  <h1 id="title">Retargeted left-arm trajectory</h1>
+  <p class="sub" id="sub"></p>
+  <div class="tiles" id="tiles"></div>
+  <div class="card">
+    <div class="bar">
+      <button id="play">▶ Play</button>
+      <span>speed</span><span id="speeds"></span>
+      <input type="range" id="slider" min="0" value="0">
+      <span class="readout" id="tnow"></span>
+    </div>
+    <div class="legend">
+      <span><span class="sw" style="border-color:#b4b2a9"></span>original (recorded)</span>
+      <span>retargeted, time:<span class="ramp"></span>early → late</span>
+      <span>· dots = now · ✕ = grasp point · drag to rotate</span>
+    </div>
+    <div class="readout" id="ro" style="margin-top:6px"></div>
+    <div id="p3d" style="height:500px"></div>
+  </div>
+  <div class="grid3">
+    <div class="card"><h2>X (m)</h2><div id="px" style="height:210px"></div></div>
+    <div class="card"><h2>Height (m)</h2><div id="py" style="height:210px"></div></div>
+    <div class="card"><h2>Z (m)</h2><div id="pz" style="height:210px"></div></div>
+  </div>
+  <div class="card" style="margin-top:14px">
+    <h2>Joint angles: retargeted minus recorded (degrees)</h2>
+    <div class="legend" id="jlegend"></div>
+    <div id="pj" style="height:280px"></div>
+  </div>
+  <p class="note">Method: forward kinematics of the recorded joint angles → gripper path; shifted target (blended in over the reach,
+    out while carrying) with the recorded gripper orientation; inverse kinematics per frame by damped least squares, started from the
+    previous frame, spare degree of freedom pulled towards the recorded joint angles, FR3 joint limits enforced. Room coordinates,
+    metres, Y up. Gripper commands and timing are unchanged.</p>
+</main>
+<script>
+const RAMP = [[0, "#cde2fb"], [0.5, "#3987e5"], [1, "#0d366b"]];
+const JC = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#6250d6"];
+const font = { family: 'system-ui, -apple-system, "Segoe UI", sans-serif', size: 11, color: "#52514e" };
+const ax = (t) => ({ title: { text: t, font }, gridcolor: "#e1e0d9", zerolinecolor: "#c3c2b7", tickfont: font });
+const col = (P, i) => P.map(p => p[i]);
+let D, N, T, idx = 0, playing = false, speed = 1, last = 0;
+
+fetch("data.json").then(r => r.json()).then(d => {
+  D = d; N = D.t.length; T = D.t[N - 1];
+  const s = D.stats, sh = D.shift_mm;
+  document.getElementById("title").textContent = `Retargeted left-arm trajectory: box shifted (${sh.join(", ")}) mm`;
+  document.getElementById("sub").textContent = `Recorded handover episode, shift blended in ${D.blend_in[0]}–${D.blend_in[1]} s, held through the grasp at ${D.grasp_t.toFixed(1)} s, blended out ${D.blend_out[0]}–${D.blend_out[1]} s.`;
+  document.getElementById("tiles").innerHTML = [
+    ["Reaching accuracy", `${s.max_pos_err_mm.toFixed(3)} mm`], ["Orientation error", `${s.max_rot_err_deg.toFixed(3)}°`],
+    ["Largest joint change", `${s.max_joint_change_deg.toFixed(2)}°`], ["Largest step / frame", `${s.max_step_deg.toFixed(3)}° (rec. ${s.rec_step_deg.toFixed(3)}°)`],
+    ["Closest to a joint limit", `${s.min_limit_margin_deg.toFixed(1)}°`]].map(([k, v]) => `<div class="tile"><div class="k">${k}</div><div class="v">${v}</div></div>`).join("");
+  const sl = document.getElementById("slider"); sl.max = N - 1;
+  sl.oninput = () => { idx = +sl.value; render(true); };
+  document.getElementById("speeds").innerHTML = [0.5, 1, 2, 4].map(v => `<button data-s="${v}" class="${v === 1 ? "on" : ""}">${v}×</button>`).join(" ");
+  document.querySelectorAll("#speeds button").forEach(b => b.onclick = () => { speed = +b.dataset.s; document.querySelectorAll("#speeds button").forEach(x => x.classList.toggle("on", x === b)); });
+  document.getElementById("play").onclick = () => { playing = !playing; if (playing && idx >= N - 1) idx = 0;
+    document.getElementById("play").textContent = playing ? "❚❚ Pause" : "▶ Play"; last = performance.now(); if (playing) requestAnimationFrame(tick); };
+  draw(); render(true);
+});
+
+function rng(vals, pad) { const lo = Math.min(...vals), hi = Math.max(...vals); return [lo - pad, hi + pad]; }
+
+function draw() {
+  const O = D.orig, P = D.new, g = D.t.findIndex(t => t >= D.grasp_t);
+  const rx = rng([...col(O, 0), ...col(P, 0)], 0.03), rz = rng([...col(O, 2), ...col(P, 2)], 0.03), ry = rng([...col(O, 1), ...col(P, 1)], 0.03);
+  const m = Math.max(rx[1] - rx[0], rz[1] - rz[0], ry[1] - ry[0]);
+  Plotly.newPlot("p3d", [
+    { type: "scatter3d", mode: "lines", x: col(O, 0), y: col(O, 2), z: col(O, 1), line: { color: "#b4b2a9", width: 3 }, hoverinfo: "skip" },
+    { type: "scatter3d", mode: "lines", x: [P[0][0]], y: [P[0][2]], z: [P[0][1]], line: { color: [0], colorscale: RAMP, cmin: 0, cmax: T, width: 7 }, hoverinfo: "skip" },
+    { type: "scatter3d", mode: "markers", x: [O[0][0]], y: [O[0][2]], z: [O[0][1]], marker: { size: 5, color: "#898781" }, hoverinfo: "skip" },
+    { type: "scatter3d", mode: "markers", x: [P[0][0]], y: [P[0][2]], z: [P[0][1]], marker: { size: 7, color: "#0d366b", line: { color: "#fcfcfb", width: 2 } }, hoverinfo: "skip" },
+    { type: "scatter3d", mode: "markers+text", x: [O[g][0], P[g][0]], y: [O[g][2], P[g][2]], z: [O[g][1], P[g][1]],
+      marker: { size: 5, symbol: "x", color: ["#898781", "#0d366b"] }, text: ["grasp (original)", "grasp (retargeted)"],
+      textposition: ["bottom center", "top center"], textfont: { ...font, color: "#0b0b0b" }, hoverinfo: "skip" },
+  ], { margin: { l: 0, r: 0, t: 0, b: 0 }, showlegend: false, paper_bgcolor: "rgba(0,0,0,0)", uirevision: "keep",
+       scene: { xaxis: { ...ax("X"), range: rx }, yaxis: { ...ax("Z"), range: rz }, zaxis: { ...ax("height"), range: ry }, aspectmode: "manual",
+                aspectratio: { x: (rx[1] - rx[0]) / m * 1.6, y: (rz[1] - rz[0]) / m * 1.6, z: (ry[1] - ry[0]) / m * 1.6 },
+                camera: { eye: { x: 1.3, y: -1.6, z: 0.8 } } } }, { displaylogo: false, responsive: true });
+  [["px", 0], ["py", 1], ["pz", 2]].forEach(([id, c]) => {
+    Plotly.newPlot(id, [
+      { x: D.t, y: col(O, c), mode: "lines", line: { color: "#b4b2a9", width: 1.5, dash: "dot" }, name: "original", hovertemplate: "original %{y:.4f}<extra>%{x:.2f} s</extra>" },
+      { x: D.t, y: col(P, c), mode: "lines", line: { color: "#2a78d6", width: 2 }, name: "retargeted", hovertemplate: "retargeted %{y:.4f}<extra>%{x:.2f} s</extra>" }],
+      { margin: { l: 52, r: 8, t: 4, b: 30 }, showlegend: false, paper_bgcolor: "rgba(0,0,0,0)", plot_bgcolor: "#fcfcfb",
+        xaxis: { ...ax("time (s)"), range: [0, 30] }, yaxis: ax(""), hovermode: "x unified",
+        shapes: [{ type: "rect", xref: "x", yref: "paper", x0: D.blend_in[0], x1: D.blend_out[1], y0: 0, y1: 1, fillcolor: "rgba(42,120,214,.06)", line: { width: 0 } },
+                 { type: "line", x0: 0, x1: 0, yref: "paper", y0: 0, y1: 1, line: { color: "#0b0b0b", width: 1.5 } }] },
+      { displaylogo: false, responsive: true });
+    document.getElementById(id).on("plotly_click", ev => { idx = D.t.findIndex(t => t >= ev.points[0].x); render(true); });
+  });
+  const dq = [...Array(7).keys()].map(j => D.q_new.map((q, k) => q[j] - D.q_orig[k][j]));
+  Plotly.newPlot("pj", dq.map((y, j) => ({ x: D.t, y, mode: "lines", line: { color: JC[j], width: 2 }, name: `joint ${j + 1}`,
+    hovertemplate: `joint ${j + 1}: %{y:.2f}°<extra>%{x:.2f} s</extra>` })),
+    { margin: { l: 52, r: 8, t: 4, b: 30 }, showlegend: false, paper_bgcolor: "rgba(0,0,0,0)", plot_bgcolor: "#fcfcfb",
+      xaxis: { ...ax("time (s)"), range: [0, 30] }, yaxis: ax("Δ angle (°)"), hovermode: "x unified",
+      shapes: [{ type: "line", x0: 0, x1: 0, yref: "paper", y0: 0, y1: 1, line: { color: "#0b0b0b", width: 1.5 } }] },
+    { displaylogo: false, responsive: true });
+  document.getElementById("jlegend").innerHTML = JC.map((c, j) => `<span><span class="sw" style="border-color:${c}"></span>joint ${j + 1}</span>`).join("") +
+    "<span>· shaded band in the XYZ plots = where the shift is active</span>";
+}
+
+function render(force) {
+  const i = idx, O = D.orig, P = D.new, n = i + 1;
+  document.getElementById("slider").value = i;
+  document.getElementById("tnow").textContent = `t = ${D.t[i].toFixed(2)} s`;
+  const dmm = [0, 1, 2].map(c => ((P[i][c] - O[i][c]) * 1000).toFixed(1));
+  document.getElementById("ro").textContent = `original ${O[i].map(v => v.toFixed(4)).join(", ")} · retargeted ${P[i].map(v => v.toFixed(4)).join(", ")} · difference (${dmm.join(", ")}) mm · shift weight ${D.w[i].toFixed(2)} · gripper ${D.grip[i].toFixed(2)}`;
+  const tt = D.t.slice(0, n), Pn = P.slice(0, n);
+  Plotly.restyle("p3d", { x: [col(Pn, 0), [O[i][0]], [P[i][0]]], y: [col(Pn, 2), [O[i][2]], [P[i][2]]], z: [col(Pn, 1), [O[i][1]], [P[i][1]]] }, [1, 2, 3]);
+  Plotly.restyle("p3d", { "line.color": [tt] }, [1]);
+  ["px", "py", "pz"].forEach(id => Plotly.relayout(id, { "shapes[1].x0": D.t[i], "shapes[1].x1": D.t[i] }));
+  Plotly.relayout("pj", { "shapes[0].x0": D.t[i], "shapes[0].x1": D.t[i] });
+}
+
+function tick(now) {
+  if (!playing) return;
+  const adv = Math.floor((now - last) / 1000 * 30 * speed);  // frames to advance at 30 fps x speed
+  if (adv > 0 && now - last > 60) { idx = Math.min(N - 1, idx + adv); last = now; render(); }
+  if (idx >= N - 1) { playing = false; document.getElementById("play").textContent = "▶ Play"; return; }
+  requestAnimationFrame(tick);
+}
+</script>
+</body>
+</html>

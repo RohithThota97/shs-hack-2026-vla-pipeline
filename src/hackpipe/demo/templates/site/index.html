@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Robot Handover Explorer</title>
+<style>
+:root { color-scheme: light; --page: #f9f9f7; --surface: #fcfcfb; --ink: #0b0b0b; --ink-2: #52514e; --border: rgba(11,11,11,.10); --accent: #2a78d6; }
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body { margin: 0; background: var(--page); color: var(--ink); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; display: flex; flex-direction: column; }
+header { padding: 14px 16px 0; max-width: 1360px; width: 100%; margin: 0 auto; }
+h1 { font-size: 20px; margin: 0 0 2px; } .sub { color: var(--ink-2); font-size: 13px; margin: 0 0 12px; }
+nav { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+@media (max-width: 760px) { nav { grid-template-columns: 1fr; } }
+nav a { display: block; text-decoration: none; color: inherit; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; }
+nav a .n { display: inline-grid; place-items: center; width: 22px; height: 22px; border-radius: 50%; background: #e1e0d9; font-weight: 700; font-size: 12px; margin-right: 8px; }
+nav a b { font-size: 14px; } nav a p { margin: 4px 0 0; color: var(--ink-2); font-size: 12px; }
+nav a.on { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; } nav a.on .n { background: var(--accent); color: #fff; }
+iframe { flex: 1; width: 100%; border: 0; margin-top: 10px; min-height: 600px; background: var(--page); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Robot handover explorer</h1>
+  <p class="sub">The same robot task seen three ways: as raw recorded numbers, as a moving robot model, and as a lookup table a camera can use. Pick a step.</p>
+  <nav id="nav">
+    <a href="#1-data" data-p="1-data"><span class="n">1</span><b>The data</b><p>What a training recording really contains: video plus a matrix of joint numbers. No robot model.</p></a>
+    <a href="#2-model" data-p="2-model"><span class="n">2</span><b>The robot model</b><p>The arm's geometry turns those numbers into motion in space, and back again with one extra rule.</p></a>
+    <a href="#3-lut" data-p="3-lut"><span class="n">3</span><b>Camera → grid → LUT</b><p>A camera finds the box, a grid cell is picked, and a pre-computed trajectory is looked up.</p></a>
+  </nav>
+</header>
+<iframe id="frame" title="page"></iframe>
+<script>
+const frame = document.getElementById("frame");
+function show() {
+  const p = (location.hash || "#1-data").slice(1);
+  document.querySelectorAll("#nav a").forEach(a => a.classList.toggle("on", a.dataset.p === p));
+  if (!frame.src.endsWith(p + "/")) frame.src = p + "/";
+}
+window.addEventListener("hashchange", show); show();
+</script>
+</body>
+</html>

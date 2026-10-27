@@ -24,6 +24,9 @@ args:
   paraphrase_prob: 0.3        # share of samples with a reworded instruction
   gripper_lag_fix: true       # cube recordings: gripper command moved to where the gripper starts moving
   bf16: false                 # Ampere+ only (not on a T4)
+  grad_accum: 1               # micro-batches per optimizer step: effective batch = batch_size × grad_accum
+  lora_rank: 0                # > 0: LoRA on SmolVLA's VLM (training/lora.py, lora_alpha / lora_dropout /
+                              #   lora_targets vlm|all); the VLM then trains through its adapters (freeze_* ignored)
   no_curriculum: false
   keep_stage_checkpoints: false   # true also keeps each stage's model (≈1 GB each; 15 GB Drive)
   policy_overrides:

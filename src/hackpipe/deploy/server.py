@@ -14,6 +14,11 @@ Same protocol as the team's Isaac Sim client (Environment/fr3duo_isaac_client.py
 Clients send the dataset's camera names; checkpoints trained with lerobot-train expect SmolVLA's camera1..3, so
 the observation is renamed with configs/dataset.yaml → preprocessing.rename_map. The server refuses a
 checkpoint that does not match the FR3 Duo contract (state 16, action 16, three 224×224 cameras).
+
+Besides LeRobot checkpoints (and the FAKE dummy) it serves, after the team repo (yugalrk/Robotics--VLA-training):
+- TrajectoryPolicy: no model, the recorded handover as a closed-loop lookup (a baseline any model must beat);
+- ReplayPolicy: one episode's recorded actions open loop (does the sim reproduce the recording? FAKE);
+- OpenPiPolicy: an openpi pi0.5 checkpoint (JAX, its own venv, e.g. WSL), served at the data's 30 Hz.
 """
 from __future__ import annotations
 
@@ -54,6 +59,155 @@ class DummyPolicy:
         if self.hold is None:
             self.hold = np.asarray(obs["observation.state"], np.float32).copy()
         return self.hold
+
+
+def episode_arrays(source: str | Path, episode: int = 0) -> tuple[np.ndarray, np.ndarray]:
+    """(states, actions) of one recorded episode, each (T, 16) float32, from a LeRobot dataset folder."""
+    import pandas as pd
+    files = sorted(Path(source).glob("data/chunk-*/*.parquet"))
+    if not files:
+        raise FileNotFoundError(f"no data/chunk-*/*.parquet in {source}")
+    df = pd.concat(pd.read_parquet(f, columns=["episode_index", "frame_index", "observation.state", "action"])
+                   for f in files)
+    d = df[df.episode_index == episode].sort_values("frame_index")
+    if d.empty:
+        raise ValueError(f"episode {episode} not found in {source}")
+    return (np.stack(d["observation.state"].to_numpy()).astype(np.float32),
+            np.stack(d["action"].to_numpy()).astype(np.float32))
+
+
+class TrajectoryPolicy:
+    """No learned model: the recorded handover as a closed-loop lookup table. All 84 handover demos have the same
+    start pose and actions (only the lighting differs), so one recording is the task.
+
+    act(): find where along the recording the robot is now (nearest recorded state within the next `step` frames:
+    never more than 1/policy_hz s ahead per call) and return the recorded action 1/policy_hz s later. A robot that
+    lags or is blocked is waited for. Where the recording stands still (a gripper closing), nearest-state matching
+    sees no progress, so there the index advances on time once the robot is at that pose."""
+    fake, model, policy_type = False, None, "trajectory-handover"
+    input_features = DummyPolicy.input_features
+    output_features = DummyPolicy.output_features
+    n_action_steps = chunk_size = 1
+
+    def __init__(self, states: np.ndarray, actions: np.ndarray, policy_hz: float = 6.0, fps: float = 30.0,
+                 still_rad: float = 0.002, near_rad: float = 0.02, label: str = "recording") -> None:
+        self.S, self.A = np.asarray(states, np.float32), np.asarray(actions, np.float32)
+        self.step = max(1, int(round(fps / policy_hz)))
+        self.still, self.near = still_rad, near_rad
+        self.w = np.ones(STATE_DIM, np.float32)
+        self.w[[7, 15]] = 0.2                    # gripper readings depend on the sim's joint → state mapping
+        self.checkpoint = f"trajectory: {label} ({len(self.A)} frames)"
+        self.reset()
+
+    def reset(self) -> None:
+        self.i = 0
+
+    def _phase(self, state: np.ndarray) -> int:
+        lo, nxt = self.i, min(self.i + self.step, len(self.S) - 1)
+        d = (np.abs(self.S[lo:nxt + 1] - np.asarray(state, np.float32)) * self.w).mean(1)
+        j = lo + int(np.argmax(d <= d.min() + 1e-6))          # earliest best match: never skip ahead within ties
+        if float((np.abs(self.S[nxt] - self.S[lo]) * self.w).mean()) < self.still and d[0] < self.near:
+            j = nxt                                            # the recording stands still here: advance on time
+        return j
+
+    def act(self, obs: dict[str, np.ndarray], task: str) -> np.ndarray:
+        self.i = self._phase(obs["observation.state"])
+        return self.A[min(self.i + self.step - 1, len(self.A) - 1)].copy()
+
+
+class ReplayPolicy:
+    """One episode's recorded actions, open loop, one per call: does the simulation reproduce the recording?
+    Not a policy result, so flagged FAKE."""
+    fake, model = True, None
+    input_features = DummyPolicy.input_features
+    output_features = DummyPolicy.output_features
+    n_action_steps = chunk_size = 1
+
+    def __init__(self, actions: np.ndarray, label: str = "episode") -> None:
+        self.actions = np.asarray(actions, np.float32)
+        self.policy_type, self.checkpoint = f"replay-{label}", f"replay: {label} ({len(self.actions)} frames)"
+        self.reset()
+
+    def reset(self) -> None:
+        self.t = 0
+
+    def act(self, obs: dict[str, np.ndarray], task: str) -> np.ndarray:
+        a = self.actions[min(self.t, len(self.actions) - 1)]
+        self.t += 1
+        return a.copy()
+
+
+PI05_SLOTS = ("base_0_rgb", "left_wrist_0_rgb", "right_wrist_0_rgb")
+
+
+def openpi_load(checkpoint: str | Path, horizon: int) -> tuple[Any, Any, Any]:
+    """(Pi0Config, model, norm stats) of an openpi pi0.5 checkpoint (params/ + assets/fr3_duo/)."""
+    import jax.numpy as jnp
+    from openpi.models import model as _model
+    from openpi.models import pi0_config
+    from openpi.training import checkpoints as _checkpoints
+    cfg = pi0_config.Pi0Config(pi05=True, action_horizon=horizon)
+    ckpt = Path(checkpoint)
+    return (cfg, cfg.load(_model.restore_params(ckpt / "params", dtype=jnp.bfloat16)),
+            _checkpoints.load_norm_stats(ckpt / "assets", "fr3_duo"))
+
+
+def openpi_pipeline(cfg: Any, model: Any, norm: Any, quantile: bool = True, discrete_state: bool | None = None,
+                    order: tuple[str, str, str] = tuple(CAMERAS)) -> Any:
+    """The openpi Policy the server runs: our cameras (in `order`) → pi0.5's image slots, normalisation, 224×224,
+    prompt tokenised (with the discretised state by default), state / actions padded; 16 actions out. The variant
+    arguments are what `hackpipe diagnose pi05` tries, so the probe scores exactly this pipeline."""
+    from openpi import transforms
+    from openpi.models import tokenizer as _tokenizer
+    from openpi.policies import policy as _policy
+
+    class FR3Inputs(transforms.DataTransformFn):
+        def __call__(self, data: dict[str, Any]) -> dict[str, Any]:
+            img = {slot: np.asarray(data[k], np.uint8) for k, slot in zip(order, PI05_SLOTS)}
+            out = {"state": np.asarray(data["observation.state"], np.float32), "image": img,
+                   "image_mask": {slot: np.True_ for slot in img}}
+            if "prompt" in data:
+                out["prompt"] = data["prompt"]
+            return out
+
+    class FR3Outputs(transforms.DataTransformFn):
+        def __call__(self, data: dict[str, Any]) -> dict[str, Any]:
+            return {"actions": np.asarray(data["actions"][:, :ACTION_DIM])}
+
+    ds = cfg.discrete_state_input if discrete_state is None else discrete_state
+    return _policy.Policy(model, transforms=[
+        FR3Inputs(), transforms.Normalize(norm, use_quantiles=quantile), transforms.ResizeImages(224, 224),
+        transforms.TokenizePrompt(_tokenizer.PaligemmaTokenizer(cfg.max_token_len), discrete_state_input=ds),
+        transforms.PadStatesAndActions(cfg.action_dim)],
+        output_transforms=[transforms.Unnormalize(norm, use_quantiles=quantile), FR3Outputs()])
+
+
+class OpenPiPolicy:
+    """An openpi pi0.5 checkpoint (JAX / Orbax: params/ + assets/fr3_duo/ norm stats). The organisers' openpi training
+    config is not in the checkpoint, so the policy is rebuilt from openpi's standard pieces: Pi0Config(pi05=True),
+    quantile normalisation, 224×224 images, prompt tokenised with the discretised state, state / actions padded to
+    32. Cameras: external → base_0_rgb, left wrist → left_wrist_0_rgb, right wrist → right_wrist_0_rgb. Each
+    inference predicts `horizon` actions; the first `replan` are served one per /act (the client plays them at
+    30 Hz, the rate of the data it was trained on)."""
+    fake, model, policy_type = False, None, "pi05-openpi"
+    input_features = DummyPolicy.input_features
+    output_features = DummyPolicy.output_features
+
+    def __init__(self, checkpoint: str, horizon: int = 50, replan: int = 25, policy: Any = None) -> None:
+        if not 1 <= replan <= horizon:
+            raise ValueError(f"replan must be 1…{horizon} (the horizon)")
+        self.checkpoint, self.n_action_steps, self.chunk_size = checkpoint, replan, horizon
+        self.policy = policy if policy is not None else openpi_pipeline(*openpi_load(checkpoint, horizon))
+        self.queue: list[np.ndarray] = []
+
+    def reset(self) -> None:
+        self.queue = []
+
+    def act(self, obs: dict[str, np.ndarray], task: str) -> np.ndarray:
+        if not self.queue:
+            out = self.policy.infer({**{k: obs[k] for k in ("observation.state", *CAMERAS)}, "prompt": task})
+            self.queue = list(np.asarray(out["actions"])[: self.n_action_steps])
+        return np.asarray(self.queue.pop(0), np.float32)
 
 
 class LeRobotPolicy:
@@ -250,10 +404,23 @@ def make_handler(policy: Any, info_extra: dict[str, Any], probe_source: str | No
 
 def build_policy(checkpoint: str | None = None, model: str | None = None, dummy: bool = False,
                  n_action_steps: int | None = None, grasp_extend: float = 0.0, grasp_hold: float = 0.7,
-                 policy_hz: float = 6.0, device: str = "auto", any_robot: bool = False) -> Any:
+                 policy_hz: float = 6.0, device: str = "auto", any_robot: bool = False,
+                 trajectory: str | None = None, replay: str | None = None, episode: int = 0,
+                 pi05: str | None = None, horizon: int = 50) -> Any:
+    """One policy: dummy, trajectory / replay (a recorded dataset folder + episode), pi05 (an openpi checkpoint;
+    n_action_steps = actions per inference, default 25) or a LeRobot checkpoint."""
     if dummy:
         return DummyPolicy()
-    policy: Any = LeRobotPolicy(str(checkpoint), device, n_action_steps, model)
+    if trajectory:
+        S, A = episode_arrays(trajectory, episode)
+        return TrajectoryPolicy(S, A, policy_hz, label=f"{trajectory} episode {episode}")
+    if replay:
+        return ReplayPolicy(episode_arrays(replay, episode)[1], label=f"{Path(replay).name}-episode-{episode}")
+    policy: Any
+    if pi05:
+        policy = OpenPiPolicy(pi05, horizon, n_action_steps or min(25, horizon))
+    else:
+        policy = LeRobotPolicy(str(checkpoint), device, n_action_steps, model)
     problems = contract_problems(policy)
     if problems and not any_robot:
         raise ValueError("checkpoint does not match the FR3 Duo contract: " + "; ".join(problems))
